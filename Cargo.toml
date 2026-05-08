@@ -1,0 +1,15 @@
+[package]
+name = "hollerith"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-eyre = "0.6.5"
+crossterm = "0.29.0"
+ratatui = "0.30.0"
+serde = { version = "1.0.228", features = ["derive"] }
+time = { version = "0.3.47", features = ["formatting", "macros"] }
+toml = "1.1.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
