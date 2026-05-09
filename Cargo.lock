@@ -144,6 +144,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "choros"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "time",
+ "toml",
+]
+
+[[package]]
 name = "color-eyre"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -539,19 +552,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hollerith"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "crossterm",
- "ratatui",
- "serde",
- "tempfile",
- "time",
- "toml",
-]
 
 [[package]]
 name = "id-arena"

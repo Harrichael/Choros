@@ -4,13 +4,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, NewFocus, NewWsState, Overlay};
+use crate::app::{App, NewChorosState, NewFocus, Overlay};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
     if app.single_shot {
-        if let Some(Overlay::NewWorkspace(state)) = app.overlay.as_ref() {
+        if let Some(Overlay::NewChoros(state)) = app.overlay.as_ref() {
             draw_work_screen(f, area, app, state);
             return;
         }
@@ -33,9 +33,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if let Some(overlay) = app.overlay.as_ref() {
         match overlay {
-            Overlay::NewWorkspace(state) => draw_new_workspace(f, area, app, state),
+            Overlay::NewChoros(state) => draw_new_choros(f, area, app, state),
             Overlay::ConfirmDelete { name } => draw_confirm_delete(f, area, name),
-            Overlay::Detail(ws) => draw_detail(f, area, ws),
+            Overlay::Detail(c) => draw_detail(f, area, c),
             Overlay::Working { what } => draw_working(f, area, what),
         }
     }
@@ -44,7 +44,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(
-            "workspaces ",
+            "choros ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -63,20 +63,20 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    let ws_items: Vec<ListItem> = if app.workspaces.is_empty() {
+    let choros_items: Vec<ListItem> = if app.choros_list.is_empty() {
         vec![ListItem::new(Span::styled(
-            "(no workspaces — press n to create one)",
+            "(no choros — press n to create one)",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
-        app.workspaces
+        app.choros_list
             .iter()
-            .map(|ws| {
+            .map(|c| {
                 let line = Line::from(vec![
-                    Span::raw(ws.meta.name.clone()),
+                    Span::raw(c.meta.name.clone()),
                     Span::raw("  "),
                     Span::styled(
-                        format!("[{}]", ws.meta.repos.join(", ")),
+                        format!("[{}]", c.meta.repos.join(", ")),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]);
@@ -86,11 +86,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let mut state = ListState::default();
-    if !app.workspaces.is_empty() {
-        state.select(Some(app.workspace_idx));
+    if !app.choros_list.is_empty() {
+        state.select(Some(app.choros_idx));
     }
-    let ws_list = List::new(ws_items)
-        .block(Block::default().title(" Workspaces ").borders(Borders::ALL))
+    let choros_list_widget = List::new(choros_items)
+        .block(Block::default().title(" Choros ").borders(Borders::ALL))
         .highlight_style(
             Style::default()
                 .bg(Color::Blue)
@@ -98,11 +98,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    f.render_stateful_widget(ws_list, cols[0], &mut state);
+    f.render_stateful_widget(choros_list_widget, cols[0], &mut state);
 
     let reg_items: Vec<ListItem> = if app.registry.is_empty() {
         vec![ListItem::new(Span::styled(
-            "(empty — clone repos into .ws-config/registry/)",
+            "(empty — clone repos into .choros-config/registry/)",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
@@ -141,7 +141,7 @@ fn centered_rect(parent: Rect, w: u16, h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewWsState) {
+fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewChorosState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -155,7 +155,7 @@ fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewWsState) {
 
     let header = Line::from(vec![
         Span::styled(
-            "workspaces ",
+            "choros ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -164,7 +164,7 @@ fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewWsState) {
             format!("@ {}", app.root.display()),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(" — new workspace", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — new", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(header), chunks[0]);
 
@@ -234,12 +234,12 @@ fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewWsState) {
     f.render_widget(footer_p, chunks[4]);
 }
 
-fn draw_new_workspace(f: &mut Frame, parent: Rect, app: &App, state: &NewWsState) {
+fn draw_new_choros(f: &mut Frame, parent: Rect, app: &App, state: &NewChorosState) {
     let area = centered_rect(parent, 70, 20);
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" New workspace (Tab switches focus, Esc cancels, Enter creates) ")
+        .title(" New choros (Tab switches focus, Esc cancels, Enter creates) ")
         .borders(Borders::ALL);
     f.render_widget(block, area);
 
@@ -323,7 +323,7 @@ fn draw_confirm_delete(f: &mut Frame, parent: Rect, name: &str) {
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("Delete workspace '{}' and all its clones?", name),
+            format!("Delete choros '{}' and all its clones?", name),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -335,25 +335,25 @@ fn draw_confirm_delete(f: &mut Frame, parent: Rect, name: &str) {
     f.render_widget(p, area);
 }
 
-fn draw_detail(f: &mut Frame, parent: Rect, ws: &crate::workspace::WorkspaceInfo) {
+fn draw_detail(f: &mut Frame, parent: Rect, c: &crate::choros::ChorosInfo) {
     let area = centered_rect(parent, 70, 12);
     f.render_widget(Clear, area);
     let lines = vec![
         Line::from(vec![
             Span::styled("name: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(ws.meta.name.clone()),
+            Span::raw(c.meta.name.clone()),
         ]),
         Line::from(vec![
             Span::styled("path: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(ws.path.display().to_string()),
+            Span::raw(c.path.display().to_string()),
         ]),
         Line::from(vec![
             Span::styled("created: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(ws.meta.created_at.clone()),
+            Span::raw(c.meta.created_at.clone()),
         ]),
         Line::from(vec![
             Span::styled("repos: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(ws.meta.repos.join(", ")),
+            Span::raw(c.meta.repos.join(", ")),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -363,7 +363,7 @@ fn draw_detail(f: &mut Frame, parent: Rect, ws: &crate::workspace::WorkspaceInfo
     ];
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default().title(" Workspace ").borders(Borders::ALL));
+        .block(Block::default().title(" Choros ").borders(Borders::ALL));
     f.render_widget(p, area);
 }
 

@@ -1,9 +1,9 @@
 mod app;
+mod choros;
 mod cli;
 mod git;
 mod registry;
 mod ui;
-mod workspace;
 
 use color_eyre::Result;
 

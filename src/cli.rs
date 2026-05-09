@@ -10,32 +10,32 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::{self, NewFocus};
+use crate::choros::{self, ProgressSink};
 use crate::registry;
-use crate::workspace::{self, ProgressSink};
 
-const SHELL_INIT: &str = r#"# wspace shell integration — works in bash and zsh
-wspace() {
+const SHELL_INIT: &str = r#"# choros shell integration — works in bash and zsh
+choros() {
   if [ "$1" = "work" ]; then
     local target
-    target="$(command wspace "$@")" || return $?
+    target="$(command choros "$@")" || return $?
     [ -n "$target" ] && cd "$target"
   else
-    command wspace "$@"
+    command choros "$@"
   fi
 }
 "#;
 
 const USAGE: &str = "\
-wspace — multi-repo workspace manager
+choros — multi-repo work-environment manager
 
 USAGE:
-    wspace                          launch the full TUI in the current directory
-    wspace work                     fast-create: name + repo multi-select, exits on create
-    wspace work NAME                fast-create with name pre-filled
-    wspace work NAME REPO [REPO…]   non-interactive create
-    wspace init                     create .ws-config/ and .ws-config/registry/ in the current directory
-    wspace shell-init               emit shell-integration function for `eval \"$(wspace shell-init)\"`
-    wspace -h | --help              show this message
+    choros                          launch the full TUI in the current directory
+    choros work                     fast-create: name + repo multi-select, exits on create
+    choros work NAME                fast-create with name pre-filled
+    choros work NAME REPO [REPO…]   non-interactive create
+    choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
+    choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
+    choros -h | --help              show this message
 ";
 
 pub fn print_usage() {
@@ -91,12 +91,12 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
 }
 
 fn run_work_noninteractive(root: PathBuf, name: String, repos: Vec<String>) -> Result<()> {
-    workspace::validate_name(&root, &name)?;
+    choros::validate_name(&root, &name)?;
     for r in &repos {
         registry::ensure_repo_exists(&root, r)?;
     }
     let progress = StderrProgress;
-    let info = workspace::create(&root, &name, &repos, &progress)?;
+    let info = choros::create(&root, &name, &repos, &progress)?;
     println!("{}", info.path.display());
     Ok(())
 }

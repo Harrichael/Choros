@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{eyre, Result};
 
-const REGISTRY_REL: &str = ".ws-config/registry";
+const REGISTRY_REL: &str = ".choros-config/registry";
 
 pub fn registry_dir(root: &Path) -> PathBuf {
     root.join(REGISTRY_REL)

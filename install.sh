@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-BIN_NAME="wspace"
+BIN_NAME="choros"
 
 command -v cargo >/dev/null 2>&1 || {
   echo "error: cargo not found. install Rust: https://rustup.rs" >&2
@@ -50,13 +50,13 @@ case ":$PATH:" in
     ;;
 esac
 
-# Shell-integration nudge: enables `wspace work` to cd into the new workspace.
+# Shell-integration nudge: enables `choros work` to cd into the new choros.
 already_sourced=0
 for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
-  [[ -f "$rc" ]] && grep -q 'wspace shell-init' "$rc" && already_sourced=1
+  [[ -f "$rc" ]] && grep -q 'choros shell-init' "$rc" && already_sourced=1
 done
 if [[ "$already_sourced" -eq 0 ]]; then
   echo
-  echo "tip: enable \`wspace work\` cd-into behavior — add to your shell rc:"
-  echo "    eval \"\$(wspace shell-init)\""
+  echo "tip: enable \`choros work\` cd-into behavior — add to your shell rc:"
+  echo "    eval \"\$(choros shell-init)\""
 fi

@@ -15,37 +15,37 @@ impl ProgressSink for () {
     fn status(&self, _: String) {}
 }
 
-pub const META_FILE: &str = ".ws-meta.toml";
+pub const META_FILE: &str = ".choros-meta.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceMeta {
+pub struct ChorosMeta {
     pub name: String,
     pub created_at: String,
     pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct WorkspaceInfo {
+pub struct ChorosInfo {
     pub path: PathBuf,
-    pub meta: WorkspaceMeta,
+    pub meta: ChorosMeta,
 }
 
-pub fn meta_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(META_FILE)
+pub fn meta_path(choros_dir: &Path) -> PathBuf {
+    choros_dir.join(META_FILE)
 }
 
-pub fn read_meta(workspace_dir: &Path) -> Result<WorkspaceMeta> {
-    let body = std::fs::read_to_string(meta_path(workspace_dir))?;
+pub fn read_meta(choros_dir: &Path) -> Result<ChorosMeta> {
+    let body = std::fs::read_to_string(meta_path(choros_dir))?;
     Ok(toml::from_str(&body)?)
 }
 
-pub fn write_meta(workspace_dir: &Path, meta: &WorkspaceMeta) -> Result<()> {
+pub fn write_meta(choros_dir: &Path, meta: &ChorosMeta) -> Result<()> {
     let body = toml::to_string_pretty(meta)?;
-    std::fs::write(meta_path(workspace_dir), body)?;
+    std::fs::write(meta_path(choros_dir), body)?;
     Ok(())
 }
 
-pub fn scan(root: &Path) -> Result<Vec<WorkspaceInfo>> {
+pub fn scan(root: &Path) -> Result<Vec<ChorosInfo>> {
     let mut out = Vec::new();
     if !root.exists() {
         return Ok(out);
@@ -69,7 +69,7 @@ pub fn scan(root: &Path) -> Result<Vec<WorkspaceInfo>> {
             continue;
         }
         match read_meta(&path) {
-            Ok(meta) => out.push(WorkspaceInfo { path, meta }),
+            Ok(meta) => out.push(ChorosInfo { path, meta }),
             Err(_) => continue,
         }
     }
@@ -99,7 +99,7 @@ pub fn create<P: ProgressSink>(
     name: &str,
     repos: &[String],
     progress: &P,
-) -> Result<WorkspaceInfo> {
+) -> Result<ChorosInfo> {
     validate_name(root, name)?;
     let target = root.join(name);
     progress.status(format!("mkdir {}", target.display()));
@@ -119,27 +119,27 @@ pub fn create<P: ProgressSink>(
     let now = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".into());
-    let meta = WorkspaceMeta {
+    let meta = ChorosMeta {
         name: name.to_string(),
         created_at: now,
         repos: repos.to_vec(),
     };
     write_meta(&target, &meta)?;
-    Ok(WorkspaceInfo {
+    Ok(ChorosInfo {
         path: target,
         meta,
     })
 }
 
-pub fn delete(workspace: &WorkspaceInfo) -> Result<()> {
-    if !workspace.path.join(META_FILE).exists() {
+pub fn delete(choros: &ChorosInfo) -> Result<()> {
+    if !choros.path.join(META_FILE).exists() {
         return Err(eyre!(
-            "refusing to delete: {:?} is not a workspace (no {})",
-            workspace.path,
+            "refusing to delete: {:?} is not a choros (no {})",
+            choros.path,
             META_FILE
         ));
     }
-    std::fs::remove_dir_all(&workspace.path)?;
+    std::fs::remove_dir_all(&choros.path)?;
     Ok(())
 }
 
@@ -156,7 +156,7 @@ mod tests {
         let tmp = tempdir();
         let dir = tmp.path().join("PROJ-1");
         std::fs::create_dir_all(&dir).unwrap();
-        let meta = WorkspaceMeta {
+        let meta = ChorosMeta {
             name: "PROJ-1".into(),
             created_at: "2026-05-08T12:00:00Z".into(),
             repos: vec!["a".into(), "b".into()],
@@ -168,21 +168,21 @@ mod tests {
     }
 
     #[test]
-    fn scan_finds_workspaces() {
+    fn scan_finds_choros() {
         let tmp = tempdir();
         let dir = tmp.path().join("PROJ-1");
         std::fs::create_dir_all(&dir).unwrap();
         write_meta(
             &dir,
-            &WorkspaceMeta {
+            &ChorosMeta {
                 name: "PROJ-1".into(),
                 created_at: "2026-05-08T12:00:00Z".into(),
                 repos: vec!["a".into()],
             },
         )
         .unwrap();
-        std::fs::create_dir_all(tmp.path().join("not-a-workspace")).unwrap();
-        std::fs::create_dir_all(tmp.path().join(".ws-config")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("not-a-choros")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".choros-config")).unwrap();
 
         let found = scan(tmp.path()).unwrap();
         assert_eq!(found.len(), 1);
@@ -215,18 +215,16 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_create_workspace() {
+    fn end_to_end_create_choros() {
         let tmp = tempdir();
         let root = tmp.path();
 
-        // Two "github" sources living on the local filesystem.
         let src_a = root.join("origins/alpha.git-src");
         let src_b = root.join("origins/beta.git-src");
         make_source_repo(&src_a);
         make_source_repo(&src_b);
 
-        // Populate the registry by cloning the sources.
-        let registry = root.join(".ws-config/registry");
+        let registry = root.join(".choros-config/registry");
         std::fs::create_dir_all(&registry).unwrap();
         git(&[
             "clone",
@@ -241,7 +239,6 @@ mod tests {
             registry.join("beta").to_str().unwrap(),
         ]);
 
-        // Create a workspace.
         let info = create(
             root,
             "PROJ-1",
@@ -253,19 +250,16 @@ mod tests {
         assert_eq!(info.meta.name, "PROJ-1");
         assert!(root.join("PROJ-1/alpha/.git").exists());
         assert!(root.join("PROJ-1/beta/.git").exists());
-        assert!(root.join("PROJ-1/.ws-meta.toml").exists());
+        assert!(root.join("PROJ-1/.choros-meta.toml").exists());
         assert!(root.join("PROJ-1/alpha/hello.txt").exists());
 
-        // Origin should point at the source URL, not the registry copy.
         let origin = crate::git::remote_get_url(&root.join("PROJ-1/alpha"), "origin").unwrap();
         assert_eq!(origin, src_a.to_str().unwrap());
 
-        // Scan finds the workspace.
         let scanned = scan(root).unwrap();
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].meta.name, "PROJ-1");
 
-        // Delete works and removes everything.
         delete(&info).unwrap();
         assert!(!root.join("PROJ-1").exists());
         assert!(scan(root).unwrap().is_empty());

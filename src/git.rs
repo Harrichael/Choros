@@ -129,7 +129,7 @@ mod tests {
             .status()
             .unwrap();
 
-        // Now perform the workspace clone.
+        // Now perform the choros clone.
         let dest = tmp.path().join("dest");
         clone_with_reference(&reg, src.to_str().unwrap(), &dest).unwrap();
         assert!(dest.join(".git").exists());

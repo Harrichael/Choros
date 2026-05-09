@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-target="$INSTALL_DIR/wspace"
+target="$INSTALL_DIR/choros"
 
 if [[ -f "$target" ]]; then
   rm -f "$target"
