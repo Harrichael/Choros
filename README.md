@@ -56,6 +56,8 @@ choros                          # full TUI (manage existing + create new)
 choros work                     # fast-create: just name + repos, then exit
 choros work PROJ-1              # name pre-filled, jumps to repo selection
 choros work PROJ-1 api web      # fully non-interactive (no TUI)
+choros archive                  # archive the workspace your shell is in
+choros archive PROJ-1           # archive PROJ-1 from the project root
 ```
 
 `choros work` is the quick path for "I want a fresh choros right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new choros on success.
@@ -91,8 +93,21 @@ For each selected repo `R`:
 1. reads `git -C .choros-config/registry/R remote get-url origin`
 2. best-effort `git fetch` in the registry copy
 3. `git clone --reference-if-able .choros-config/registry/R <url> <choros>/R`
+4. `git -C <choros>/R checkout -b <choros-name>` so each clone starts on a workspace-named branch
 
-Then writes `<choros>/.choros-meta.toml`.
+Then writes `<choros>/.choros-meta.toml` and drops a `land-the-plane` skill at `<choros>/.claude/skills/land-the-plane/SKILL.md`.
+
+## Land the plane
+
+Each new workspace ships with a Claude Code skill that runs a session-end
+protocol: commit any pending work, push every cloned repo to its origin, and
+then `choros archive` the workspace. Tell your AI assistant "land the plane"
+when you're done with the task.
+
+`choros archive` moves the workspace under `.choros-config/archive/<name>/`,
+so it disappears from the active list but is still recoverable. Pass a name
+explicitly to archive from the project root, or omit it to archive the
+workspace your current directory is inside.
 
 ## Not yet supported
 

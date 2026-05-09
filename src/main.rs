@@ -14,6 +14,7 @@ fn main() -> Result<()> {
         None => cli::run_full_tui(),
         Some("work") => cli::run_work(args.collect()),
         Some("init") => cli::run_init(),
+        Some("archive") => cli::run_archive(args.collect()),
         Some("shell-init") => {
             cli::emit_shell_init();
             Ok(())

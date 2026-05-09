@@ -16,6 +16,9 @@ impl ProgressSink for () {
 }
 
 pub const META_FILE: &str = ".choros-meta.toml";
+pub const ARCHIVE_REL: &str = ".choros-config/archive";
+
+pub const LAND_THE_PLANE_SKILL: &str = include_str!("skills/land-the-plane.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
@@ -164,10 +167,84 @@ pub fn create<P: ProgressSink>(
         repos: repos.to_vec(),
     };
     write_meta(&target, &meta)?;
+    write_skill(&target)?;
     Ok(ChorosInfo {
         path: target,
         meta,
     })
+}
+
+fn write_skill(choros_dir: &Path) -> Result<()> {
+    let skill_dir = choros_dir.join(".claude/skills/land-the-plane");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(skill_dir.join("SKILL.md"), LAND_THE_PLANE_SKILL)?;
+    Ok(())
+}
+
+pub fn archive_dir(root: &Path) -> PathBuf {
+    root.join(ARCHIVE_REL)
+}
+
+/// Resolve the (root, name) pair for an archive call.
+///
+/// - If `name` is provided, treat `cwd` as the choros root.
+/// - If `name` is `None`, walk up from `cwd` looking for a directory that
+///   contains `META_FILE`. Its basename is the workspace name; its parent is
+///   the root.
+pub fn resolve_target(cwd: &Path, name: Option<&str>) -> Result<(PathBuf, String)> {
+    if let Some(name) = name {
+        return Ok((cwd.to_path_buf(), name.to_string()));
+    }
+    let mut cur = cwd;
+    loop {
+        if cur.join(META_FILE).exists() {
+            let workspace_name = cur
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| eyre!("workspace dir has no usable name: {:?}", cur))?
+                .to_string();
+            let root = cur
+                .parent()
+                .ok_or_else(|| eyre!("workspace has no parent dir: {:?}", cur))?
+                .to_path_buf();
+            return Ok((root, workspace_name));
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => {
+                return Err(eyre!(
+                    "not inside a choros workspace (no {} found walking up from {:?}); pass a name explicitly",
+                    META_FILE,
+                    cwd
+                ));
+            }
+        }
+    }
+}
+
+/// Move `<root>/<name>/` into `<root>/.choros-config/archive/<name>/`.
+/// Returns the destination path.
+pub fn archive(root: &Path, name: &str) -> Result<PathBuf> {
+    let src = root.join(name);
+    if !src.join(META_FILE).exists() {
+        return Err(eyre!(
+            "refusing to archive: {:?} is not a choros (no {})",
+            src,
+            META_FILE
+        ));
+    }
+    let archive_root = archive_dir(root);
+    std::fs::create_dir_all(&archive_root)?;
+    let dst = archive_root.join(name);
+    if dst.exists() {
+        return Err(eyre!(
+            "archive already contains '{}': {:?}",
+            name,
+            dst
+        ));
+    }
+    std::fs::rename(&src, &dst)?;
+    Ok(dst)
 }
 
 pub fn delete(choros: &ChorosInfo) -> Result<()> {
@@ -346,6 +423,118 @@ mod tests {
                 "expected {good:?} to be accepted"
             );
         }
+    }
+
+    fn make_choros(root: &Path, name: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_meta(
+            &dir,
+            &ChorosMeta {
+                name: name.into(),
+                created_at: "2026-05-09T00:00:00Z".into(),
+                repos: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn archive_moves_to_archive_dir() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        make_choros(root, "PROJ-1");
+
+        let dst = archive(root, "PROJ-1").unwrap();
+        assert!(!root.join("PROJ-1").exists());
+        assert_eq!(dst, root.join(".choros-config/archive/PROJ-1"));
+        assert!(dst.join(META_FILE).exists());
+        assert!(scan(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn archive_rejects_non_choros() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("just-a-dir")).unwrap();
+        assert!(archive(root, "just-a-dir").is_err());
+        assert!(archive(root, "does-not-exist").is_err());
+    }
+
+    #[test]
+    fn archive_rejects_collision() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        make_choros(root, "PROJ-1");
+        std::fs::create_dir_all(root.join(".choros-config/archive/PROJ-1")).unwrap();
+
+        let err = archive(root, "PROJ-1").unwrap_err();
+        assert!(err.to_string().contains("archive already contains"));
+        // Source must not have been moved.
+        assert!(root.join("PROJ-1").exists());
+    }
+
+    #[test]
+    fn resolve_target_walks_up_from_cwd() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        make_choros(root, "PROJ-7");
+        let nested = root.join("PROJ-7/some/nested/path");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let (resolved_root, name) = resolve_target(&nested, None).unwrap();
+        assert_eq!(name, "PROJ-7");
+        // Compare canonical paths — tempdirs on macOS may include /private prefix.
+        assert_eq!(
+            resolved_root.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_target_uses_explicit_name() {
+        let tmp = tempdir();
+        let (resolved_root, name) =
+            resolve_target(tmp.path(), Some("PROJ-9")).unwrap();
+        assert_eq!(name, "PROJ-9");
+        assert_eq!(resolved_root, tmp.path());
+    }
+
+    #[test]
+    fn resolve_target_errors_outside_workspace() {
+        let tmp = tempdir();
+        // No .choros-meta.toml anywhere up the chain.
+        let err = resolve_target(tmp.path(), None).unwrap_err();
+        assert!(err.to_string().contains("not inside a choros workspace"));
+    }
+
+    #[test]
+    fn create_drops_land_the_plane_skill() {
+        let tmp = tempdir();
+        let root = tmp.path();
+
+        let src = root.join("origins/alpha.git-src");
+        make_source_repo(&src);
+
+        let registry = root.join(".choros-config/registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        git(&[
+            "clone",
+            "--quiet",
+            src.to_str().unwrap(),
+            registry.join("alpha").to_str().unwrap(),
+        ]);
+
+        create(root, "PROJ-LAND", &["alpha".to_string()], &()).unwrap();
+
+        let skill = root.join("PROJ-LAND/.claude/skills/land-the-plane/SKILL.md");
+        assert!(skill.exists(), "expected skill at {:?}", skill);
+        let body = std::fs::read_to_string(&skill).unwrap();
+        assert!(
+            body.starts_with("---\nname: land-the-plane"),
+            "skill content unexpected: {:?}",
+            &body[..body.len().min(80)]
+        );
     }
 
     #[test]

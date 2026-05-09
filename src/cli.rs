@@ -33,6 +33,8 @@ USAGE:
     choros work                     fast-create: name + repo multi-select, exits on create
     choros work NAME                fast-create with name pre-filled
     choros work NAME REPO [REPO…]   non-interactive create
+    choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
+                                    NAME defaults to the workspace containing the current directory
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -50,6 +52,20 @@ pub fn run_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let dir = registry::init_dirs(&cwd)?;
     eprintln!("initialized {}", dir.display());
+    Ok(())
+}
+
+pub fn run_archive(args: Vec<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let name_arg = args.into_iter().next();
+    let (root, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
+    let dst = choros::archive(&root, &name)?;
+    if cwd.starts_with(root.join(&name)) {
+        eprintln!(
+            "warning: archived workspace contained your current directory; cd somewhere else"
+        );
+    }
+    println!("{}", dst.display());
     Ok(())
 }
 
