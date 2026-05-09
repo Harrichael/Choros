@@ -42,6 +42,14 @@ pub fn clone_with_reference(reference: &Path, url: &str, dest: &Path) -> Result<
     Ok(())
 }
 
+pub fn checkout_new_branch(repo: &Path, branch: &str) -> Result<()> {
+    run(Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["checkout", "-b", branch]))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

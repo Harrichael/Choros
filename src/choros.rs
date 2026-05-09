@@ -78,18 +78,56 @@ pub fn scan(root: &Path) -> Result<Vec<ChorosInfo>> {
 }
 
 pub fn validate_name(root: &Path, name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(eyre!("name cannot be empty"));
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err(eyre!("name cannot contain slashes"));
-    }
-    if name.starts_with('.') {
-        return Err(eyre!("name cannot start with '.'"));
-    }
+    validate_branch_name(name)?;
     let target = root.join(name);
     if target.exists() {
         return Err(eyre!("'{}' already exists", name));
+    }
+    Ok(())
+}
+
+/// Validate that `name` is usable as both a directory name and a git branch name.
+///
+/// Rules follow `git check-ref-format` for a single-component branch name, so the
+/// workspace name can be passed directly to `git checkout -b <name>` in every clone.
+fn validate_branch_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(eyre!("name cannot be empty"));
+    }
+    if name == "@" {
+        return Err(eyre!("name cannot be '@'"));
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return Err(eyre!("name cannot start with '.' or '-'"));
+    }
+    if name.ends_with('.') || name.ends_with(".lock") {
+        return Err(eyre!("name cannot end with '.' or '.lock'"));
+    }
+    // Slashes/backslashes are rejected outright: choros names also map to a
+    // single directory under the project root, so we don't allow nested forms.
+    if name.contains('/') || name.contains('\\') {
+        return Err(eyre!("name cannot contain '/' or '\\\\'"));
+    }
+    if name.contains("..") || name.contains("@{") {
+        return Err(eyre!("name cannot contain '..' or '@{{'"));
+    }
+    for c in name.chars() {
+        let bad = c.is_control()
+            || c == ' '
+            || c == '~'
+            || c == '^'
+            || c == ':'
+            || c == '?'
+            || c == '*'
+            || c == '['
+            || c == '\\'
+            || c == '\x7f';
+        if bad {
+            return Err(eyre!(
+                "name cannot contain spaces or any of: ~ ^ : ? * [ \\ (got {:?})",
+                c
+            ));
+        }
     }
     Ok(())
 }
@@ -114,6 +152,7 @@ pub fn create<P: ProgressSink>(
         }
         let dest = target.join(repo);
         git::clone_with_reference(&reg_path, &url, &dest)?;
+        git::checkout_new_branch(&dest, name)?;
     }
 
     let now = OffsetDateTime::now_utc()
@@ -268,11 +307,74 @@ mod tests {
     #[test]
     fn validate_rejects_bad_names() {
         let tmp = tempdir();
+        // Original cases.
         assert!(validate_name(tmp.path(), "").is_err());
         assert!(validate_name(tmp.path(), "a/b").is_err());
         assert!(validate_name(tmp.path(), ".hidden").is_err());
         std::fs::create_dir(tmp.path().join("exists")).unwrap();
         assert!(validate_name(tmp.path(), "exists").is_err());
         assert!(validate_name(tmp.path(), "PROJ-1").is_ok());
+
+        // Branch-name rules: must also be a legal git branch.
+        for bad in [
+            "has space",
+            "tilde~name",
+            "caret^name",
+            "colon:name",
+            "ques?",
+            "star*",
+            "bracket[",
+            "back\\slash",
+            "ends.",
+            "ends.lock",
+            "double..dot",
+            "ref@{0}",
+            "@",
+            "-leading",
+            "ctrl\u{0001}char",
+        ] {
+            assert!(
+                validate_name(tmp.path(), bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+
+        // Reasonable names still pass.
+        for good in ["PROJ-1234", "feature_x", "fix.thing", "v1.2.3"] {
+            assert!(
+                validate_name(tmp.path(), good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn create_checks_out_branch_named_after_choros() {
+        let tmp = tempdir();
+        let root = tmp.path();
+
+        let src = root.join("origins/alpha.git-src");
+        make_source_repo(&src);
+
+        let registry = root.join(".choros-config/registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        git(&[
+            "clone",
+            "--quiet",
+            src.to_str().unwrap(),
+            registry.join("alpha").to_str().unwrap(),
+        ]);
+
+        create(root, "PROJ-42", &["alpha".to_string()], &()).unwrap();
+
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.join("PROJ-42/alpha"))
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(branch, "PROJ-42");
     }
 }
