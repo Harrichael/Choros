@@ -18,7 +18,7 @@ impl ProgressSink for () {
 pub const META_FILE: &str = ".choros-meta.toml";
 pub const ARCHIVE_REL: &str = ".choros-config/archive";
 
-pub const LAND_THE_PLANE_SKILL: &str = include_str!("skills/land-the-plane.md");
+pub const CHOROS_ARCHIVE_SKILL: &str = include_str!("skills/choros-archive.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
@@ -175,9 +175,9 @@ pub fn create<P: ProgressSink>(
 }
 
 fn write_skill(choros_dir: &Path) -> Result<()> {
-    let skill_dir = choros_dir.join(".claude/skills/land-the-plane");
+    let skill_dir = choros_dir.join(".claude/skills/choros-archive");
     std::fs::create_dir_all(&skill_dir)?;
-    std::fs::write(skill_dir.join("SKILL.md"), LAND_THE_PLANE_SKILL)?;
+    std::fs::write(skill_dir.join("SKILL.md"), CHOROS_ARCHIVE_SKILL)?;
     Ok(())
 }
 
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn create_drops_land_the_plane_skill() {
+    fn create_drops_choros_archive_skill() {
         let tmp = tempdir();
         let root = tmp.path();
 
@@ -525,13 +525,13 @@ mod tests {
             registry.join("alpha").to_str().unwrap(),
         ]);
 
-        create(root, "PROJ-LAND", &["alpha".to_string()], &()).unwrap();
+        create(root, "PROJ-SK", &["alpha".to_string()], &()).unwrap();
 
-        let skill = root.join("PROJ-LAND/.claude/skills/land-the-plane/SKILL.md");
+        let skill = root.join("PROJ-SK/.claude/skills/choros-archive/SKILL.md");
         assert!(skill.exists(), "expected skill at {:?}", skill);
         let body = std::fs::read_to_string(&skill).unwrap();
         assert!(
-            body.starts_with("---\nname: land-the-plane"),
+            body.starts_with("---\nname: choros-archive"),
             "skill content unexpected: {:?}",
             &body[..body.len().min(80)]
         );

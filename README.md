@@ -95,19 +95,19 @@ For each selected repo `R`:
 3. `git clone --reference-if-able .choros-config/registry/R <url> <choros>/R`
 4. `git -C <choros>/R checkout -b <choros-name>` so each clone starts on a workspace-named branch
 
-Then writes `<choros>/.choros-meta.toml` and drops a `land-the-plane` skill at `<choros>/.claude/skills/land-the-plane/SKILL.md`.
+Then writes `<choros>/.choros-meta.toml` and drops a `choros-archive` skill at `<choros>/.claude/skills/choros-archive/SKILL.md`.
 
-## Land the plane
+## Archiving a workspace
 
-Each new workspace ships with a Claude Code skill that runs a session-end
-protocol: commit any pending work, push every cloned repo to its origin, and
-then `choros archive` the workspace. Tell your AI assistant "land the plane"
-when you're done with the task.
-
-`choros archive` moves the workspace under `.choros-config/archive/<name>/`,
-so it disappears from the active list but is still recoverable. Pass a name
+`choros archive` moves a workspace under `.choros-config/archive/<name>/` so
+it disappears from the active list but is still recoverable. Pass a name
 explicitly to archive from the project root, or omit it to archive the
 workspace your current directory is inside.
+
+Each new workspace also ships with a Claude Code skill at
+`.claude/skills/choros-archive/SKILL.md`. From inside the workspace, run
+`/choros-archive` and the AI will commit any pending work, push every cloned
+repo to its origin, then run `choros archive` to retire the workspace.
 
 ## Not yet supported
 

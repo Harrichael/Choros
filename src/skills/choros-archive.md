@@ -1,9 +1,9 @@
 ---
-name: land-the-plane
-description: Session-end protocol for a choros workspace — commit, push every cloned repo, then archive the workspace. Use when the user says "land the plane" or otherwise signals the task is done.
+name: choros-archive
+description: Wrap up a choros workspace — commit any pending work, push every cloned repo to its origin, then run `choros archive` to retire the workspace. Use when the user invokes `/choros-archive` or otherwise signals the task in this workspace is done.
 ---
 
-# Land the plane
+# Choros archive
 
 You are working inside a choros workspace. The workspace directory contains
 one or more cloned repositories, each already on a branch named after this
