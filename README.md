@@ -34,11 +34,42 @@ git clone git@github.com:your-org/service-web.git .ws-config/registry/service-we
 
 The TUI scans `.ws-config/registry/` on launch and lets you pick repos from there.
 
-## Usage
+## Install
 
 ```bash
-cargo run --release
+./install.sh                                       # ~/.local/bin/wspace
+INSTALL_DIR=/usr/local/bin sudo -E ./install.sh    # system-wide
 ```
+
+Or with cargo directly:
+
+```bash
+cargo install --path .
+```
+
+## Usage
+
+Run from inside the directory you want workspaces to live in.
+
+```bash
+wspace                          # full TUI (manage existing + create new)
+wspace work                     # fast-create: just name + repos, then exit
+wspace work PROJ-1              # name pre-filled, jumps to repo selection
+wspace work PROJ-1 api web      # fully non-interactive (no TUI)
+```
+
+`wspace work` is the quick path for "I want a fresh workspace right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new workspace on success.
+
+### Shell integration
+
+`wspace` is an external binary, so it cannot change your shell's `cwd` on its own. Add this one line to your shell rc to enable cd-on-create:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+eval "$(wspace shell-init)"
+```
+
+After that, `wspace work …` is silent on success and your shell ends up in the new workspace dir.
 
 Keys (main screen):
 

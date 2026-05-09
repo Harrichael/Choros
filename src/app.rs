@@ -21,6 +21,8 @@ pub struct App {
     pub status: String,
     pub work_rx: Option<Receiver<WorkMsg>>,
     pub should_quit: bool,
+    pub single_shot: bool,
+    pub created_path: Option<PathBuf>,
 }
 
 pub enum Overlay {
@@ -60,7 +62,24 @@ impl App {
             status: String::new(),
             work_rx: None,
             should_quit: false,
+            single_shot: false,
+            created_path: None,
         }
+    }
+
+    pub fn new_work(root: PathBuf, prefill_name: Option<String>, focus: NewFocus) -> Self {
+        let mut app = Self::new(root);
+        app.single_shot = true;
+        app.refresh();
+        let len = app.registry.len();
+        app.overlay = Some(Overlay::NewWorkspace(NewWsState {
+            name: prefill_name.unwrap_or_default(),
+            focus,
+            repo_selected: vec![false; len],
+            repo_idx: 0,
+            error: None,
+        }));
+        app
     }
 
     pub fn refresh(&mut self) {
@@ -133,7 +152,13 @@ fn drain_worker(app: &mut App) {
         app.work_rx = None;
         app.overlay = None;
         match done_result {
-            Some(Ok(name)) => app.status = format!("created workspace '{name}'"),
+            Some(Ok(name)) => {
+                app.status = format!("created workspace '{name}'");
+                if app.single_shot {
+                    app.created_path = Some(app.root.join(&name));
+                    app.should_quit = true;
+                }
+            }
             Some(Err(e)) => app.status = format!("error: {e}"),
             None => app.status = "worker disconnected".into(),
         }
@@ -213,6 +238,9 @@ fn handle_new_ws(app: &mut App, key: KeyEvent, mut state: NewWsState) {
     match key.code {
         KeyCode::Esc => {
             app.overlay = None;
+            if app.single_shot {
+                app.should_quit = true;
+            }
             return;
         }
         KeyCode::Tab => {

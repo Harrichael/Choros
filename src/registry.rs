@@ -8,6 +8,12 @@ pub fn registry_dir(root: &Path) -> PathBuf {
     root.join(REGISTRY_REL)
 }
 
+pub fn init_dirs(root: &Path) -> Result<PathBuf> {
+    let dir = registry_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 pub fn repo_path(root: &Path, name: &str) -> PathBuf {
     registry_dir(root).join(name)
 }

@@ -8,6 +8,14 @@ use crate::app::{App, NewFocus, NewWsState, Overlay};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+
+    if app.single_shot {
+        if let Some(Overlay::NewWorkspace(state)) = app.overlay.as_ref() {
+            draw_work_screen(f, area, app, state);
+            return;
+        }
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -131,6 +139,99 @@ fn centered_rect(parent: Rect, w: u16, h: u16) -> Rect {
     let x = parent.x + (parent.width.saturating_sub(w)) / 2;
     let y = parent.y + (parent.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
+}
+
+fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewWsState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Length(3), // name
+            Constraint::Min(1),    // repos
+            Constraint::Length(1), // error
+            Constraint::Length(1), // footer
+        ])
+        .split(area);
+
+    let header = Line::from(vec![
+        Span::styled(
+            "workspaces ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("@ {}", app.root.display()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(" — new workspace", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(header), chunks[0]);
+
+    let name_style = if state.focus == NewFocus::Name {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let cursor = if state.focus == NewFocus::Name {
+        "_"
+    } else {
+        ""
+    };
+    let name_block = Block::default()
+        .title(" name ")
+        .borders(Borders::ALL)
+        .border_style(name_style);
+    let name_p = Paragraph::new(format!("{}{}", state.name, cursor)).block(name_block);
+    f.render_widget(name_p, chunks[1]);
+
+    let repos_style = if state.focus == NewFocus::Repos {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let items: Vec<ListItem> = app
+        .registry
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mark = if state.repo_selected.get(i).copied().unwrap_or(false) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            ListItem::new(Line::from(vec![
+                Span::raw(mark),
+                Span::raw("  "),
+                Span::raw(r.clone()),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default();
+    if !items.is_empty() {
+        list_state.select(Some(state.repo_idx));
+    }
+    let repos = List::new(items)
+        .block(
+            Block::default()
+                .title(" repos (Space toggles) ")
+                .borders(Borders::ALL)
+                .border_style(repos_style),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(repos, chunks[2], &mut list_state);
+
+    let err = state.error.clone().unwrap_or_default();
+    let err_p = Paragraph::new(err).style(Style::default().fg(Color::Red));
+    f.render_widget(err_p, chunks[3]);
+
+    let footer = "Tab: switch focus   Space: toggle repo   Enter: create   Esc: cancel";
+    let footer_p = Paragraph::new(Line::from(Span::styled(
+        footer,
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(footer_p, chunks[4]);
 }
 
 fn draw_new_workspace(f: &mut Frame, parent: Rect, app: &App, state: &NewWsState) {

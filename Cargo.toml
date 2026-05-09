@@ -3,6 +3,10 @@ name = "hollerith"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "wspace"
+path = "src/main.rs"
+
 [dependencies]
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
