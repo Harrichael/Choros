@@ -1,7 +1,7 @@
-use std::io;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Context, Result};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -126,10 +126,17 @@ impl ProgressSink for StderrProgress {
 }
 
 fn run_tui(app: &mut app::App) -> Result<()> {
+    // Write the TUI to /dev/tty rather than stdout, so the shell-init wrapper
+    // (`target="$(choros work …)"`) can capture the result path on stdout
+    // without swallowing the terminal rendering.
+    let mut tty = OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .wrap_err("opening /dev/tty for TUI rendering")?;
+
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    execute!(tty, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(tty);
     let mut terminal = Terminal::new(backend)?;
 
     let result = app::run(&mut terminal, app);
