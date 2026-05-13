@@ -48,7 +48,7 @@ pub struct NewChorosState {
 
 pub enum WorkMsg {
     Status(String),
-    Done(std::result::Result<String, String>),
+    Done(std::result::Result<ChorosInfo, String>),
 }
 
 impl App {
@@ -127,7 +127,7 @@ fn drain_worker(app: &mut App) {
         return;
     };
     let mut done = false;
-    let mut done_result: Option<std::result::Result<String, String>> = None;
+    let mut done_result: Option<std::result::Result<ChorosInfo, String>> = None;
     loop {
         match rx.try_recv() {
             Ok(WorkMsg::Status(s)) => {
@@ -152,10 +152,10 @@ fn drain_worker(app: &mut App) {
         app.work_rx = None;
         app.overlay = None;
         match done_result {
-            Some(Ok(name)) => {
-                app.status = format!("created choros '{name}'");
+            Some(Ok(info)) => {
+                app.status = format!("created choros '{}'", info.meta.name);
                 if app.single_shot {
-                    app.created_path = Some(app.root.join(&name));
+                    app.created_path = Some(info.cd_target());
                     app.should_quit = true;
                 }
             }
@@ -356,9 +356,6 @@ fn spawn_create(app: &mut App, name: String, repos: Vec<String>) {
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
         let result = choros::create(&root, &name, &repos, &progress);
-        let _ = tx.send(WorkMsg::Done(match result {
-            Ok(_) => Ok(name),
-            Err(e) => Err(e.to_string()),
-        }));
+        let _ = tx.send(WorkMsg::Done(result.map_err(|e| e.to_string())));
     });
 }

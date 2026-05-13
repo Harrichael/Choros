@@ -113,7 +113,7 @@ fn run_work_noninteractive(root: PathBuf, name: String, repos: Vec<String>) -> R
     }
     let progress = StderrProgress;
     let info = choros::create(&root, &name, &repos, &progress)?;
-    println!("{}", info.path.display());
+    println!("{}", info.cd_target().display());
     Ok(())
 }
 

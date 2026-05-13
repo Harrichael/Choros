@@ -33,6 +33,17 @@ pub struct ChorosInfo {
     pub meta: ChorosMeta,
 }
 
+impl ChorosInfo {
+    /// Directory the `work` flow should cd into: the single repo if there's
+    /// exactly one, otherwise the workspace root.
+    pub fn cd_target(&self) -> PathBuf {
+        match self.meta.repos.as_slice() {
+            [only] => self.path.join(only),
+            _ => self.path.clone(),
+        }
+    }
+}
+
 pub fn meta_path(choros_dir: &Path) -> PathBuf {
     choros_dir.join(META_FILE)
 }
