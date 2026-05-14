@@ -9,11 +9,17 @@ use color_eyre::eyre::Result;
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::choros;
+
 pub struct Session {
     pub agent: &'static str,
     pub id: String,
     pub modified: SystemTime,
     pub preview: String,
+    /// Path the session was invoked from, relative to `base` (the workspace
+    /// root if cwd is inside one, else cwd itself). `"."` for sessions
+    /// invoked at `base` itself.
+    pub path: String,
 }
 
 pub fn run(cwd: &Path) -> Result<()> {
@@ -24,17 +30,23 @@ pub fn run(cwd: &Path) -> Result<()> {
             return Ok(());
         }
     };
+    // Prefer the choros workspace root as the base so the PATH column is
+    // workspace-relative. Fall back to cwd if we're not inside a workspace.
+    let base = match choros::resolve_target(cwd, None) {
+        Ok((root, name)) => root.join(name),
+        Err(_) => cwd.to_path_buf(),
+    };
     let mut stdout = std::io::stdout().lock();
-    run_inner(&home, cwd, &mut stdout)
+    run_inner(&home, &base, &mut stdout)
 }
 
-fn run_inner(home: &Path, cwd: &Path, out: &mut dyn Write) -> Result<()> {
+fn run_inner(home: &Path, base: &Path, out: &mut dyn Write) -> Result<()> {
     let mut sessions = Vec::new();
-    sessions.extend(claude_sessions(home, cwd)?);
-    sessions.extend(cursor_sessions(home, cwd)?);
+    sessions.extend(claude_sessions(home, base)?);
+    sessions.extend(cursor_sessions(home, base)?);
     sessions.sort_by_key(|s| Reverse(s.modified));
 
-    writeln!(out, "sessions under {}:", cwd.display())?;
+    writeln!(out, "sessions under {}:", base.display())?;
     writeln!(out)?;
     if sessions.is_empty() {
         writeln!(out, "  (none found)")?;
@@ -42,16 +54,17 @@ fn run_inner(home: &Path, cwd: &Path, out: &mut dyn Write) -> Result<()> {
     }
     writeln!(
         out,
-        "{:<6}  {:<16}  {:<36}  {}",
-        "AGENT", "MODIFIED (UTC)", "ID", "PREVIEW"
+        "{:<6}  {:<16}  {:<36}  {:<20}  {}",
+        "AGENT", "MODIFIED (UTC)", "ID", "PATH", "PREVIEW"
     )?;
     for s in &sessions {
         writeln!(
             out,
-            "{:<6}  {:<16}  {:<36}  {}",
+            "{:<6}  {:<16}  {:<36}  {:<20}  {}",
             s.agent,
             format_time(s.modified),
             s.id,
+            truncate(&s.path, 20),
             truncate(&s.preview, 80),
         )?;
     }
@@ -81,11 +94,11 @@ fn matches_cwd(dir_name: &str, encoded_cwd: &str) -> bool {
     }
 }
 
-fn claude_sessions(home: &Path, cwd: &Path) -> Result<Vec<Session>> {
-    let base = home.join(".claude/projects");
-    let encoded = encode_cwd(cwd);
+fn claude_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
+    let session_base = home.join(".claude/projects");
+    let encoded_base = encode_cwd(base);
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&base) else {
+    let Ok(entries) = fs::read_dir(&session_base) else {
         return Ok(out);
     };
     for entry in entries.flatten() {
@@ -97,15 +110,16 @@ fn claude_sessions(home: &Path, cwd: &Path) -> Result<Vec<Session>> {
             Some(n) => n,
             None => continue,
         };
-        if !matches_cwd(name, &encoded) {
+        if !matches_cwd(name, &encoded_base) {
             continue;
         }
-        collect_claude_dir(&path, &mut out)?;
+        let rel = relative_path(base, name, &encoded_base);
+        collect_claude_dir(&path, &rel, &mut out)?;
     }
     Ok(out)
 }
 
-fn collect_claude_dir(dir: &Path, out: &mut Vec<Session>) -> Result<()> {
+fn collect_claude_dir(dir: &Path, rel_path: &str, out: &mut Vec<Session>) -> Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         if path.extension() != Some(OsStr::new("jsonl")) {
@@ -122,6 +136,7 @@ fn collect_claude_dir(dir: &Path, out: &mut Vec<Session>) -> Result<()> {
             id,
             modified,
             preview,
+            path: rel_path.to_string(),
         });
     }
     Ok(())
@@ -159,16 +174,16 @@ fn first_user_message_claude(path: &Path) -> Option<String> {
     None
 }
 
-fn cursor_sessions(home: &Path, cwd: &Path) -> Result<Vec<Session>> {
+fn cursor_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
     // Cursor CLI stores per-project data under ~/.cursor/projects/ and chat
     // transcripts under ~/.cursor/chats/. The exact on-disk format isn't
     // publicly documented, so we treat both as candidate dirs and best-effort
     // pull out a preview from whatever JSON / JSONL we find.
-    let encoded = encode_cwd(cwd);
+    let encoded_base = encode_cwd(base);
     let mut out = Vec::new();
     for sub in ["projects", "chats"] {
-        let base = home.join(".cursor").join(sub);
-        let Ok(entries) = fs::read_dir(&base) else {
+        let session_base = home.join(".cursor").join(sub);
+        let Ok(entries) = fs::read_dir(&session_base) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -180,16 +195,17 @@ fn cursor_sessions(home: &Path, cwd: &Path) -> Result<Vec<Session>> {
                 Some(n) => n,
                 None => continue,
             };
-            if !matches_cwd(name, &encoded) {
+            if !matches_cwd(name, &encoded_base) {
                 continue;
             }
-            collect_cursor_dir(&path, &mut out)?;
+            let rel = relative_path(base, name, &encoded_base);
+            collect_cursor_dir(&path, &rel, &mut out)?;
         }
     }
     Ok(out)
 }
 
-fn collect_cursor_dir(dir: &Path, out: &mut Vec<Session>) -> Result<()> {
+fn collect_cursor_dir(dir: &Path, rel_path: &str, out: &mut Vec<Session>) -> Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -206,9 +222,69 @@ fn collect_cursor_dir(dir: &Path, out: &mut Vec<Session>) -> Result<()> {
             id,
             modified,
             preview,
+            path: rel_path.to_string(),
         });
     }
     Ok(())
+}
+
+/// Decode the encoded suffix of a session dir back into a path relative to
+/// `base`. The encoding is lossy (`/`, `_`, `.` all become `-`), so we recover
+/// the original by walking the actual filesystem under `base` and finding a
+/// path whose component-wise encoding matches the suffix. Returns the encoded
+/// suffix verbatim as a last-resort fallback when no real path matches.
+fn relative_path(base: &Path, dir_name: &str, encoded_base: &str) -> String {
+    if dir_name == encoded_base {
+        return ".".into();
+    }
+    let suffix = match dir_name.strip_prefix(encoded_base).and_then(|r| r.strip_prefix('-')) {
+        Some(s) if !s.is_empty() => s,
+        _ => return ".".into(),
+    };
+    probe_path(base, suffix).unwrap_or_else(|| suffix.to_string())
+}
+
+fn probe_path(base: &Path, encoded_remainder: &str) -> Option<String> {
+    if encoded_remainder.is_empty() {
+        return Some(String::new());
+    }
+    let mut entries: Vec<PathBuf> = fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let enc = encode_segment(name);
+        if encoded_remainder == enc {
+            return Some(name.to_string());
+        }
+        if let Some(rest) = encoded_remainder
+            .strip_prefix(&enc)
+            .and_then(|r| r.strip_prefix('-'))
+        {
+            if let Some(sub) = probe_path(&path, rest) {
+                let joined = if sub.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name}/{sub}")
+                };
+                return Some(joined);
+            }
+        }
+    }
+    None
+}
+
+fn encode_segment(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect()
 }
 
 fn first_user_message_cursor(path: &Path) -> Option<String> {
@@ -348,6 +424,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "aaa");
         assert_eq!(sessions[0].preview, "hello there");
+        assert_eq!(sessions[0].path, ".");
     }
 
     #[test]
@@ -366,6 +443,32 @@ mod tests {
         let sessions = claude_sessions(home.path(), cwd).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "bbb");
+        // /home/u/proj doesn't exist on disk so probe can't recover the real
+        // path; fall back to the encoded suffix.
+        assert_eq!(sessions[0].path, "PROJ-1");
+    }
+
+    #[test]
+    fn claude_sessions_path_decoded_via_real_workspace() {
+        let home = tempdir();
+        let workspace = tempdir();
+        // Real workspace with a subdir whose name uses `_` (encoded as `-`).
+        let repo = workspace.path().join("api_server").join("src");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let encoded = encode_cwd(&repo);
+        let sdir = home.path().join(".claude/projects").join(&encoded);
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("ccc.jsonl"),
+            br#"{"type":"user","message":{"role":"user","content":"deep"}}"#,
+        )
+        .unwrap();
+
+        let sessions = claude_sessions(home.path(), workspace.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        // probe recovers `api_server/src`, not the lossy `api-server-src`.
+        assert_eq!(sessions[0].path, "api_server/src");
     }
 
     #[test]
@@ -404,6 +507,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session-7");
         assert_eq!(sessions[0].preview, "refactor auth please");
+        assert_eq!(sessions[0].path, ".");
     }
 
     #[test]

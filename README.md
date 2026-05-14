@@ -132,12 +132,16 @@ source between `settings.json`, `settings.local.json`, and both (default).
 
 `choros agent ls` enumerates Claude Code and Cursor CLI sessions whose
 recorded cwd matches the directory you run it from (or any path beneath it).
-Each line shows agent, modified time (UTC), session ID, and a preview of the
-first user message — feed the ID into `claude --resume <id>` or
+Each line shows agent, modified time (UTC), session ID, the path (relative to
+the workspace root) the session was invoked from, and a preview of the first
+user message — feed the ID into `claude --resume <id>` or
 `cursor-agent --resume <id>` to pick up where you left off.
 
-Run it from a workspace to see that workspace's sessions, or from the choros
-root to see every session across the workspaces below.
+When run from inside a choros workspace, the scope expands to the whole
+workspace (not just cwd), and the `PATH` column is workspace-relative —
+`.` for sessions invoked at the workspace root, `<repo>` or `<repo>/<subdir>`
+for sessions invoked deeper. Outside a workspace (e.g. at the choros root)
+the scope is the current directory and `PATH` is cwd-relative.
 
 ## Build cache
 
