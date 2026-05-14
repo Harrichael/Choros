@@ -1,3 +1,4 @@
+mod agent_ls;
 mod agent_settings;
 mod agent_settings_tui;
 mod app;

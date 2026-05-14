@@ -9,6 +9,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use crate::agent_ls;
 use crate::agent_settings_tui;
 use crate::app::{self, NewFocus};
 use crate::choros::{self, ProgressSink};
@@ -40,6 +41,8 @@ USAGE:
                                     NAME defaults to the workspace containing the current directory
     choros agent save settings      open a TUI in the current workspace; diff workspace claude
                                     settings against the template and promote selected entries
+    choros agent ls                 list resumable claude / cursor sessions recorded under the
+                                    current directory (matches the cwd of `claude --resume`)
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -69,11 +72,29 @@ pub fn run_agent(args: Vec<String>) -> Result<()> {
     let tail: Vec<String> = iter.collect();
     match (verb.as_deref(), object.as_deref()) {
         (Some("save"), Some("settings")) => run_agent_save_settings(tail),
+        (Some("ls"), None) => run_agent_ls(Vec::new()),
+        (Some("ls"), Some(extra)) => {
+            let mut all = vec![extra.to_string()];
+            all.extend(tail);
+            run_agent_ls(all)
+        }
         _ => {
-            eprintln!("usage: choros agent save settings");
+            eprintln!("usage: choros agent save settings\n       choros agent ls");
             std::process::exit(2);
         }
     }
+}
+
+fn run_agent_ls(args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        eprintln!(
+            "`choros agent ls` takes no arguments, got: {}",
+            args.join(" ")
+        );
+        std::process::exit(2);
+    }
+    let cwd = std::env::current_dir()?;
+    agent_ls::run(&cwd)
 }
 
 fn run_agent_save_settings(args: Vec<String>) -> Result<()> {

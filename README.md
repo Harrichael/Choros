@@ -60,6 +60,8 @@ choros archive                  # archive the workspace your shell is in
 choros archive PROJ-1           # archive PROJ-1 from the project root
 choros agent save settings      # inside a workspace: TUI to promote claude
                                 # settings entries up to the template
+choros agent ls                 # list resumable claude / cursor sessions for
+                                # the current directory
 ```
 
 `choros work` is the quick path for "I want a fresh choros right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new choros on success.
@@ -125,6 +127,17 @@ choros agent save settings
 This opens a TUI that diffs the workspace's claude settings against the
 template and lets you check off entries to promote. `Tab` cycles the diff
 source between `settings.json`, `settings.local.json`, and both (default).
+
+## Listing resumable agent sessions
+
+`choros agent ls` enumerates Claude Code and Cursor CLI sessions whose
+recorded cwd matches the directory you run it from (or any path beneath it).
+Each line shows agent, modified time (UTC), session ID, and a preview of the
+first user message — feed the ID into `claude --resume <id>` or
+`cursor-agent --resume <id>` to pick up where you left off.
+
+Run it from a workspace to see that workspace's sessions, or from the choros
+root to see every session across the workspaces below.
 
 ## Build cache
 
