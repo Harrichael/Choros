@@ -34,6 +34,8 @@ USAGE:
     choros work                     fast-create: name + repo multi-select, exits on create
     choros work NAME                fast-create with name pre-filled
     choros work NAME REPO [REPO…]   non-interactive create
+                                    (detects Rust / JS toolchains in cloned repos and wires up
+                                    a shared build cache at .choros-config/store/)
     choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
                                     NAME defaults to the workspace containing the current directory
     choros agent save settings      open a TUI in the current workspace; diff workspace claude

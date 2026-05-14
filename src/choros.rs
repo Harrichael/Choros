@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::{git, registry};
+use crate::{cache, git, registry};
 
 pub trait ProgressSink {
     fn status(&self, msg: String);
@@ -201,6 +201,9 @@ pub fn create<P: ProgressSink>(
         git::clone_with_reference(&reg_path, &url, &dest)?;
         git::checkout_new_branch(&dest, name)?;
     }
+
+    cache::setup_workspace_caches(root, &target, repos, progress)
+        .wrap_err("setting up workspace caches")?;
 
     let now = OffsetDateTime::now_utc()
         .format(&Rfc3339)

@@ -58,6 +58,8 @@ choros work PROJ-1              # name pre-filled, jumps to repo selection
 choros work PROJ-1 api web      # fully non-interactive (no TUI)
 choros archive                  # archive the workspace your shell is in
 choros archive PROJ-1           # archive PROJ-1 from the project root
+choros agent save settings      # inside a workspace: TUI to promote claude
+                                # settings entries up to the template
 ```
 
 `choros work` is the quick path for "I want a fresh choros right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new choros on success.
@@ -95,7 +97,61 @@ For each selected repo `R`:
 3. `git clone --reference-if-able .choros-config/registry/R <url> <choros>/R`
 4. `git -C <choros>/R checkout -b <choros-name>` so each clone starts on a workspace-named branch
 
-Then writes `<choros>/.choros-meta.toml` and drops a `choros-archive` skill at `<choros>/.claude/skills/choros-archive/SKILL.md`.
+Then:
+
+1. writes `<choros>/.choros-meta.toml`
+2. drops a `choros-archive` skill at `<choros>/.claude/skills/choros-archive/SKILL.md`
+3. copies any per-agent baselines from `.choros-config/templates/` (currently
+   `.claude/settings.json`; cursor `.cursor/cli.json` is opt-in — see
+   *Templates* below)
+4. detects Rust / JS toolchains in the cloned repos and wires up a shared
+   build cache under `.choros-config/store/` — see *Build cache* below
+
+## Templates
+
+`choros init` seeds `.choros-config/templates/.claude/settings.json` with a
+minimal baseline. Edit this file once and every future workspace inherits it
+(workspace creation copies it to `<choros>/.claude/settings.json`).
+
+Claude writes interactive "always allow" grants to
+`<choros>/.claude/settings.local.json`, not the template. To promote those new
+grants up to the template so future workspaces inherit them:
+
+```bash
+cd <choros>
+choros agent save settings
+```
+
+This opens a TUI that diffs the workspace's claude settings against the
+template and lets you check off entries to promote. `Tab` cycles the diff
+source between `settings.json`, `settings.local.json`, and both (default).
+
+## Build cache
+
+To make new workspaces cheap, Choros wires up a shared, per-project build
+cache at `<root>/.choros-config/store/` on workspace create:
+
+| Toolchain | Detected by | Cache | Mechanism |
+| --- | --- | --- | --- |
+| Rust | `Cargo.toml` | `.choros-config/store/rust/sccache/` | drops `<choros>/.cargo/config.toml` with `rustc-wrapper = "sccache"` and `[env] SCCACHE_DIR = ...` |
+| JS | `pnpm-lock.yaml` / `yarn.lock` / `package-lock.json` | `.choros-config/store/js/pnpm-store/` | runs `pnpm install --store-dir=...` (with `pnpm import` first for npm/yarn lockfiles); hardlinks files from the store into `<choros>/<repo>/node_modules/` |
+
+The cache is shared across every workspace under the same Choros root, so the
+second workspace pays effectively nothing for the same deps. The cache is *not*
+shared across different Choros roots — keeps Choros state self-contained and
+makes `rm -rf .choros-config/store/` a clean reset.
+
+**Requirements**: `sccache` for the Rust path, `pnpm` for the JS path. If
+either is missing from `PATH`, Choros logs a warning and skips that toolchain
+without failing workspace creation.
+
+**Sccache server gotcha**: sccache runs as a background daemon and inherits
+the `SCCACHE_DIR` from whichever process first starts it. If you have a
+sccache server already running from another context (e.g. you ran
+`sccache --show-stats` outside a Choros workspace), it'll keep using its
+original `SCCACHE_DIR` instead of the workspace's. Fix with
+`sccache --stop-server`; the next cargo build inside a Choros workspace will
+start a fresh server with the right env.
 
 ## Archiving a workspace
 
