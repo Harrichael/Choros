@@ -50,8 +50,10 @@ pub fn emit_shell_init() {
 
 pub fn run_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let dir = registry::init_dirs(&cwd)?;
-    eprintln!("initialized {}", dir.display());
+    let registry_dir = registry::init_dirs(&cwd)?;
+    let templates_dir = choros::init_templates(&cwd)?;
+    eprintln!("initialized {}", registry_dir.display());
+    eprintln!("initialized {}", templates_dir.display());
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{eyre, Result};
+use color_eyre::eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -17,8 +17,11 @@ impl ProgressSink for () {
 
 pub const META_FILE: &str = ".choros-meta.toml";
 pub const ARCHIVE_REL: &str = ".choros-config/archive";
+pub const TEMPLATES_REL: &str = ".choros-config/templates";
 
 pub const CHOROS_ARCHIVE_SKILL: &str = include_str!("skills/choros-archive.md");
+pub const CHOROS_DEFAULT_CLAUDE_SETTINGS: &str =
+    include_str!("templates/claude-settings.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
@@ -179,6 +182,9 @@ pub fn create<P: ProgressSink>(
     };
     write_meta(&target, &meta)?;
     write_skill(&target)?;
+    progress.status("copying templates…".to_string());
+    copy_templates(&templates_dir(root), &target)
+        .wrap_err("copying .choros-config/templates into workspace")?;
     Ok(ChorosInfo {
         path: target,
         meta,
@@ -194,6 +200,49 @@ fn write_skill(choros_dir: &Path) -> Result<()> {
 
 pub fn archive_dir(root: &Path) -> PathBuf {
     root.join(ARCHIVE_REL)
+}
+
+pub fn templates_dir(root: &Path) -> PathBuf {
+    root.join(TEMPLATES_REL)
+}
+
+pub fn init_templates(root: &Path) -> Result<PathBuf> {
+    let dir = templates_dir(root);
+    let claude_dir = dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir)?;
+    let settings = claude_dir.join("settings.json");
+    if !settings.exists() {
+        std::fs::write(&settings, CHOROS_DEFAULT_CLAUDE_SETTINGS)?;
+    }
+    Ok(dir)
+}
+
+fn copy_templates(src: &Path, dest: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    copy_tree_inner(src, dest)
+}
+
+fn copy_tree_inner(src: &Path, dest: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&to)?;
+            copy_tree_inner(&from, &to)?;
+        } else {
+            if to.exists() {
+                return Err(eyre!(
+                    "template collision: {:?} already exists in workspace; refusing to overwrite",
+                    to
+                ));
+            }
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the (root, name) pair for an archive call.
@@ -576,5 +625,97 @@ mod tests {
         assert!(head.status.success());
         let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
         assert_eq!(branch, "PROJ-42");
+    }
+
+    fn stage_alpha_registry(root: &Path) {
+        let src = root.join("origins/alpha.git-src");
+        make_source_repo(&src);
+        let registry = root.join(".choros-config/registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        git(&[
+            "clone",
+            "--quiet",
+            src.to_str().unwrap(),
+            registry.join("alpha").to_str().unwrap(),
+        ]);
+    }
+
+    #[test]
+    fn create_copies_templates_into_workspace() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        stage_alpha_registry(root);
+
+        let tdir = root.join(".choros-config/templates/.claude");
+        std::fs::create_dir_all(&tdir).unwrap();
+        std::fs::write(
+            tdir.join("settings.json"),
+            br#"{"permissions":{"allow":["Bash(ls:*)"]}}"#,
+        )
+        .unwrap();
+        let nested = root.join(".choros-config/templates/.cursor/rules");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("rules.md"), b"my cursor rules").unwrap();
+
+        create(root, "PROJ-T", &["alpha".to_string()], &()).unwrap();
+
+        let settings = root.join("PROJ-T/.claude/settings.json");
+        assert!(settings.exists(), "expected settings at {:?}", settings);
+        let body = std::fs::read_to_string(&settings).unwrap();
+        assert!(body.contains("Bash(ls:*)"), "got: {body}");
+
+        let cursor = root.join("PROJ-T/.cursor/rules/rules.md");
+        assert!(cursor.exists(), "expected cursor file at {:?}", cursor);
+        assert_eq!(std::fs::read_to_string(&cursor).unwrap(), "my cursor rules");
+
+        assert!(root
+            .join("PROJ-T/.claude/skills/choros-archive/SKILL.md")
+            .exists());
+    }
+
+    #[test]
+    fn create_without_templates_is_ok() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        stage_alpha_registry(root);
+        assert!(!root.join(".choros-config/templates").exists());
+
+        let info = create(root, "PROJ-N", &["alpha".to_string()], &()).unwrap();
+        assert_eq!(info.meta.name, "PROJ-N");
+        assert!(root.join("PROJ-N/.choros-meta.toml").exists());
+    }
+
+    #[test]
+    fn create_errors_on_template_collision() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        stage_alpha_registry(root);
+
+        let tskill = root.join(".choros-config/templates/.claude/skills/choros-archive");
+        std::fs::create_dir_all(&tskill).unwrap();
+        std::fs::write(tskill.join("SKILL.md"), b"hijacked").unwrap();
+
+        let err = create(root, "PROJ-C", &["alpha".to_string()], &()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("template collision"), "got: {msg}");
+
+        let skill = root.join("PROJ-C/.claude/skills/choros-archive/SKILL.md");
+        let body = std::fs::read_to_string(&skill).unwrap();
+        assert!(
+            body.starts_with("---\nname: choros-archive"),
+            "skill content unexpected: {:?}",
+            &body[..body.len().min(80)]
+        );
+    }
+
+    #[test]
+    fn init_templates_preserves_existing_settings() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        init_templates(root).unwrap();
+        let settings = root.join(".choros-config/templates/.claude/settings.json");
+        std::fs::write(&settings, b"user-edited").unwrap();
+        init_templates(root).unwrap();
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "user-edited");
     }
 }
