@@ -9,6 +9,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use crate::agent_settings_tui;
 use crate::app::{self, NewFocus};
 use crate::choros::{self, ProgressSink};
 use crate::registry;
@@ -35,6 +36,8 @@ USAGE:
     choros work NAME REPO [REPO…]   non-interactive create
     choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
                                     NAME defaults to the workspace containing the current directory
+    choros agent save settings      open a TUI in the current workspace; diff workspace claude
+                                    settings against the template and promote selected entries
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -55,6 +58,34 @@ pub fn run_init() -> Result<()> {
     eprintln!("initialized {}", registry_dir.display());
     eprintln!("initialized {}", templates_dir.display());
     Ok(())
+}
+
+pub fn run_agent(args: Vec<String>) -> Result<()> {
+    let mut iter = args.into_iter();
+    let verb = iter.next();
+    let object = iter.next();
+    let tail: Vec<String> = iter.collect();
+    match (verb.as_deref(), object.as_deref()) {
+        (Some("save"), Some("settings")) => run_agent_save_settings(tail),
+        _ => {
+            eprintln!("usage: choros agent save settings");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        eprintln!(
+            "`choros agent save settings` takes no arguments, got: {}",
+            args.join(" ")
+        );
+        std::process::exit(2);
+    }
+    let cwd = std::env::current_dir()?;
+    let (root, name) = choros::resolve_target(&cwd, None)?;
+    let workspace = root.join(&name);
+    agent_settings_tui::run(workspace, root)
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {

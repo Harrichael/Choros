@@ -1,7 +1,10 @@
+mod agent_settings;
+mod agent_settings_tui;
 mod app;
 mod choros;
 mod cli;
 mod git;
+mod json_diff;
 mod registry;
 mod ui;
 
@@ -20,6 +23,7 @@ fn main() -> Result<()> {
             cli::run_init()
         }
         Some("archive") => cli::run_archive(rest),
+        Some("agent") => cli::run_agent(rest),
         Some("shell-init") => {
             reject_extra_args("shell-init", &rest);
             cli::emit_shell_init();

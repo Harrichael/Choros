@@ -8,6 +8,7 @@ color-eyre = "0.6.5"
 crossterm = "0.29.0"
 ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"
 time = { version = "0.3.47", features = ["formatting", "macros"] }
 toml = "1.1.2"
 

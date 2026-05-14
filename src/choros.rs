@@ -23,6 +23,36 @@ pub const CHOROS_ARCHIVE_SKILL: &str = include_str!("skills/choros-archive.md");
 pub const CHOROS_DEFAULT_CLAUDE_SETTINGS: &str =
     include_str!("templates/claude-settings.json");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Claude,
+    Cursor,
+}
+
+pub struct TemplateFile {
+    pub rel: &'static str,
+    pub default_content: Option<&'static str>,
+}
+
+impl Agent {
+    pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Cursor];
+
+    pub fn template_files(&self) -> &'static [TemplateFile] {
+        match self {
+            Agent::Claude => &[TemplateFile {
+                rel: ".claude/settings.json",
+                default_content: Some(CHOROS_DEFAULT_CLAUDE_SETTINGS),
+            }],
+            // Cursor's project-level `.cursor/cli.json` *shadows* the user's
+            // global allowlist, so we deliberately don't seed a default.
+            Agent::Cursor => &[TemplateFile {
+                rel: ".cursor/cli.json",
+                default_content: None,
+            }],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
     pub name: String,
@@ -208,38 +238,46 @@ pub fn templates_dir(root: &Path) -> PathBuf {
 
 pub fn init_templates(root: &Path) -> Result<PathBuf> {
     let dir = templates_dir(root);
-    let claude_dir = dir.join(".claude");
-    std::fs::create_dir_all(&claude_dir)?;
-    let settings = claude_dir.join("settings.json");
-    if !settings.exists() {
-        std::fs::write(&settings, CHOROS_DEFAULT_CLAUDE_SETTINGS)?;
+    std::fs::create_dir_all(&dir)?;
+    for agent in Agent::ALL {
+        for tf in agent.template_files() {
+            let Some(default) = tf.default_content else {
+                continue;
+            };
+            let path = dir.join(tf.rel);
+            if path.exists() {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, default)?;
+        }
     }
     Ok(dir)
 }
 
-fn copy_templates(src: &Path, dest: &Path) -> Result<()> {
-    if !src.exists() {
+fn copy_templates(templates_root: &Path, workspace: &Path) -> Result<()> {
+    if !templates_root.exists() {
         return Ok(());
     }
-    copy_tree_inner(src, dest)
-}
-
-fn copy_tree_inner(src: &Path, dest: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            std::fs::create_dir_all(&to)?;
-            copy_tree_inner(&from, &to)?;
-        } else {
-            if to.exists() {
+    for agent in Agent::ALL {
+        for tf in agent.template_files() {
+            let src = templates_root.join(tf.rel);
+            if !src.exists() {
+                continue;
+            }
+            let dest = workspace.join(tf.rel);
+            if dest.exists() {
                 return Err(eyre!(
                     "template collision: {:?} already exists in workspace; refusing to overwrite",
-                    to
+                    dest
                 ));
             }
-            std::fs::copy(&from, &to)?;
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dest)?;
         }
     }
     Ok(())
@@ -646,27 +684,37 @@ mod tests {
         let root = tmp.path();
         stage_alpha_registry(root);
 
-        let tdir = root.join(".choros-config/templates/.claude");
-        std::fs::create_dir_all(&tdir).unwrap();
+        let claude = root.join(".choros-config/templates/.claude");
+        std::fs::create_dir_all(&claude).unwrap();
         std::fs::write(
-            tdir.join("settings.json"),
+            claude.join("settings.json"),
             br#"{"permissions":{"allow":["Bash(ls:*)"]}}"#,
         )
         .unwrap();
-        let nested = root.join(".choros-config/templates/.cursor/rules");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("rules.md"), b"my cursor rules").unwrap();
+        let cursor = root.join(".choros-config/templates/.cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        std::fs::write(
+            cursor.join("cli.json"),
+            br#"{"permissions":{"allow":["Shell(git)"],"deny":[]}}"#,
+        )
+        .unwrap();
+        // A file that isn't a known agent template should be ignored.
+        let stray = root.join(".choros-config/templates/.cursor/rules");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("rules.md"), b"stray").unwrap();
 
         create(root, "PROJ-T", &["alpha".to_string()], &()).unwrap();
 
         let settings = root.join("PROJ-T/.claude/settings.json");
         assert!(settings.exists(), "expected settings at {:?}", settings);
-        let body = std::fs::read_to_string(&settings).unwrap();
-        assert!(body.contains("Bash(ls:*)"), "got: {body}");
+        assert!(std::fs::read_to_string(&settings).unwrap().contains("Bash(ls:*)"));
 
-        let cursor = root.join("PROJ-T/.cursor/rules/rules.md");
-        assert!(cursor.exists(), "expected cursor file at {:?}", cursor);
-        assert_eq!(std::fs::read_to_string(&cursor).unwrap(), "my cursor rules");
+        let cursor_dest = root.join("PROJ-T/.cursor/cli.json");
+        assert!(cursor_dest.exists(), "expected {:?}", cursor_dest);
+        assert!(std::fs::read_to_string(&cursor_dest).unwrap().contains("Shell(git)"));
+
+        // Stray non-agent file is not copied.
+        assert!(!root.join("PROJ-T/.cursor/rules/rules.md").exists());
 
         assert!(root
             .join("PROJ-T/.claude/skills/choros-archive/SKILL.md")
@@ -686,25 +734,28 @@ mod tests {
     }
 
     #[test]
-    fn create_errors_on_template_collision() {
+    fn copy_templates_errors_on_collision() {
         let tmp = tempdir();
         let root = tmp.path();
-        stage_alpha_registry(root);
 
-        let tskill = root.join(".choros-config/templates/.claude/skills/choros-archive");
-        std::fs::create_dir_all(&tskill).unwrap();
-        std::fs::write(tskill.join("SKILL.md"), b"hijacked").unwrap();
+        let templates = root.join("templates");
+        let claude_t = templates.join(".claude");
+        std::fs::create_dir_all(&claude_t).unwrap();
+        std::fs::write(claude_t.join("settings.json"), b"from-template").unwrap();
 
-        let err = create(root, "PROJ-C", &["alpha".to_string()], &()).unwrap_err();
+        let workspace = root.join("ws");
+        let claude_w = workspace.join(".claude");
+        std::fs::create_dir_all(&claude_w).unwrap();
+        std::fs::write(claude_w.join("settings.json"), b"from-workspace").unwrap();
+
+        let err = copy_templates(&templates, &workspace).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("template collision"), "got: {msg}");
 
-        let skill = root.join("PROJ-C/.claude/skills/choros-archive/SKILL.md");
-        let body = std::fs::read_to_string(&skill).unwrap();
-        assert!(
-            body.starts_with("---\nname: choros-archive"),
-            "skill content unexpected: {:?}",
-            &body[..body.len().min(80)]
+        // Destination unchanged.
+        assert_eq!(
+            std::fs::read_to_string(claude_w.join("settings.json")).unwrap(),
+            "from-workspace"
         );
     }
 
