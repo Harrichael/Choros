@@ -10,7 +10,7 @@ Choros is project-scoped to the directory it's launched in. Run it from the dire
 <cwd>/
 ├── .choros-config/
 │   └── registry/
-│       ├── service-api/        ← clone these yourself (MVP)
+│       ├── service-api/        ← added with `choros add`
 │       └── service-web/
 ├── PROJ-1234/                  ← a choros, created by choros
 │   ├── .choros-meta.toml
@@ -24,13 +24,17 @@ A directory is recognized as a choros iff it contains `.choros-meta.toml`.
 
 ## Setup
 
-For now you populate the registry yourself:
+Populate the registry with `choros add`, passing an SSH remote:
 
 ```bash
-mkdir -p .choros-config/registry
-git clone git@github.com:your-org/service-api.git .choros-config/registry/service-api
-git clone git@github.com:your-org/service-web.git .choros-config/registry/service-web
+choros add git@github.com:your-org/service-api.git
+choros add git@github.com:your-org/service-web.git
 ```
+
+This clones each repo into `.choros-config/registry/<name>`, deriving `<name>`
+from the URL. Only SSH remotes are supported — the registry copy is later
+used as a `--reference-if-able` source for every workspace clone, which needs
+a stable local git repo, not an HTTP(S) endpoint.
 
 The TUI scans `.choros-config/registry/` on launch and lets you pick repos from there.
 

@@ -206,7 +206,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         KeyCode::Char('n') => {
             if app.registry.is_empty() {
                 app.status =
-                    "registry is empty; clone repos into .choros-config/registry/ first".into();
+                    "registry is empty; run `choros add <ssh-url>` to add a repo".into();
             } else {
                 let len = app.registry.len();
                 app.overlay = Some(Overlay::NewChoros(NewChorosState {

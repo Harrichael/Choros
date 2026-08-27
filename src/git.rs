@@ -31,6 +31,18 @@ pub fn fetch(repo: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn clone(url: &str, dest: &Path) -> Result<()> {
+    // `--` stops git from treating a url starting with `-` as an option
+    // (CVE-2017-1000117-shaped risk, since url comes from user input).
+    run(Command::new("git").args([
+        "clone",
+        "--",
+        url,
+        dest.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
+    ]))?;
+    Ok(())
+}
+
 pub fn clone_with_reference(reference: &Path, url: &str, dest: &Path) -> Result<()> {
     run(Command::new("git").args([
         "clone",
@@ -95,6 +107,59 @@ mod tests {
         init_repo_with_remote(&repo, "git@example.com:o/r.git");
         let url = remote_get_url(&repo, "origin").unwrap();
         assert_eq!(url, "git@example.com:o/r.git");
+    }
+
+    #[test]
+    fn clone_works_against_local_source() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&src)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .status()
+            .unwrap();
+
+        let dest = tmp.path().join("dest");
+        clone(src.to_str().unwrap(), &dest).unwrap();
+        assert!(dest.join(".git").exists());
+        let origin = remote_get_url(&dest, "origin").unwrap();
+        assert_eq!(origin, src.to_str().unwrap());
+    }
+
+    #[test]
+    fn clone_treats_dash_prefixed_url_as_positional_not_an_option() {
+        // Without `--` before the url, git would parse this as an
+        // `--upload-pack` option and execute its argument as a command.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let err = clone("--upload-pack=touch /tmp/choros-clone-test-pwned", &dest)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--upload-pack=touch /tmp/choros-clone-test-pwned"),
+            "expected git to report the url as a missing repository, got: {err}"
+        );
+        assert!(!std::path::Path::new("/tmp/choros-clone-test-pwned").exists());
     }
 
     #[test]

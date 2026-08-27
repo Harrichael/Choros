@@ -39,6 +39,8 @@ USAGE:
                                     a shared build cache at .choros-config/store/)
     choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
                                     NAME defaults to the workspace containing the current directory
+    choros add <ssh-url>            clone a repo into .choros-config/registry/ (ssh URLs only);
+                                    the registry name is derived from the URL
     choros agent save settings      open a TUI in the current workspace; diff workspace claude
                                     settings against the template and promote selected entries
     choros agent ls                 list resumable claude / cursor sessions recorded under the
@@ -109,6 +111,22 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
     let (root, name) = choros::resolve_target(&cwd, None)?;
     let workspace = root.join(&name);
     agent_settings_tui::run(workspace, root)
+}
+
+pub fn run_add(args: Vec<String>) -> Result<()> {
+    let mut iter = args.into_iter();
+    let url = match (iter.next(), iter.next()) {
+        (Some(url), None) => url,
+        _ => {
+            eprintln!("usage: choros add <ssh-url>");
+            std::process::exit(2);
+        }
+    };
+    let cwd = std::env::current_dir()?;
+    let (name, path) = registry::add(&cwd, &url)?;
+    eprintln!("added {name}");
+    println!("{}", path.display());
+    Ok(())
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {
