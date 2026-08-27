@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Context, Result};
 use serde_json::Value;
 
-use crate::choros::templates_dir;
+use super::{templates_dir, CLAUDE_SETTINGS_REL};
 use crate::json_diff::merge_values;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,6 @@ impl DiffSource {
     }
 }
 
-pub const CLAUDE_SETTINGS_REL: &str = ".claude/settings.json";
 pub const CLAUDE_LOCAL_REL: &str = ".claude/settings.local.json";
 
 pub fn claude_template_path(root: &Path) -> PathBuf {

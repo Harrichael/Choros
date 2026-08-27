@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::{cache, git, registry};
+use crate::{agent, cache, git, registry};
 
 pub trait ProgressSink {
     fn status(&self, msg: String);
@@ -17,41 +17,6 @@ impl ProgressSink for () {
 
 pub const META_FILE: &str = ".choros-meta.toml";
 pub const ARCHIVE_REL: &str = ".choros-config/archive";
-pub const TEMPLATES_REL: &str = ".choros-config/templates";
-
-pub const CHOROS_ARCHIVE_SKILL: &str = include_str!("skills/choros-archive.md");
-pub const CHOROS_DEFAULT_CLAUDE_SETTINGS: &str =
-    include_str!("templates/claude-settings.json");
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Agent {
-    Claude,
-    Cursor,
-}
-
-pub struct TemplateFile {
-    pub rel: &'static str,
-    pub default_content: Option<&'static str>,
-}
-
-impl Agent {
-    pub const ALL: &'static [Agent] = &[Agent::Claude, Agent::Cursor];
-
-    pub fn template_files(&self) -> &'static [TemplateFile] {
-        match self {
-            Agent::Claude => &[TemplateFile {
-                rel: ".claude/settings.json",
-                default_content: Some(CHOROS_DEFAULT_CLAUDE_SETTINGS),
-            }],
-            // Cursor's project-level `.cursor/cli.json` *shadows* the user's
-            // global allowlist, so we deliberately don't seed a default.
-            Agent::Cursor => &[TemplateFile {
-                rel: ".cursor/cli.json",
-                default_content: None,
-            }],
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
@@ -103,22 +68,25 @@ pub fn scan(root: &Path) -> Result<Vec<ChorosInfo>> {
         if !path.is_dir() {
             continue;
         }
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with('.'))
-            .unwrap_or(true)
-        {
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if dir_name.starts_with('.') {
             continue;
         }
         let meta_file = meta_path(&path);
         if !meta_file.exists() {
             continue;
         }
-        match read_meta(&path) {
-            Ok(meta) => out.push(ChorosInfo { path, meta }),
-            Err(_) => continue,
-        }
+        // A corrupt meta file must not make the workspace invisible — that
+        // would leave it undeletable from the TUI while still holding the
+        // name. Surface it under its directory name instead.
+        let meta = read_meta(&path).unwrap_or_else(|_| ChorosMeta {
+            name: dir_name.to_string(),
+            created_at: "(unreadable meta)".into(),
+            repos: Vec::new(),
+        });
+        out.push(ChorosInfo { path, meta });
     }
     out.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
     Ok(out)
@@ -188,8 +156,26 @@ pub fn create<P: ProgressSink>(
     validate_name(root, name)?;
     let target = root.join(name);
     progress.status(format!("mkdir {}", target.display()));
-    std::fs::create_dir_all(&target)?;
+    // Non-recursive create on purpose: it fails with AlreadyExists if another
+    // process claimed the name between validate_name and here, which is what
+    // makes the cleanup below safe — we only ever remove a dir we created.
+    std::fs::create_dir(&target)?;
 
+    // Meta is written last, so a half-built workspace is invisible to `scan`
+    // (undeletable from the TUI) yet still blocks the name; remove it rather
+    // than strand it.
+    create_in(root, name, repos, progress, &target).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&target);
+    })
+}
+
+fn create_in<P: ProgressSink>(
+    root: &Path,
+    name: &str,
+    repos: &[String],
+    progress: &P,
+    target: &Path,
+) -> Result<ChorosInfo> {
     for repo in repos {
         progress.status(format!("cloning {repo}…"));
         let reg_path = registry::ensure_repo_exists(root, repo)?;
@@ -202,7 +188,7 @@ pub fn create<P: ProgressSink>(
         git::checkout_new_branch(&dest, name)?;
     }
 
-    cache::setup_workspace_caches(root, &target, repos, progress)
+    cache::setup_workspace_caches(root, target, repos, progress)
         .wrap_err("setting up workspace caches")?;
 
     let now = OffsetDateTime::now_utc()
@@ -213,77 +199,17 @@ pub fn create<P: ProgressSink>(
         created_at: now,
         repos: repos.to_vec(),
     };
-    write_meta(&target, &meta)?;
-    write_skill(&target)?;
-    progress.status("copying templates…".to_string());
-    copy_templates(&templates_dir(root), &target)
-        .wrap_err("copying .choros-config/templates into workspace")?;
+    write_meta(target, &meta)?;
+    progress.status("copying agent templates…".to_string());
+    agent::provision(root, target)?;
     Ok(ChorosInfo {
-        path: target,
+        path: target.to_path_buf(),
         meta,
     })
 }
 
-fn write_skill(choros_dir: &Path) -> Result<()> {
-    let skill_dir = choros_dir.join(".claude/skills/choros-archive");
-    std::fs::create_dir_all(&skill_dir)?;
-    std::fs::write(skill_dir.join("SKILL.md"), CHOROS_ARCHIVE_SKILL)?;
-    Ok(())
-}
-
 pub fn archive_dir(root: &Path) -> PathBuf {
     root.join(ARCHIVE_REL)
-}
-
-pub fn templates_dir(root: &Path) -> PathBuf {
-    root.join(TEMPLATES_REL)
-}
-
-pub fn init_templates(root: &Path) -> Result<PathBuf> {
-    let dir = templates_dir(root);
-    std::fs::create_dir_all(&dir)?;
-    for agent in Agent::ALL {
-        for tf in agent.template_files() {
-            let Some(default) = tf.default_content else {
-                continue;
-            };
-            let path = dir.join(tf.rel);
-            if path.exists() {
-                continue;
-            }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, default)?;
-        }
-    }
-    Ok(dir)
-}
-
-fn copy_templates(templates_root: &Path, workspace: &Path) -> Result<()> {
-    if !templates_root.exists() {
-        return Ok(());
-    }
-    for agent in Agent::ALL {
-        for tf in agent.template_files() {
-            let src = templates_root.join(tf.rel);
-            if !src.exists() {
-                continue;
-            }
-            let dest = workspace.join(tf.rel);
-            if dest.exists() {
-                return Err(eyre!(
-                    "template collision: {:?} already exists in workspace; refusing to overwrite",
-                    dest
-                ));
-            }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&src, &dest)?;
-        }
-    }
-    Ok(())
 }
 
 /// Resolve the (root, name) pair for an archive call.
@@ -356,7 +282,23 @@ pub fn delete(choros: &ChorosInfo) -> Result<()> {
             META_FILE
         ));
     }
-    std::fs::remove_dir_all(&choros.path)?;
+    // Remove the meta file last (a bare remove_dir_all unlinks in readdir
+    // order). If the process dies mid-delete — this runs on a killable worker
+    // thread — the remnant then still has its meta, so it stays visible to
+    // `scan` and re-deletable instead of invisibly blocking the name.
+    for entry in std::fs::read_dir(&choros.path)? {
+        let entry = entry?;
+        if entry.file_name() == META_FILE {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    std::fs::remove_file(choros.path.join(META_FILE))?;
+    std::fs::remove_dir(&choros.path)?;
     Ok(())
 }
 
@@ -480,6 +422,22 @@ mod tests {
         delete(&info).unwrap();
         assert!(!root.join("PROJ-1").exists());
         assert!(scan(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_surfaces_corrupt_meta_under_dir_name() {
+        let tmp = tempdir();
+        let dir = tmp.path().join("PROJ-BAD");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(META_FILE), b"not = [valid toml").unwrap();
+
+        let found = scan(tmp.path()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].meta.name, "PROJ-BAD");
+        assert!(found[0].meta.repos.is_empty());
+        // Still deletable despite the unreadable meta.
+        delete(&found[0]).unwrap();
+        assert!(!dir.exists());
     }
 
     #[test]
@@ -610,6 +568,48 @@ mod tests {
     }
 
     #[test]
+    fn failed_create_removes_partial_workspace() {
+        let tmp = tempdir();
+        let root = tmp.path();
+
+        // Two registry repos: alpha clones fine, broken's origin points at
+        // nothing, so create fails after alpha was already cloned.
+        stage_alpha_registry(root);
+        let broken_src = root.join("origins/broken.git-src");
+        make_source_repo(&broken_src);
+        let registry = root.join(".choros-config/registry");
+        git(&[
+            "clone",
+            "--quiet",
+            broken_src.to_str().unwrap(),
+            registry.join("broken").to_str().unwrap(),
+        ]);
+        git(&[
+            "-C",
+            registry.join("broken").to_str().unwrap(),
+            "remote",
+            "set-url",
+            "origin",
+            root.join("origins/does-not-exist").to_str().unwrap(),
+        ]);
+
+        let err = create(
+            root,
+            "PROJ-F",
+            &["alpha".to_string(), "broken".to_string()],
+            &(),
+        );
+        assert!(err.is_err());
+        assert!(
+            !root.join("PROJ-F").exists(),
+            "partial workspace should be cleaned up"
+        );
+        // The name is immediately reusable.
+        assert!(validate_name(root, "PROJ-F").is_ok());
+        assert!(scan(root).unwrap().is_empty());
+    }
+
+    #[test]
     fn create_drops_choros_archive_skill() {
         let tmp = tempdir();
         let root = tmp.path();
@@ -736,40 +736,4 @@ mod tests {
         assert!(root.join("PROJ-N/.choros-meta.toml").exists());
     }
 
-    #[test]
-    fn copy_templates_errors_on_collision() {
-        let tmp = tempdir();
-        let root = tmp.path();
-
-        let templates = root.join("templates");
-        let claude_t = templates.join(".claude");
-        std::fs::create_dir_all(&claude_t).unwrap();
-        std::fs::write(claude_t.join("settings.json"), b"from-template").unwrap();
-
-        let workspace = root.join("ws");
-        let claude_w = workspace.join(".claude");
-        std::fs::create_dir_all(&claude_w).unwrap();
-        std::fs::write(claude_w.join("settings.json"), b"from-workspace").unwrap();
-
-        let err = copy_templates(&templates, &workspace).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("template collision"), "got: {msg}");
-
-        // Destination unchanged.
-        assert_eq!(
-            std::fs::read_to_string(claude_w.join("settings.json")).unwrap(),
-            "from-workspace"
-        );
-    }
-
-    #[test]
-    fn init_templates_preserves_existing_settings() {
-        let tmp = tempdir();
-        let root = tmp.path();
-        init_templates(root).unwrap();
-        let settings = root.join(".choros-config/templates/.claude/settings.json");
-        std::fs::write(&settings, b"user-edited").unwrap();
-        init_templates(root).unwrap();
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "user-edited");
-    }
 }

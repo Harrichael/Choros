@@ -19,7 +19,9 @@ push past a failed test or a dirty repo whose state you can't explain.
       obvious.
    2. `git status` — if the working tree is dirty, stage and commit with a
       message that summarizes the work. If the changes are non-obvious, ask
-      the user before composing the message.
+      the user before composing the message. Never commit a `pnpm-lock.yaml`
+      in a repo whose tracked lockfile is `package-lock.json` or `yarn.lock` —
+      choros generates it for its build cache; it is not part of the work.
    3. `git push -u origin HEAD` to push the workspace branch to its remote.
 2. **Archive the workspace.** From the workspace directory (or any of its
    repos), run `choros archive`. This moves the workspace under
