@@ -190,17 +190,7 @@ pub fn create<P: ProgressSink>(
     progress.status(format!("mkdir {}", target.display()));
     std::fs::create_dir_all(&target)?;
 
-    for repo in repos {
-        progress.status(format!("cloning {repo}…"));
-        let reg_path = registry::ensure_repo_exists(root, repo)?;
-        let url = git::remote_get_url(&reg_path, "origin")?;
-        if let Err(e) = git::fetch(&reg_path, "origin") {
-            progress.status(format!("fetch warning ({repo}): {e}; continuing"));
-        }
-        let dest = target.join(repo);
-        git::clone_with_reference(&reg_path, &url, &dest)?;
-        git::checkout_new_branch(&dest, name)?;
-    }
+    clone_repos(root, &target, name, repos, progress)?;
 
     cache::setup_workspace_caches(root, &target, repos, progress)
         .wrap_err("setting up workspace caches")?;
@@ -220,6 +210,89 @@ pub fn create<P: ProgressSink>(
         .wrap_err("copying .choros-config/templates into workspace")?;
     Ok(ChorosInfo {
         path: target,
+        meta,
+    })
+}
+
+fn clone_repos<P: ProgressSink>(
+    root: &Path,
+    workspace: &Path,
+    branch: &str,
+    repos: &[String],
+    progress: &P,
+) -> Result<()> {
+    for repo in repos {
+        progress.status(format!("cloning {repo}…"));
+        let reg_path = registry::ensure_repo_exists(root, repo)?;
+        let url = git::remote_get_url(&reg_path, "origin")?;
+        if let Err(e) = git::fetch(&reg_path, "origin") {
+            progress.status(format!("fetch warning ({repo}): {e}; continuing"));
+        }
+        let dest = workspace.join(repo);
+        git::clone_with_reference(&reg_path, &url, &dest)?;
+        git::checkout_new_branch(&dest, branch)?;
+    }
+    Ok(())
+}
+
+/// Registry repos not yet cloned into `<root>/<name>` — the candidate set for
+/// `add_repos`.
+pub fn addable_repos(root: &Path, name: &str) -> Result<Vec<String>> {
+    let meta = read_meta(&root.join(name))?;
+    Ok(registry::scan(root)?
+        .into_iter()
+        .filter(|r| !meta.repos.iter().any(|have| have == r))
+        .collect())
+}
+
+/// Clone more registry repos into an existing workspace, onto the same branch
+/// the workspace's other clones are on, and record them in the meta file.
+pub fn add_repos<P: ProgressSink>(
+    root: &Path,
+    name: &str,
+    repos: &[String],
+    progress: &P,
+) -> Result<ChorosInfo> {
+    let workspace = root.join(name);
+    let mut meta = read_meta(&workspace)
+        .wrap_err_with(|| format!("{:?} is not a choros workspace", workspace))?;
+
+    let mut fresh: Vec<String> = Vec::new();
+    for repo in repos {
+        if meta.repos.iter().any(|have| have == repo) || fresh.contains(repo) {
+            progress.status(format!("{repo} is already in this workspace; skipping"));
+            continue;
+        }
+        registry::ensure_repo_exists(root, repo)?;
+        let dest = workspace.join(repo);
+        if dest.exists() {
+            return Err(eyre!(
+                "{:?} already exists but is not recorded in {}; move it aside first",
+                dest,
+                META_FILE
+            ));
+        }
+        fresh.push(repo.clone());
+    }
+    if fresh.is_empty() {
+        return Ok(ChorosInfo {
+            path: workspace,
+            meta,
+        });
+    }
+
+    // Branch off the recorded workspace name, not the directory name, so the
+    // new clones land on the same branch as the ones already here.
+    clone_repos(root, &workspace, &meta.name, &fresh, progress)?;
+    // Only the new repos: re-running `pnpm install` across the whole workspace
+    // would be pure waste, and the Rust config is already written.
+    cache::setup_workspace_caches(root, &workspace, &fresh, progress)
+        .wrap_err("setting up workspace caches")?;
+
+    meta.repos.extend(fresh);
+    write_meta(&workspace, &meta)?;
+    Ok(ChorosInfo {
+        path: workspace,
         meta,
     })
 }
@@ -657,15 +730,18 @@ mod tests {
 
         create(root, "PROJ-42", &["alpha".to_string()], &()).unwrap();
 
+        assert_eq!(head_branch(&root.join("PROJ-42/alpha")), "PROJ-42");
+    }
+
+    fn head_branch(repo: &Path) -> String {
         let head = std::process::Command::new("git")
             .arg("-C")
-            .arg(root.join("PROJ-42/alpha"))
+            .arg(repo)
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
             .unwrap();
-        assert!(head.status.success());
-        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
-        assert_eq!(branch, "PROJ-42");
+        assert!(head.status.success(), "git rev-parse failed in {repo:?}");
+        String::from_utf8_lossy(&head.stdout).trim().to_string()
     }
 
     fn stage_alpha_registry(root: &Path) {
@@ -679,6 +755,58 @@ mod tests {
             src.to_str().unwrap(),
             registry.join("alpha").to_str().unwrap(),
         ]);
+    }
+
+    #[test]
+    fn add_repos_clones_onto_the_workspace_branch_and_records_it() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        stage_alpha_registry(root);
+
+        let src_b = root.join("origins/beta.git-src");
+        make_source_repo(&src_b);
+        git(&[
+            "clone",
+            "--quiet",
+            src_b.to_str().unwrap(),
+            root.join(".choros-config/registry/beta").to_str().unwrap(),
+        ]);
+
+        create(root, "PROJ-ADD", &["alpha".to_string()], &()).unwrap();
+        assert_eq!(addable_repos(root, "PROJ-ADD").unwrap(), vec!["beta"]);
+
+        let info = add_repos(root, "PROJ-ADD", &["beta".to_string()], &()).unwrap();
+
+        assert_eq!(info.meta.repos, vec!["alpha", "beta"]);
+        assert_eq!(
+            read_meta(&root.join("PROJ-ADD")).unwrap().repos,
+            vec!["alpha", "beta"]
+        );
+        assert!(root.join("PROJ-ADD/beta/hello.txt").exists());
+        assert_eq!(head_branch(&root.join("PROJ-ADD/beta")), "PROJ-ADD");
+        assert!(addable_repos(root, "PROJ-ADD").unwrap().is_empty());
+
+        // Re-adding is a no-op, not a clone collision.
+        let again = add_repos(root, "PROJ-ADD", &["beta".to_string()], &()).unwrap();
+        assert_eq!(again.meta.repos, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn add_repos_rejects_unknown_repo_and_non_workspace() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        stage_alpha_registry(root);
+        create(root, "PROJ-X", &["alpha".to_string()], &()).unwrap();
+
+        let err = add_repos(root, "PROJ-X", &["nope".to_string()], &()).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
+        assert_eq!(
+            read_meta(&root.join("PROJ-X")).unwrap().repos,
+            vec!["alpha"]
+        );
+
+        std::fs::create_dir_all(root.join("just-a-dir")).unwrap();
+        assert!(add_repos(root, "just-a-dir", &["alpha".to_string()], &()).is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, NewChorosState, NewFocus, Overlay};
+use crate::app::{AddReposState, App, NewChorosState, NewFocus, Overlay, RepoPicker};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -31,7 +31,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if let Some(overlay) = app.overlay.as_ref() {
         match overlay {
-            Overlay::NewChoros(state) => draw_new_choros(f, area, app, state),
+            Overlay::NewChoros(state) => draw_new_choros(f, area, state),
+            Overlay::AddRepos(state) => draw_add_repos_screen(f, area, app, state),
             Overlay::ConfirmDelete { name } => draw_confirm_delete(f, area, name),
             Overlay::Detail(c) => draw_detail(f, area, c),
             Overlay::Working { what } => draw_working(f, area, what),
@@ -44,6 +45,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_single_shot(f: &mut Frame, area: Rect, app: &App) {
     match app.overlay.as_ref() {
         Some(Overlay::NewChoros(state)) => draw_work_screen(f, area, app, state),
+        Some(Overlay::AddRepos(state)) => draw_add_repos_screen(f, area, app, state),
         Some(Overlay::Working { what }) => draw_working(f, area, what),
         _ => draw_dismissable_status(f, area, &app.status),
     }
@@ -193,42 +195,13 @@ fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewChorosState
     let name_p = Paragraph::new(format!("{}{}", state.name, cursor)).block(name_block);
     f.render_widget(name_p, chunks[1]);
 
-    let repos_style = if state.focus == NewFocus::Repos {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-    let items: Vec<ListItem> = app
-        .registry
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let mark = if state.repo_selected.get(i).copied().unwrap_or(false) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw(mark),
-                Span::raw("  "),
-                Span::raw(r.clone()),
-            ]))
-        })
-        .collect();
-    let mut list_state = ListState::default();
-    if !items.is_empty() {
-        list_state.select(Some(state.repo_idx));
-    }
-    let repos = List::new(items)
-        .block(
-            Block::default()
-                .title(" repos (Space toggles) ")
-                .borders(Borders::ALL)
-                .border_style(repos_style),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol("> ");
-    f.render_stateful_widget(repos, chunks[2], &mut list_state);
+    draw_repo_picker(
+        f,
+        chunks[2],
+        &state.repos,
+        " repos (Space toggles) ",
+        state.focus == NewFocus::Repos,
+    );
 
     let err = state.error.clone().unwrap_or_default();
     let err_p = Paragraph::new(err).style(Style::default().fg(Color::Red));
@@ -242,7 +215,96 @@ fn draw_work_screen(f: &mut Frame, area: Rect, app: &App, state: &NewChorosState
     f.render_widget(footer_p, chunks[4]);
 }
 
-fn draw_new_choros(f: &mut Frame, parent: Rect, app: &App, state: &NewChorosState) {
+fn draw_repo_picker(f: &mut Frame, area: Rect, picker: &RepoPicker, title: &str, focused: bool) {
+    let items: Vec<ListItem> = picker
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mark = if picker.is_selected(i) { "[x]" } else { "[ ]" };
+            ListItem::new(Line::from(vec![
+                Span::raw(mark),
+                Span::raw("  "),
+                Span::raw(r.clone()),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default();
+    if !items.is_empty() {
+        list_state.select(Some(picker.idx));
+    }
+    let border = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(border),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn draw_add_repos_screen(f: &mut Frame, area: Rect, app: &App, state: &AddReposState) {
+    f.render_widget(Clear, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // repos
+            Constraint::Length(1), // error
+            Constraint::Length(1), // footer
+        ])
+        .split(area);
+
+    let header = Line::from(vec![
+        Span::styled(
+            "choros ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("@ {}", app.root.display()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!(" — add to {}", state.workspace),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(header), chunks[0]);
+
+    draw_repo_picker(
+        f,
+        chunks[1],
+        &state.repos,
+        " repos to clone (Space toggles) ",
+        true,
+    );
+
+    let err = state.error.clone().unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(err).style(Style::default().fg(Color::Red)),
+        chunks[2],
+    );
+
+    let footer = "Space: toggle repo   Enter: clone into workspace   Esc: cancel";
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        chunks[3],
+    );
+}
+
+fn draw_new_choros(f: &mut Frame, parent: Rect, state: &NewChorosState) {
     let area = centered_rect(parent, 70, 20);
     f.render_widget(Clear, area);
 
@@ -283,42 +345,13 @@ fn draw_new_choros(f: &mut Frame, parent: Rect, app: &App, state: &NewChorosStat
     let name_p = Paragraph::new(format!("{}{}", state.name, cursor)).block(name_block);
     f.render_widget(name_p, chunks[0]);
 
-    let repos_style = if state.focus == NewFocus::Repos {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-    let items: Vec<ListItem> = app
-        .registry
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let mark = if state.repo_selected.get(i).copied().unwrap_or(false) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw(mark),
-                Span::raw("  "),
-                Span::raw(r.clone()),
-            ]))
-        })
-        .collect();
-    let mut list_state = ListState::default();
-    if !items.is_empty() {
-        list_state.select(Some(state.repo_idx));
-    }
-    let repos = List::new(items)
-        .block(
-            Block::default()
-                .title(" repos (Space toggles) ")
-                .borders(Borders::ALL)
-                .border_style(repos_style),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol("> ");
-    f.render_stateful_widget(repos, chunks[1], &mut list_state);
+    draw_repo_picker(
+        f,
+        chunks[1],
+        &state.repos,
+        " repos (Space toggles) ",
+        state.focus == NewFocus::Repos,
+    );
 
     let err = state.error.clone().unwrap_or_default();
     let err_p = Paragraph::new(err).style(Style::default().fg(Color::Red));

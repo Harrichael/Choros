@@ -45,6 +45,8 @@ USAGE:
                                     workspace containing the current directory
     choros add <ssh-url>            clone a repo into .choros-config/registry/ (ssh URLs only);
                                     the registry name is derived from the URL
+    choros add                      multi-select registry repos to clone into the workspace
+                                    containing the current directory, on that workspace's branch
     choros agent save settings      open a TUI in the current workspace; diff workspace claude
                                     settings against the template and promote selected entries
     choros agent ls                 list resumable claude / cursor sessions recorded under the
@@ -118,18 +120,45 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
 }
 
 pub fn run_add(args: Vec<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
     let mut iter = args.into_iter();
-    let url = match (iter.next(), iter.next()) {
-        (Some(url), None) => url,
+    match (iter.next(), iter.next()) {
+        (None, _) => run_add_to_workspace(cwd),
+        (Some(url), None) => {
+            let (name, path) = registry::add(&cwd, &url)?;
+            eprintln!("added {name}");
+            println!("{}", path.display());
+            Ok(())
+        }
         _ => {
-            eprintln!("usage: choros add <ssh-url>");
+            eprintln!("usage: choros add [<ssh-url>]");
             std::process::exit(2);
         }
-    };
-    let cwd = std::env::current_dir()?;
-    let (name, path) = registry::add(&cwd, &url)?;
-    eprintln!("added {name}");
-    println!("{}", path.display());
+    }
+}
+
+/// Bare `choros add`: pick registry repos to clone into the workspace you're
+/// standing in. The workspace is found by walking up, so a deeply nested cwd
+/// still clones into the workspace root rather than beside you.
+fn run_add_to_workspace(cwd: PathBuf) -> Result<()> {
+    let (root, name) = choros::resolve_target(&cwd, None)
+        .wrap_err("`choros add` with no URL adds registry repos to the workspace you are in")?;
+    let candidates = choros::addable_repos(&root, &name)?;
+    if candidates.is_empty() {
+        let registry_empty = registry::scan(&root)?.is_empty();
+        if registry_empty {
+            eprintln!("registry is empty; run `choros add <ssh-url>` to add a repo");
+        } else {
+            eprintln!("'{name}' already has every repo in the registry");
+        }
+        return Ok(());
+    }
+
+    let mut app = app::App::new_add_repos(root, name, candidates);
+    run_tui(&mut app)?;
+    if let Some(path) = app.result_path {
+        println!("{}", path.display());
+    }
     Ok(())
 }
 
@@ -159,7 +188,7 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
         0 => {
             let mut app = app::App::new_work(cwd, None, NewFocus::Name);
             run_tui(&mut app)?;
-            if let Some(path) = app.created_path {
+            if let Some(path) = app.result_path {
                 println!("{}", path.display());
             }
             Ok(())
@@ -168,7 +197,7 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
             let name = args.into_iter().next().unwrap();
             let mut app = app::App::new_work(cwd, Some(name), NewFocus::Repos);
             run_tui(&mut app)?;
-            if let Some(path) = app.created_path {
+            if let Some(path) = app.result_path {
                 println!("{}", path.display());
             }
             Ok(())

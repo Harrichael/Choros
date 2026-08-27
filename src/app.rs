@@ -22,11 +22,14 @@ pub struct App {
     pub work_rx: Option<Receiver<WorkMsg>>,
     pub should_quit: bool,
     pub single_shot: bool,
-    pub created_path: Option<PathBuf>,
+    pub result_path: Option<PathBuf>,
+    /// Status to show when the pending background job succeeds.
+    work_done: String,
 }
 
 pub enum Overlay {
     NewChoros(NewChorosState),
+    AddRepos(AddReposState),
     ConfirmDelete { name: String },
     Detail(ChorosInfo),
     Working { what: String },
@@ -38,11 +41,76 @@ pub enum NewFocus {
     Repos,
 }
 
+/// Cursor + checkbox state over a fixed list of registry repo names. Owns its
+/// items rather than indexing into `App::registry` so a rescan can't leave the
+/// checkboxes pointing at the wrong rows.
+pub struct RepoPicker {
+    pub items: Vec<String>,
+    pub selected: Vec<bool>,
+    pub idx: usize,
+}
+
+impl RepoPicker {
+    pub fn new(items: Vec<String>) -> Self {
+        let selected = vec![false; items.len()];
+        Self {
+            items,
+            selected,
+            idx: 0,
+        }
+    }
+
+    pub fn next(&mut self) {
+        if !self.items.is_empty() {
+            self.idx = (self.idx + 1) % self.items.len();
+        }
+    }
+
+    pub fn prev(&mut self) {
+        if !self.items.is_empty() {
+            self.idx = self.idx.checked_sub(1).unwrap_or(self.items.len() - 1);
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        if let Some(slot) = self.selected.get_mut(self.idx) {
+            *slot = !*slot;
+        }
+    }
+
+    pub fn is_selected(&self, i: usize) -> bool {
+        self.selected.get(i).copied().unwrap_or(false)
+    }
+
+    pub fn chosen(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.is_selected(*i))
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.next(),
+            KeyCode::Char('k') | KeyCode::Up => self.prev(),
+            KeyCode::Char(' ') => self.toggle(),
+            _ => {}
+        }
+    }
+}
+
 pub struct NewChorosState {
     pub name: String,
     pub focus: NewFocus,
-    pub repo_selected: Vec<bool>,
-    pub repo_idx: usize,
+    pub repos: RepoPicker,
+    pub error: Option<String>,
+}
+
+pub struct AddReposState {
+    pub workspace: String,
+    pub repos: RepoPicker,
     pub error: Option<String>,
 }
 
@@ -63,7 +131,8 @@ impl App {
             work_rx: None,
             should_quit: false,
             single_shot: false,
-            created_path: None,
+            result_path: None,
+            work_done: String::new(),
         }
     }
 
@@ -71,12 +140,22 @@ impl App {
         let mut app = Self::new(root);
         app.single_shot = true;
         app.refresh();
-        let len = app.registry.len();
         app.overlay = Some(Overlay::NewChoros(NewChorosState {
             name: prefill_name.unwrap_or_default(),
             focus,
-            repo_selected: vec![false; len],
-            repo_idx: 0,
+            repos: RepoPicker::new(app.registry.clone()),
+            error: None,
+        }));
+        app
+    }
+
+    pub fn new_add_repos(root: PathBuf, workspace: String, candidates: Vec<String>) -> Self {
+        let mut app = Self::new(root);
+        app.single_shot = true;
+        app.refresh();
+        app.overlay = Some(Overlay::AddRepos(AddReposState {
+            workspace,
+            repos: RepoPicker::new(candidates),
             error: None,
         }));
         app
@@ -153,9 +232,9 @@ fn drain_worker(app: &mut App) {
         app.overlay = None;
         match done_result {
             Some(Ok(info)) => {
-                app.status = format!("created choros '{}'", info.meta.name);
+                app.status = std::mem::take(&mut app.work_done);
                 if app.single_shot {
-                    app.created_path = Some(info.cd_target());
+                    app.result_path = Some(info.cd_target());
                     app.should_quit = true;
                 }
             }
@@ -179,6 +258,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         None if app.single_shot => app.should_quit = true,
         None => handle_browsing(app, key),
         Some(Overlay::NewChoros(state)) => handle_new_choros(app, key, state),
+        Some(Overlay::AddRepos(state)) => handle_add_repos(app, key, state),
         Some(Overlay::ConfirmDelete { name }) => handle_confirm_delete(app, key, name),
         Some(Overlay::Detail(info)) => handle_detail(app, key, info),
         Some(Overlay::Working { what }) => {
@@ -211,12 +291,10 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
                 app.status =
                     "registry is empty; run `choros add <ssh-url>` to add a repo".into();
             } else {
-                let len = app.registry.len();
                 app.overlay = Some(Overlay::NewChoros(NewChorosState {
                     name: String::new(),
                     focus: NewFocus::Name,
-                    repo_selected: vec![false; len],
-                    repo_idx: 0,
+                    repos: RepoPicker::new(app.registry.clone()),
                     error: None,
                 }));
             }
@@ -258,12 +336,7 @@ fn handle_new_choros(app: &mut App, key: KeyEvent, mut state: NewChorosState) {
                 app.overlay = Some(Overlay::NewChoros(state));
                 return;
             }
-            let selected: Vec<String> = state
-                .repo_selected
-                .iter()
-                .zip(app.registry.iter())
-                .filter_map(|(s, r)| if *s { Some(r.clone()) } else { None })
-                .collect();
+            let selected = state.repos.chosen();
             if selected.is_empty() {
                 state.error = Some("select at least one repo".into());
                 app.overlay = Some(Overlay::NewChoros(state));
@@ -286,31 +359,34 @@ fn handle_new_choros(app: &mut App, key: KeyEvent, mut state: NewChorosState) {
                 }
                 _ => {}
             },
-            NewFocus::Repos => match key.code {
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !app.registry.is_empty() {
-                        state.repo_idx = (state.repo_idx + 1) % app.registry.len();
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !app.registry.is_empty() {
-                        if state.repo_idx == 0 {
-                            state.repo_idx = app.registry.len() - 1;
-                        } else {
-                            state.repo_idx -= 1;
-                        }
-                    }
-                }
-                KeyCode::Char(' ') => {
-                    if let Some(slot) = state.repo_selected.get_mut(state.repo_idx) {
-                        *slot = !*slot;
-                    }
-                }
-                _ => {}
-            },
+            NewFocus::Repos => state.repos.handle_key(key),
         },
     }
     app.overlay = Some(Overlay::NewChoros(state));
+}
+
+fn handle_add_repos(app: &mut App, key: KeyEvent, mut state: AddReposState) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = None;
+            if app.single_shot {
+                app.should_quit = true;
+            }
+            return;
+        }
+        KeyCode::Enter => {
+            let selected = state.repos.chosen();
+            if selected.is_empty() {
+                state.error = Some("select at least one repo".into());
+                app.overlay = Some(Overlay::AddRepos(state));
+                return;
+            }
+            spawn_add_repos(app, state.workspace.clone(), selected);
+            return;
+        }
+        _ => state.repos.handle_key(key),
+    }
+    app.overlay = Some(Overlay::AddRepos(state));
 }
 
 fn handle_confirm_delete(app: &mut App, key: KeyEvent, name: String) {
@@ -348,17 +424,37 @@ impl ProgressSink for ChannelProgress {
     }
 }
 
-fn spawn_create(app: &mut App, name: String, repos: Vec<String>) {
+fn spawn_work<F>(app: &mut App, what: String, done: String, job: F)
+where
+    F: FnOnce(&ChannelProgress) -> Result<ChorosInfo> + Send + 'static,
+{
     let (tx, rx) = mpsc::channel();
-    let root = app.root.clone();
     app.work_rx = Some(rx);
-    app.overlay = Some(Overlay::Working {
-        what: format!("creating '{}'", name),
-    });
+    app.work_done = done;
+    app.overlay = Some(Overlay::Working { what });
 
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
-        let result = choros::create(&root, &name, &repos, &progress);
+        let result = job(&progress);
         let _ = tx.send(WorkMsg::Done(result.map_err(|e| e.to_string())));
+    });
+}
+
+fn spawn_create(app: &mut App, name: String, repos: Vec<String>) {
+    let root = app.root.clone();
+    spawn_work(
+        app,
+        format!("creating '{}'", name),
+        format!("created choros '{}'", name),
+        move |p| choros::create(&root, &name, &repos, p),
+    );
+}
+
+fn spawn_add_repos(app: &mut App, name: String, repos: Vec<String>) {
+    let root = app.root.clone();
+    let what = format!("adding {} to '{}'", repos.join(", "), name);
+    let done = format!("added {} to '{}'", repos.join(", "), name);
+    spawn_work(app, what, done, move |p| {
+        choros::add_repos(&root, &name, &repos, p)
     });
 }
