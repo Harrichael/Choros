@@ -76,10 +76,7 @@ fn run_inner(home: &Path, base: &Path, out: &mut dyn Write) -> Result<()> {
 /// The encoding is lossy (so e.g. `dev_choros` and `dev/choros` collide), but
 /// it matches what the agents themselves write.
 pub fn encode_cwd(p: &Path) -> String {
-    p.to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-        .collect()
+    encode_segment(&p.to_string_lossy())
 }
 
 /// True if `dir_name` is the encoded form of `cwd` itself or of a path

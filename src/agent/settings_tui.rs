@@ -1,21 +1,16 @@
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use crate::agent_settings::{load_template, load_workspace, save_template, DiffSource};
+use super::settings::{load_template, load_workspace, save_template, DiffSource};
 use crate::json_diff::{apply_additions, diff_additions, Addition};
 
 pub struct SettingsApp {
@@ -109,25 +104,7 @@ impl SettingsApp {
 
 pub fn run(workspace: PathBuf, root: PathBuf) -> Result<()> {
     let mut app = SettingsApp::new(workspace, root)?;
-
-    let tty = OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .wrap_err("opening /dev/tty for TUI rendering")?;
-
-    enable_raw_mode()?;
-    let mut backend_writer = tty;
-    execute!(backend_writer, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(backend_writer);
-    let mut terminal = Terminal::new(backend)?;
-
-    let result = run_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+    crate::tui::with_tui(|terminal| run_loop(terminal, &mut app))
 }
 
 fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut SettingsApp) -> Result<()>

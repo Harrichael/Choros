@@ -48,6 +48,7 @@ pub fn clone_with_reference(reference: &Path, url: &str, dest: &Path) -> Result<
         "clone",
         "--reference-if-able",
         reference.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
+        "--",
         url,
         dest.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
     ]))?;

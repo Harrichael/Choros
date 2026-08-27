@@ -27,7 +27,7 @@ pub struct App {
 
 pub enum Overlay {
     NewChoros(NewChorosState),
-    ConfirmDelete { name: String },
+    ConfirmDelete(ChorosInfo),
     Detail(ChorosInfo),
     Working { what: String },
 }
@@ -48,7 +48,12 @@ pub struct NewChorosState {
 
 pub enum WorkMsg {
     Status(String),
-    Done(std::result::Result<ChorosInfo, String>),
+    Done(std::result::Result<WorkOutcome, String>),
+}
+
+pub enum WorkOutcome {
+    Created(ChorosInfo),
+    Deleted(String),
 }
 
 impl App {
@@ -127,7 +132,7 @@ fn drain_worker(app: &mut App) {
         return;
     };
     let mut done = false;
-    let mut done_result: Option<std::result::Result<ChorosInfo, String>> = None;
+    let mut done_result: Option<std::result::Result<WorkOutcome, String>> = None;
     loop {
         match rx.try_recv() {
             Ok(WorkMsg::Status(s)) => {
@@ -152,12 +157,15 @@ fn drain_worker(app: &mut App) {
         app.work_rx = None;
         app.overlay = None;
         match done_result {
-            Some(Ok(info)) => {
+            Some(Ok(WorkOutcome::Created(info))) => {
                 app.status = format!("created choros '{}'", info.meta.name);
                 if app.single_shot {
                     app.created_path = Some(info.cd_target());
                     app.should_quit = true;
                 }
+            }
+            Some(Ok(WorkOutcome::Deleted(name))) => {
+                app.status = format!("deleted '{}'", name);
             }
             Some(Err(e)) => app.status = format!("error: {e}"),
             None => app.status = "worker disconnected".into(),
@@ -176,7 +184,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match overlay {
         None => handle_browsing(app, key),
         Some(Overlay::NewChoros(state)) => handle_new_choros(app, key, state),
-        Some(Overlay::ConfirmDelete { name }) => handle_confirm_delete(app, key, name),
+        Some(Overlay::ConfirmDelete(target)) => handle_confirm_delete(app, key, target),
         Some(Overlay::Detail(info)) => handle_detail(app, key, info),
         Some(Overlay::Working { what }) => {
             // Working overlay: only Ctrl-C above can break it; otherwise restore.
@@ -220,9 +228,7 @@ fn handle_browsing(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('d') => {
             if let Some(c) = app.selected_choros() {
-                app.overlay = Some(Overlay::ConfirmDelete {
-                    name: c.meta.name.clone(),
-                });
+                app.overlay = Some(Overlay::ConfirmDelete(c.clone()));
             }
         }
         KeyCode::Enter => {
@@ -310,25 +316,11 @@ fn handle_new_choros(app: &mut App, key: KeyEvent, mut state: NewChorosState) {
     app.overlay = Some(Overlay::NewChoros(state));
 }
 
-fn handle_confirm_delete(app: &mut App, key: KeyEvent, name: String) {
+fn handle_confirm_delete(app: &mut App, key: KeyEvent, target: ChorosInfo) {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => {
-            let target = app
-                .choros_list
-                .iter()
-                .find(|c| c.meta.name == name)
-                .cloned();
-            match target {
-                Some(c) => match choros::delete(&c) {
-                    Ok(()) => app.status = format!("deleted '{}'", name),
-                    Err(e) => app.status = format!("delete failed: {e}"),
-                },
-                None => app.status = format!("choros '{}' not found", name),
-            }
-            app.refresh();
-        }
+        KeyCode::Char('y') | KeyCode::Enter => spawn_delete(app, target),
         _ => {
-            app.overlay = Some(Overlay::ConfirmDelete { name });
+            app.overlay = Some(Overlay::ConfirmDelete(target));
         }
     }
 }
@@ -356,6 +348,25 @@ fn spawn_create(app: &mut App, name: String, repos: Vec<String>) {
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
         let result = choros::create(&root, &name, &repos, &progress);
-        let _ = tx.send(WorkMsg::Done(result.map_err(|e| e.to_string())));
+        let _ = tx.send(WorkMsg::Done(
+            result.map(WorkOutcome::Created).map_err(|e| e.to_string()),
+        ));
+    });
+}
+
+// Deleting rm -rf's whole clones (node_modules and all); run it off the UI
+// thread like create so the TUI doesn't freeze on big workspaces.
+fn spawn_delete(app: &mut App, target: ChorosInfo) {
+    let (tx, rx) = mpsc::channel();
+    app.work_rx = Some(rx);
+    app.overlay = Some(Overlay::Working {
+        what: format!("deleting '{}'", target.meta.name),
+    });
+
+    thread::spawn(move || {
+        let result = choros::delete(&target)
+            .map(|()| WorkOutcome::Deleted(target.meta.name.clone()))
+            .map_err(|e| e.to_string());
+        let _ = tx.send(WorkMsg::Done(result));
     });
 }

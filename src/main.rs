@@ -1,6 +1,4 @@
-mod agent_ls;
-mod agent_settings;
-mod agent_settings_tui;
+mod agent;
 mod app;
 mod cache;
 mod choros;
@@ -8,6 +6,7 @@ mod cli;
 mod git;
 mod json_diff;
 mod registry;
+mod tui;
 mod ui;
 
 use color_eyre::Result;

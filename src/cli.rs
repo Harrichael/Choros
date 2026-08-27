@@ -1,16 +1,8 @@
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 
-use color_eyre::eyre::{Context, Result};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use color_eyre::Result;
 
-use crate::agent_ls;
-use crate::agent_settings_tui;
+use crate::agent;
 use crate::app::{self, NewFocus};
 use crate::choros::{self, ProgressSink};
 use crate::registry;
@@ -61,7 +53,7 @@ pub fn emit_shell_init() {
 pub fn run_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let registry_dir = registry::init_dirs(&cwd)?;
-    let templates_dir = choros::init_templates(&cwd)?;
+    let templates_dir = agent::init_templates(&cwd)?;
     eprintln!("initialized {}", registry_dir.display());
     eprintln!("initialized {}", templates_dir.display());
     Ok(())
@@ -96,7 +88,7 @@ fn run_agent_ls(args: Vec<String>) -> Result<()> {
         std::process::exit(2);
     }
     let cwd = std::env::current_dir()?;
-    agent_ls::run(&cwd)
+    agent::ls::run(&cwd)
 }
 
 fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
@@ -110,7 +102,7 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, name) = choros::resolve_target(&cwd, None)?;
     let workspace = root.join(&name);
-    agent_settings_tui::run(workspace, root)
+    agent::settings_tui::run(workspace, root)
 }
 
 pub fn run_add(args: Vec<String>) -> Result<()> {
@@ -153,31 +145,23 @@ pub fn run_full_tui() -> Result<()> {
 
 pub fn run_work(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    match args.len() {
-        0 => {
-            let mut app = app::App::new_work(cwd, None, NewFocus::Name);
-            run_tui(&mut app)?;
-            if let Some(path) = app.created_path {
-                println!("{}", path.display());
-            }
-            Ok(())
-        }
-        1 => {
-            let name = args.into_iter().next().unwrap();
-            let mut app = app::App::new_work(cwd, Some(name), NewFocus::Repos);
-            run_tui(&mut app)?;
-            if let Some(path) = app.created_path {
-                println!("{}", path.display());
-            }
-            Ok(())
-        }
-        _ => {
-            let mut iter = args.into_iter();
-            let name = iter.next().unwrap();
-            let repos: Vec<String> = iter.collect();
-            run_work_noninteractive(cwd, name, repos)
-        }
+    let mut iter = args.into_iter();
+    let name = iter.next();
+    let repos: Vec<String> = iter.collect();
+    if let (Some(name), false) = (&name, repos.is_empty()) {
+        return run_work_noninteractive(cwd, name.clone(), repos);
     }
+    let focus = if name.is_some() {
+        NewFocus::Repos
+    } else {
+        NewFocus::Name
+    };
+    let mut app = app::App::new_work(cwd, name, focus);
+    run_tui(&mut app)?;
+    if let Some(path) = app.created_path {
+        println!("{}", path.display());
+    }
+    Ok(())
 }
 
 fn run_work_noninteractive(root: PathBuf, name: String, repos: Vec<String>) -> Result<()> {
@@ -200,24 +184,5 @@ impl ProgressSink for StderrProgress {
 }
 
 fn run_tui(app: &mut app::App) -> Result<()> {
-    // Write the TUI to /dev/tty rather than stdout, so the shell-init wrapper
-    // (`target="$(choros work …)"`) can capture the result path on stdout
-    // without swallowing the terminal rendering.
-    let mut tty = OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .wrap_err("opening /dev/tty for TUI rendering")?;
-
-    enable_raw_mode()?;
-    execute!(tty, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(tty);
-    let mut terminal = Terminal::new(backend)?;
-
-    let result = app::run(&mut terminal, app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+    crate::tui::with_tui(|terminal| app::run(terminal, app))
 }

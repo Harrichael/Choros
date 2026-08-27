@@ -44,6 +44,11 @@ pub fn scan(root: &Path) -> Result<Vec<String>> {
 }
 
 pub fn ensure_repo_exists(root: &Path, name: &str) -> Result<PathBuf> {
+    // Repo args double as clone destinations inside the workspace; a path-ish
+    // name (`../x`, `/abs`) would escape both the registry and the workspace.
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
+        return Err(eyre!("invalid repo name {:?}", name));
+    }
     let path = repo_path(root, name);
     if !path.exists() {
         return Err(eyre!("registry repo {:?} does not exist", path));
@@ -141,6 +146,21 @@ mod tests {
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn ensure_repo_exists_rejects_path_like_names() {
+        let tmp = tempdir();
+        let reg = registry_dir(tmp.path());
+        fake_repo(&reg, "alpha");
+
+        assert!(ensure_repo_exists(tmp.path(), "alpha").is_ok());
+        for bad in ["../alpha", "/etc", "a/b", "..", ".hidden", ""] {
+            assert!(
+                ensure_repo_exists(tmp.path(), bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 
     #[test]

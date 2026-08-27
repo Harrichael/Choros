@@ -46,8 +46,11 @@ where
         .unwrap_or("<repo>");
 
     // For non-pnpm lockfiles, ask pnpm to translate first so it can install
-    // deterministically from its own format.
+    // deterministically from its own format. The generated pnpm-lock.yaml is
+    // ours, not the repo's: exclude it locally so it can't end up committed to
+    // the task branch (the choros-archive skill commits dirty trees wholesale).
     if matches!(toolchain, Toolchain::JsNpm | Toolchain::JsYarn) {
+        exclude_from_git(repo_dir, "pnpm-lock.yaml")?;
         progress.status(format!("pnpm import in {repo_name}…"));
         run_pnpm(repo_dir, &["import"])?;
     }
@@ -56,6 +59,25 @@ where
     let store_arg = format!("--store-dir={}", store.display());
     run_pnpm(repo_dir, &["install", &store_arg])?;
 
+    Ok(())
+}
+
+/// Append `pattern` to the clone's `.git/info/exclude` — like .gitignore, but
+/// local to this clone, so the upstream repo never sees the entry.
+fn exclude_from_git(repo_dir: &Path, pattern: &str) -> Result<()> {
+    let info = repo_dir.join(".git/info");
+    std::fs::create_dir_all(&info)?;
+    let path = info.join("exclude");
+    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    if body.lines().any(|l| l.trim() == pattern) {
+        return Ok(());
+    }
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(pattern);
+    body.push('\n');
+    std::fs::write(&path, body)?;
     Ok(())
 }
 
@@ -79,6 +101,20 @@ mod tests {
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn exclude_from_git_appends_once_and_preserves_existing() {
+        let repo = tempdir();
+        let info = repo.path().join(".git/info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), b"*.swp").unwrap();
+
+        exclude_from_git(repo.path(), "pnpm-lock.yaml").unwrap();
+        exclude_from_git(repo.path(), "pnpm-lock.yaml").unwrap();
+
+        let body = std::fs::read_to_string(info.join("exclude")).unwrap();
+        assert_eq!(body, "*.swp\npnpm-lock.yaml\n");
     }
 
     #[test]
