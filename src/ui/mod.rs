@@ -10,10 +10,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
     if app.single_shot {
-        if let Some(Overlay::NewChoros(state)) = app.overlay.as_ref() {
-            draw_work_screen(f, area, app, state);
-            return;
-        }
+        draw_single_shot(f, area, app);
+        return;
     }
 
     let chunks = Layout::default()
@@ -38,6 +36,16 @@ pub fn draw(f: &mut Frame, app: &App) {
             Overlay::Detail(c) => draw_detail(f, area, c),
             Overlay::Working { what } => draw_working(f, area, what),
         }
+    }
+}
+
+// `choros work` is a one-shot flow, not a browser: never fall back to the
+// full two-pane list behind the dialog.
+fn draw_single_shot(f: &mut Frame, area: Rect, app: &App) {
+    match app.overlay.as_ref() {
+        Some(Overlay::NewChoros(state)) => draw_work_screen(f, area, app, state),
+        Some(Overlay::Working { what }) => draw_working(f, area, what),
+        _ => draw_dismissable_status(f, area, &app.status),
     }
 }
 
@@ -364,6 +372,26 @@ fn draw_detail(f: &mut Frame, parent: Rect, c: &crate::choros::ChorosInfo) {
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default().title(" Choros ").borders(Borders::ALL));
+    f.render_widget(p, area);
+}
+
+fn draw_dismissable_status(f: &mut Frame, parent: Rect, status: &str) {
+    let area = centered_rect(parent, 70, 7);
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            status.to_string(),
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "press any key to exit",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let p = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().title(" choros ").borders(Borders::ALL));
     f.render_widget(p, area);
 }
 

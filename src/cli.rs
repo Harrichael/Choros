@@ -17,13 +17,16 @@ use crate::registry;
 
 const SHELL_INIT: &str = r#"# choros shell integration — works in bash and zsh
 choros() {
-  if [ "$1" = "work" ]; then
-    local target
-    target="$(command choros "$@")" || return $?
-    [ -n "$target" ] && cd "$target"
-  else
-    command choros "$@"
-  fi
+  case "$1" in
+    work|archive)
+      local target
+      target="$(command choros "$@")" || return $?
+      [ -n "$target" ] && cd "$target"
+      ;;
+    *)
+      command choros "$@"
+      ;;
+  esac
 }
 "#;
 
@@ -37,8 +40,9 @@ USAGE:
     choros work NAME REPO [REPO…]   non-interactive create
                                     (detects Rust / JS toolchains in cloned repos and wires up
                                     a shared build cache at .choros-config/store/)
-    choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
-                                    NAME defaults to the workspace containing the current directory
+    choros archive [NAME]           archive a workspace (move it under .choros-config/archive/)
+                                    and return to the choros root; NAME defaults to the
+                                    workspace containing the current directory
     choros add <ssh-url>            clone a repo into .choros-config/registry/ (ssh URLs only);
                                     the registry name is derived from the URL
     choros agent save settings      open a TUI in the current workspace; diff workspace claude
@@ -134,12 +138,10 @@ pub fn run_archive(args: Vec<String>) -> Result<()> {
     let name_arg = args.into_iter().next();
     let (root, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
     let dst = choros::archive(&root, &name)?;
-    if cwd.starts_with(root.join(&name)) {
-        eprintln!(
-            "warning: archived workspace contained your current directory; cd somewhere else"
-        );
-    }
-    println!("{}", dst.display());
+    eprintln!("archived {name} -> {}", dst.display());
+    // A shell sitting inside the workspace follows it into the archive, so the
+    // useful cd target is the root — ready for the next `choros work`.
+    println!("{}", root.display());
     Ok(())
 }
 

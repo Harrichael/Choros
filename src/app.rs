@@ -174,6 +174,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     let overlay = app.overlay.take();
     match overlay {
+        // In `choros work` there is nothing to browse; a dismissed overlay means
+        // the flow is over (or failed), so any key exits.
+        None if app.single_shot => app.should_quit = true,
         None => handle_browsing(app, key),
         Some(Overlay::NewChoros(state)) => handle_new_choros(app, key, state),
         Some(Overlay::ConfirmDelete { name }) => handle_confirm_delete(app, key, name),
