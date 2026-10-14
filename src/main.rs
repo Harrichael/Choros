@@ -5,6 +5,7 @@ mod choros;
 mod cli;
 mod git;
 mod json_diff;
+mod ls;
 mod registry;
 mod tui;
 mod ui;
@@ -22,6 +23,10 @@ fn main() -> Result<()> {
         Some("init") => {
             reject_extra_args("init", &rest);
             cli::run_init()
+        }
+        Some("ls") => {
+            reject_extra_args("ls", &rest);
+            cli::run_ls()
         }
         Some("archive") => cli::run_archive(rest),
         Some("add") => cli::run_add(rest),

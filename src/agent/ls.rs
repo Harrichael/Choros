@@ -94,6 +94,7 @@ fn matches_cwd(dir_name: &str, encoded_cwd: &str) -> bool {
 fn claude_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
     let session_base = home.join(".claude/projects");
     let encoded_base = encode_cwd(base);
+    let rivals = rival_encodings(base, &encoded_base);
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(&session_base) else {
         return Ok(out);
@@ -110,13 +111,21 @@ fn claude_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
         if !matches_cwd(name, &encoded_base) {
             continue;
         }
-        let rel = relative_path(base, name, &encoded_base);
-        collect_claude_dir(&path, &rel, &mut out)?;
+        let fallback = owned_rel_path(base, name, &encoded_base, &rivals);
+        collect_claude_dir(&path, base, fallback.as_deref(), &mut out)?;
     }
     Ok(out)
 }
 
-fn collect_claude_dir(dir: &Path, rel_path: &str, out: &mut Vec<Session>) -> Result<()> {
+/// Sessions that record their `cwd` are placed by it, since the dir name's
+/// encoding is lossy. Sessions without one fall back to the dir-name guess,
+/// and are skipped if that guess says the dir isn't ours.
+fn collect_claude_dir(
+    dir: &Path,
+    base: &Path,
+    fallback_rel: Option<&str>,
+    out: &mut Vec<Session>,
+) -> Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         if path.extension() != Some(OsStr::new("jsonl")) {
@@ -126,49 +135,66 @@ fn collect_claude_dir(dir: &Path, rel_path: &str, out: &mut Vec<Session>) -> Res
             Some(s) if !s.is_empty() => s.to_string(),
             _ => continue,
         };
+        let (cwd, preview) = read_claude_head(&path);
+        let rel = match cwd {
+            Some(cwd) => match Path::new(&cwd).strip_prefix(base) {
+                Ok(r) if r.as_os_str().is_empty() => ".".to_string(),
+                Ok(r) => r.to_string_lossy().into_owned(),
+                Err(_) => continue,
+            },
+            None => match fallback_rel {
+                Some(r) => r.to_string(),
+                None => continue,
+            },
+        };
         let modified = entry.metadata()?.modified()?;
-        let preview = first_user_message_claude(&path).unwrap_or_default();
         out.push(Session {
             agent: "claude",
             id,
             modified,
-            preview,
-            path: rel_path.to_string(),
+            preview: preview.unwrap_or_default(),
+            path: rel,
         });
     }
     Ok(())
 }
 
-fn first_user_message_claude(path: &Path) -> Option<String> {
-    let f = fs::File::open(path).ok()?;
-    let reader = BufReader::new(f);
-    for line in reader.lines().take(500) {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let v: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+/// The session's recorded `cwd` and its first user message, from the head of
+/// the transcript.
+fn read_claude_head(path: &Path) -> (Option<String>, Option<String>) {
+    let (mut cwd, mut preview) = (None, None);
+    let Ok(f) = fs::File::open(path) else {
+        return (cwd, preview);
+    };
+    for line in BufReader::new(f).lines().take(500) {
+        if cwd.is_some() && preview.is_some() {
+            break;
+        }
+        let Ok(line) = line else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
+        };
+        if cwd.is_none() {
+            cwd = v.get("cwd").and_then(|c| c.as_str()).map(String::from);
         }
-        let content = v.get("message").and_then(|m| m.get("content"))?;
-        if let Some(s) = content.as_str() {
-            return Some(s.to_string());
-        }
-        if let Some(arr) = content.as_array() {
-            for block in arr {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        return Some(text.to_string());
-                    }
-                }
-            }
+        if preview.is_none() && v.get("type").and_then(|t| t.as_str()) == Some("user") {
+            preview = user_text_claude(&v);
         }
     }
-    None
+    (cwd, preview)
+}
+
+fn user_text_claude(v: &Value) -> Option<String> {
+    let content = v.get("message").and_then(|m| m.get("content"))?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    content.as_array()?.iter().find_map(|block| {
+        if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+            return None;
+        }
+        block.get("text").and_then(|t| t.as_str()).map(String::from)
+    })
 }
 
 fn cursor_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
@@ -177,6 +203,7 @@ fn cursor_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
     // publicly documented, so we treat both as candidate dirs and best-effort
     // pull out a preview from whatever JSON / JSONL we find.
     let encoded_base = encode_cwd(base);
+    let rivals = rival_encodings(base, &encoded_base);
     let mut out = Vec::new();
     for sub in ["projects", "chats"] {
         let session_base = home.join(".cursor").join(sub);
@@ -192,10 +219,9 @@ fn cursor_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
                 Some(n) => n,
                 None => continue,
             };
-            if !matches_cwd(name, &encoded_base) {
+            let Some(rel) = owned_rel_path(base, name, &encoded_base, &rivals) else {
                 continue;
-            }
-            let rel = relative_path(base, name, &encoded_base);
+            };
             collect_cursor_dir(&path, &rel, &mut out)?;
         }
     }
@@ -225,20 +251,55 @@ fn collect_cursor_dir(dir: &Path, rel_path: &str, out: &mut Vec<Session>) -> Res
     Ok(())
 }
 
-/// Decode the encoded suffix of a session dir back into a path relative to
-/// `base`. The encoding is lossy (`/`, `_`, `.` all become `-`), so we recover
-/// the original by walking the actual filesystem under `base` and finding a
-/// path whose component-wise encoding matches the suffix. Returns the encoded
-/// suffix verbatim as a last-resort fallback when no real path matches.
-fn relative_path(base: &Path, dir_name: &str, encoded_base: &str) -> String {
-    if dir_name == encoded_base {
-        return ".".into();
+/// Encodings of `base`'s siblings that extend `encoded_base` past a `-`
+/// boundary. Because `_` and `/` both encode to `-`, a sibling like
+/// `ordo_better` (`…-ordo-better`) looks exactly like a subdir `ordo/better`.
+/// Archived workspaces count too: their sessions were recorded at their old
+/// sibling path.
+fn rival_encodings(base: &Path, encoded_base: &str) -> Vec<String> {
+    let Some(parent) = base.parent() else {
+        return Vec::new();
+    };
+    let live = fs::read_dir(parent).into_iter().flatten().flatten();
+    let archived = fs::read_dir(parent.join(choros::ARCHIVE_REL))
+        .into_iter()
+        .flatten()
+        .flatten();
+    live.chain(archived)
+        .filter(|e| e.path().is_dir())
+        .map(|e| parent.join(e.file_name()))
+        .filter(|p| p != base)
+        .map(|p| encode_cwd(&p))
+        .filter(|enc| matches_cwd(enc, encoded_base) && enc != encoded_base)
+        .collect()
+}
+
+/// If the session dir `dir_name` belongs to `base`, the path it was invoked
+/// from, relative to `base`. The encoding is lossy (`/`, `_`, `.` all become
+/// `-`), so the path is recovered by walking the real filesystem under
+/// `base`. When no real path matches, the dir is still ours (its subdir may
+/// since have been deleted) unless a rival sibling claims it; the encoded
+/// suffix is then returned verbatim.
+fn owned_rel_path(
+    base: &Path,
+    dir_name: &str,
+    encoded_base: &str,
+    rivals: &[String],
+) -> Option<String> {
+    if !matches_cwd(dir_name, encoded_base) {
+        return None;
     }
     let suffix = match dir_name.strip_prefix(encoded_base).and_then(|r| r.strip_prefix('-')) {
         Some(s) if !s.is_empty() => s,
-        _ => return ".".into(),
+        _ => return Some(".".into()),
     };
-    probe_path(base, suffix).unwrap_or_else(|| suffix.to_string())
+    if let Some(rel) = probe_path(base, suffix) {
+        return Some(rel);
+    }
+    if rivals.iter().any(|r| matches_cwd(dir_name, r)) {
+        return None;
+    }
+    Some(suffix.to_string())
 }
 
 fn probe_path(base: &Path, encoded_remainder: &str) -> Option<String> {
@@ -466,6 +527,74 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         // probe recovers `api_server/src`, not the lossy `api-server-src`.
         assert_eq!(sessions[0].path, "api_server/src");
+    }
+
+    /// `ordo` and `ordo_better` are sibling workspaces; their session dirs
+    /// encode to `…-ordo` and `…-ordo-better`, which looks like `ordo/better`.
+    /// Sessions belong to the sibling unless `ordo/better` really exists.
+    #[test]
+    fn claude_sessions_skip_sibling_with_colliding_encoding() {
+        let home = tempdir();
+        let root = tempdir();
+        let base = root.path().join("ordo");
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(root.path().join("ordo_better")).unwrap();
+        for (dir, id) in [
+            (base.clone(), "mine"),
+            (base.join("src"), "mine-sub"),
+            (base.join("gone"), "mine-deleted-subdir"),
+            (root.path().join("ordo_better"), "sibling"),
+            (root.path().join("ordo_better/src"), "sibling-sub"),
+        ] {
+            let sdir = home.path().join(".claude/projects").join(encode_cwd(&dir));
+            std::fs::create_dir_all(&sdir).unwrap();
+            std::fs::write(sdir.join(format!("{id}.jsonl")), b"").unwrap();
+        }
+
+        let mut found: Vec<(String, String)> = claude_sessions(home.path(), &base)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, s.path))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("mine".to_string(), ".".to_string()),
+                ("mine-deleted-subdir".to_string(), "gone".to_string()),
+                ("mine-sub".to_string(), "src".to_string()),
+            ]
+        );
+    }
+
+    /// Archived and deleted siblings collide the same way. An archived one is
+    /// still known by name; a deleted one is only caught by the `cwd` its
+    /// sessions recorded.
+    #[test]
+    fn claude_sessions_skip_archived_and_deleted_siblings() {
+        let home = tempdir();
+        let root = tempdir();
+        let base = root.path().join("ordo");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(root.path().join(".choros-config/archive/ordo_shelved")).unwrap();
+        let shelved = root.path().join("ordo_shelved");
+        let gone = root.path().join("ordo_gone");
+        for (dir, id, body) in [
+            (base.clone(), "mine", format!(r#"{{"cwd":{:?}}}"#, base)),
+            (shelved.clone(), "shelved", String::new()),
+            (gone.clone(), "gone", format!(r#"{{"cwd":{:?}}}"#, gone)),
+        ] {
+            let sdir = home.path().join(".claude/projects").join(encode_cwd(&dir));
+            std::fs::create_dir_all(&sdir).unwrap();
+            std::fs::write(sdir.join(format!("{id}.jsonl")), body).unwrap();
+        }
+
+        let found: Vec<String> = claude_sessions(home.path(), &base)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(found, ["mine"]);
     }
 
     #[test]

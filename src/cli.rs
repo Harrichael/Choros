@@ -29,6 +29,8 @@ USAGE:
     choros work NAME REPO [REPO…]   non-interactive create
                                     (detects Rust / JS toolchains in cloned repos and wires up
                                     a shared build cache at .choros-config/store/)
+    choros ls                       from the choros root: list active workspaces, most recently
+                                    worked-in first, with created date, changed-file count, repos
     choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
                                     NAME defaults to the workspace containing the current directory
     choros add <ssh-url>            clone a repo into .choros-config/registry/ (ssh URLs only);
@@ -119,6 +121,11 @@ pub fn run_add(args: Vec<String>) -> Result<()> {
     eprintln!("added {name}");
     println!("{}", path.display());
     Ok(())
+}
+
+pub fn run_ls() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::ls::run(&cwd)
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {
