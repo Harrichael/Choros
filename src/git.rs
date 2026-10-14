@@ -55,6 +55,18 @@ pub fn clone_with_reference(reference: &Path, url: &str, dest: &Path) -> Result<
     Ok(())
 }
 
+/// Number of paths `git status` reports as modified, staged, or untracked.
+pub fn changed_count(repo: &Path) -> Result<usize> {
+    // Without --no-optional-locks, status refreshes and rewrites the index,
+    // so merely listing would look like activity to other tools.
+    let out = run(Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain"]))?;
+    Ok(out.lines().count())
+}
+
 pub fn checkout_new_branch(repo: &Path, branch: &str) -> Result<()> {
     run(Command::new("git")
         .arg("-C")

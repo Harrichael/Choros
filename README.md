@@ -60,6 +60,7 @@ choros                          # full TUI (manage existing + create new)
 choros work                     # fast-create: just name + repos, then exit
 choros work PROJ-1              # name pre-filled, jumps to repo selection
 choros work PROJ-1 api web      # fully non-interactive (no TUI)
+choros ls                       # list active workspaces, most recently worked-in first
 choros archive                  # archive the workspace your shell is in
 choros archive PROJ-1           # archive PROJ-1 from the project root
 choros agent save settings      # inside a workspace: TUI to promote claude
@@ -131,6 +132,20 @@ choros agent save settings
 This opens a TUI that diffs the workspace's claude settings against the
 template and lets you check off entries to promote. `Tab` cycles the diff
 source between `settings.json`, `settings.local.json`, and both (default).
+
+## Listing workspaces
+
+`choros ls`, run from the choros root, lists every active (non-archived)
+workspace, most recently worked-in first, with its last-active time (local
+time zone, plus a rough "3d ago"), creation time, number of changed files
+(`git status` entries summed across its repos), and repos.
+
+"Last active" is the newest mtime of any file in the workspace that git
+doesn't ignore, or of a repo's reflog (commits, checkouts, pulls). Build
+output and `.git/` internals don't count, so `cargo build` or a `git status`
+from your prompt won't make a workspace look fresh. An agent conversation
+that writes no files doesn't count (granting it a permission does, since that
+writes `.claude/settings.local.json`).
 
 ## Listing resumable agent sessions
 

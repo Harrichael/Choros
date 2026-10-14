@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use color_eyre::eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,31 @@ pub fn scan(root: &Path) -> Result<Vec<ChorosInfo>> {
     }
     out.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
     Ok(out)
+}
+
+/// When the workspace was last worked in: the newest mtime of any file git
+/// doesn't ignore, or of a repo's reflog (commits, checkouts, pulls). Ignored
+/// files are skipped so build output doesn't read as work, and `.git/` is
+/// skipped because read-only commands like `git status` rewrite the index.
+pub fn last_active(workspace: &Path) -> Option<SystemTime> {
+    let files = ignore::WalkBuilder::new(workspace)
+        .hidden(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build()
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter_map(|e| e.metadata().ok()?.modified().ok());
+    let reflogs = std::fs::read_dir(workspace)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            std::fs::metadata(e.path().join(".git/logs/HEAD"))
+                .ok()?
+                .modified()
+                .ok()
+        });
+    files.chain(reflogs).max()
 }
 
 pub fn validate_name(root: &Path, name: &str) -> Result<()> {
