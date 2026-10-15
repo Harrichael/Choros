@@ -31,6 +31,7 @@ fn main() -> Result<()> {
         Some("archive") => cli::run_archive(rest),
         Some("add") => cli::run_add(rest),
         Some("agent") => cli::run_agent(rest),
+        Some("repo") => cli::run_repo(rest),
         Some("shell-init") => {
             reject_extra_args("shell-init", &rest);
             cli::emit_shell_init();
