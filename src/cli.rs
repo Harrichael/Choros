@@ -39,6 +39,7 @@ USAGE:
                                     settings against the template and promote selected entries
     choros agent ls                 list resumable claude / cursor sessions recorded under the
                                     current directory (matches the cwd of `claude --resume`)
+    choros repo ls                  inside a workspace: list the repos cloned into it
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -105,6 +106,23 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
     let (root, name) = choros::resolve_target(&cwd, None)?;
     let workspace = root.join(&name);
     agent::settings_tui::run(workspace, root)
+}
+
+pub fn run_repo(args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [verb] if verb == "ls" => {}
+        _ => {
+            eprintln!("usage: choros repo ls");
+            std::process::exit(2);
+        }
+    }
+    let cwd = std::env::current_dir()?;
+    let (root, name) = choros::resolve_target(&cwd, None)?;
+    let meta = choros::read_meta(&root.join(&name))?;
+    for repo in meta.repos {
+        println!("{repo}");
+    }
+    Ok(())
 }
 
 pub fn run_add(args: Vec<String>) -> Result<()> {
