@@ -3,15 +3,18 @@ use std::path::Path;
 use color_eyre::eyre::{Context, Result};
 use toml::{map::Map, Value};
 
-use crate::cache::store::{rust_store, sccache_dir};
 use crate::cache::tool;
 use crate::choros::ProgressSink;
 
-pub fn setup<P: ProgressSink>(root: &Path, workspace: &Path, progress: &P) -> Result<()> {
-    setup_inner(root, workspace, progress, tool::available)
+/// Point the workspace's cargo at sccache. sccache keeps one cache for the
+/// whole machine on purpose: it reads its cache dir only when its server
+/// starts, so a per-root dir would quietly lose to whichever build started
+/// the server first — and sharing across roots is the point anyway.
+pub fn setup<P: ProgressSink>(workspace: &Path, progress: &P) -> Result<()> {
+    setup_inner(workspace, progress, tool::available)
 }
 
-fn setup_inner<P, F>(root: &Path, workspace: &Path, progress: &P, finder: F) -> Result<()>
+fn setup_inner<P, F>(workspace: &Path, progress: &P, finder: F) -> Result<()>
 where
     P: ProgressSink,
     F: Fn(&str) -> bool,
@@ -24,40 +27,23 @@ where
         return Ok(());
     }
 
-    let sccache = sccache_dir(root);
-    std::fs::create_dir_all(&sccache)
-        .wrap_err_with(|| format!("creating {sccache:?}"))?;
-    std::fs::create_dir_all(rust_store(root))?;
-
     let config_dir = workspace.join(".cargo");
     std::fs::create_dir_all(&config_dir)?;
     let config_path = config_dir.join("config.toml");
 
-    let body = render_config(&sccache)?;
-    std::fs::write(&config_path, body)
+    std::fs::write(&config_path, render_config()?)
         .wrap_err_with(|| format!("writing {config_path:?}"))?;
 
-    progress.status(format!(
-        "rust cache → {} (sccache @ {})",
-        config_path.display(),
-        sccache.display()
-    ));
+    progress.status(format!("rust cache → {} (sccache)", config_path.display()));
     Ok(())
 }
 
-fn render_config(sccache: &Path) -> Result<String> {
+fn render_config() -> Result<String> {
     let mut build = Map::new();
     build.insert("rustc-wrapper".into(), Value::String("sccache".into()));
 
-    let mut env = Map::new();
-    env.insert(
-        "SCCACHE_DIR".into(),
-        Value::String(sccache.display().to_string()),
-    );
-
     let mut root = Map::new();
     root.insert("build".into(), Value::Table(build));
-    root.insert("env".into(), Value::Table(env));
 
     toml::to_string(&Value::Table(root))
         .wrap_err("serializing .cargo/config.toml")
@@ -67,49 +53,26 @@ fn render_config(sccache: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn tempdir() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
-
-    #[test]
-    fn render_config_contains_expected_keys() {
-        let body = render_config(Path::new("/x/sccache")).unwrap();
-        assert!(body.contains("rustc-wrapper = \"sccache\""), "got: {body}");
-        assert!(body.contains("SCCACHE_DIR = \"/x/sccache\""), "got: {body}");
-    }
-
     #[test]
     fn setup_skips_when_finder_returns_false() {
-        let root = tempdir();
-        let workspace = root.path().join("PROJ-1");
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("PROJ-1");
         std::fs::create_dir_all(&workspace).unwrap();
-        setup_inner(root.path(), &workspace, &(), |_| false).unwrap();
+        setup_inner(&workspace, &(), |_| false).unwrap();
         assert!(
             !workspace.join(".cargo/config.toml").exists(),
             "expected no config when sccache is missing"
         );
-        assert!(
-            !root.path().join(".choros-config/store/rust").exists(),
-            "expected no store dir when sccache is missing"
-        );
     }
 
     #[test]
-    fn setup_writes_config_when_finder_returns_true() {
-        let root = tempdir();
-        let workspace = root.path().join("PROJ-1");
+    fn setup_wraps_rustc_with_the_machines_one_sccache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("PROJ-1");
         std::fs::create_dir_all(&workspace).unwrap();
-        setup_inner(root.path(), &workspace, &(), |_| true).unwrap();
-        let config = workspace.join(".cargo/config.toml");
-        assert!(config.exists(), "expected {config:?}");
-        let body = std::fs::read_to_string(&config).unwrap();
-        assert!(body.contains("rustc-wrapper = \"sccache\""));
-        assert!(body.contains("SCCACHE_DIR"));
-        let expected_sccache = root.path().join(".choros-config/store/rust/sccache");
-        assert!(
-            body.contains(&expected_sccache.display().to_string()),
-            "got: {body}"
-        );
-        assert!(expected_sccache.exists(), "expected store dir created");
+        setup_inner(&workspace, &(), |_| true).unwrap();
+        let body = std::fs::read_to_string(workspace.join(".cargo/config.toml")).unwrap();
+        assert!(body.contains("rustc-wrapper = \"sccache\""), "got: {body}");
+        assert!(!body.contains("SCCACHE_DIR"), "got: {body}");
     }
 }

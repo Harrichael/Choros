@@ -32,7 +32,7 @@ pub fn setup_workspace_caches<P: ProgressSink>(
         .iter()
         .any(|(_, tcs)| tcs.iter().any(|t| *t == Toolchain::Rust));
     if any_rust {
-        rust::setup(root, workspace, progress)?;
+        rust::setup(workspace, progress)?;
     }
 
     for (repo, tcs) in &repo_toolchains {
