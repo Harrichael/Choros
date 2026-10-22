@@ -87,8 +87,8 @@ fn describe(name: &str, r: &PassReport) {
             log(&format!("{name}: {what} {}", list(v)));
         }
     }
-    if r.merge_head_parked {
-        log(&format!("{name}: merge head parked on a conflict"));
+    for e in &r.errors {
+        log(&format!("{name}: {e}"));
     }
 }
 

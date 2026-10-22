@@ -407,10 +407,10 @@ Where the build departs from the plan above, and why:
   daemon over a socket. The queue lock makes the two equivalent, and it
   works whether or not `chorosd` is running. The daemon's interval is
   `CHOROSD_INTERVAL_SECS` (default 120); `chorosd --once` runs one tick.
-- **The resync agent rotates without a handoff summary or a notes file.** A
-  `CLAUDE.md` in the sync clone would be a file in the user's repo, liable to
-  be staged into a resolution. Rotation keeps the old session ids in
-  `state.json`.
+- **The resync agent keeps its notes in the sync clone's `CLAUDE.md`**,
+  listed in `.git/info/exclude` so it can never be staged into a resolution
+  (and skipped when the repo tracks its own). Rotation starts a fresh session
+  that reads those notes; old session ids stay in `state.json`.
 - **Bases always include main.** A set's `BaseSpec` records the main commit it
   was built on and keeps it until a dependency merges past it, so the merge
   head and every set's base are built by the same function (start at main,
@@ -430,9 +430,28 @@ Where the build departs from the plan above, and why:
   back that set only.
 - **A merge commit pushed onto a private set parks it** (`pushed-merge`); its
   commits could no longer be replayed one by one.
+- **A clash in the merge head parks one set, not the queue.** The leaf that
+  was knowingly landed beside the other's work (else the newer) is parked out
+  of the merge head with what builds on it; everyone else keeps landing. It is
+  retried when the merge head it would join changes, or by `choros queue
+  resolve`.
+- **Opening a PR is idempotent**: an open PR for the branch is adopted rather
+  than a second one attempted, so a pass that died after opening one heals.
+- **The engine does not read the environment**: the CLI passes
+  `CLAUDE_CODE_SESSION_ID` in as `LandRequest::env_session`.
+- **State stays in JSON for now.** SQLite would not remove the queue lock,
+  which guards the sync clone's one git worktree; and the crash windows that
+  matter (GitHub against local state, the workspace file against the queue
+  file) span stores no database can make atomic, so write-then-reconcile and
+  idempotent lookups stay either way. Its real wins are an event history and
+  queries across queues; switch when a caller wants those (a timeline,
+  stats). Until then an append-only `events.jsonl` would give the history.
+  The state already loads and saves behind one module, so the swap is
+  surface, not shape.
 - **Driving a conflict yourself (`c`) still holds the queue's lock** while
   Claude Code is open. Other lands wait, and say they are waiting. Releasing
-  the lock mid-conflict would need the conflict itself journalled; not yet.
+  the lock mid-conflict needs a git worktree per parked conflict (the daemon's
+  recovery would otherwise wipe a half-done resolution); not yet.
 - **`choros archive` and `choros repo add` still assume top-level
   workspaces**; inside a landing folder use the landing commands.
   `find_workspace` (core) is what the engine uses to find the root from

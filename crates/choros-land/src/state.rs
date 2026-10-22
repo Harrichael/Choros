@@ -74,10 +74,6 @@ pub struct QueueState {
     pub sets: BTreeMap<u32, LandingSet>,
     #[serde(default)]
     pub merge_head: Option<MergeHead>,
-    /// Set when the merge head could not be rebuilt; the previous merge head
-    /// stays in place until it is resolved.
-    #[serde(default)]
-    pub merge_head_park: Option<Park>,
     #[serde(default)]
     pub resolutions: Vec<Resolution>,
     #[serde(default)]

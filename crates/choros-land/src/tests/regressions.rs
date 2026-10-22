@@ -61,6 +61,7 @@ fn landing_from_a_landing_folder_is_refused() {
         title: None,
         body: None,
         sessions: Vec::new(),
+        env_session: None,
     };
     let err = crate::land::land(&w.env(), &req, None).unwrap_err();
     assert!(err.to_string().contains("push review fixes"), "{err}");
@@ -288,4 +289,97 @@ fn a_chain_of_three_squash_merges_cleanly() {
         assert_eq!(w.file_at(&main, &format!("{f}.txt")).as_deref(), Some(&*format!("{f}\n")));
     }
     assert_eq!(w.state().merge_head.as_ref().unwrap().sha, main);
+}
+
+/// A pass opens a PR and dies before saving. GitHub refuses a second PR for
+/// the same branch, so the next pass must find and adopt the one it opened.
+#[test]
+fn a_crash_after_opening_a_pr_adopts_it() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
+    {
+        let q = w.queue();
+        let mut work = crate::engine::Work::begin(&q, &w.agent, None, true).unwrap().unwrap();
+        assert_eq!(work.pass(&w.forge).unwrap().opened, [2]);
+        // dies here, never saving
+    }
+
+    let report = w.pass();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let pr = w.state().sets[&2].pr.as_ref().unwrap().number;
+    assert_eq!(Some(pr), w.forge.pr_for("appq/landing-2"));
+}
+
+/// The queue recorded a land but the process died before the workspace did.
+/// Landing again finds nothing new rather than queueing the commits twice.
+#[test]
+fn a_crash_between_the_two_saves_does_not_land_twice() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    let file = ws.join(crate::workspace::LANDING_FILE);
+    let before = std::fs::read_to_string(&file).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    std::fs::write(&file, before).unwrap();
+
+    let _ = w.land(&ws);
+    assert_eq!(w.state().sets.len(), 2);
+}
+
+/// Main moving on by itself is no reason to rewrite private sets: that
+/// would force-push every queued branch and rerun its CI for nothing.
+#[test]
+fn main_moving_alone_rewrites_no_private_set() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    w.push_to_main("x.txt", "x\n");
+    assert!(w.pass().resynced.is_empty());
+}
+
+/// A fork kept beside a clash, landed from inside a session (no one to
+/// resolve the merge head there), parks only itself; an unrelated land
+/// goes ahead on a merge head without it.
+#[test]
+fn a_merge_head_clash_parks_the_fork_not_the_queue() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    let three = w.workspace("three");
+    w.commit(&one, "README", "one\n");
+    w.land(&one).unwrap();
+    w.commit(&two, "README", "two\n");
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    let st = w.state();
+    let fork = *st.sets.keys().max().unwrap();
+    assert_eq!(st.sets[&fork].park.as_ref().map(|p| p.op), Some(ParkOp::MergeHead));
+
+    w.commit(&three, "c.txt", "c\n");
+    w.land(&three).unwrap();
+    let st = w.state();
+    let mh = &st.merge_head.as_ref().unwrap().sha;
+    assert_eq!(w.file_at(mh, "README").as_deref(), Some("one\n"));
+    assert!(w.file_at(mh, "c.txt").is_some());
+
+    let mut h = Scripted {
+        content: [("README".to_string(), "one and two\n".to_string())].into(),
+        ..Default::default()
+    };
+    w.resolve(&mut h);
+    let st = w.state();
+    assert!(st.sets[&fork].park.is_none());
+    assert_eq!(
+        w.file_at(&st.merge_head.as_ref().unwrap().sha, "README").as_deref(),
+        Some("one and two\n")
+    );
 }

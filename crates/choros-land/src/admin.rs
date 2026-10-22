@@ -90,7 +90,7 @@ pub fn doctor(env: &Env, q: &Queue) -> Result<Vec<String>> {
     }
     let report = work.pass(env.forge)?;
     work.save()?;
-    if !report.parked.is_empty() || report.merge_head_parked {
+    if !report.parked.is_empty() {
         notes.push("conflicts are parked; run `choros queue resolve`".into());
     }
     Ok(notes)

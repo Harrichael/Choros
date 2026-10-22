@@ -42,6 +42,7 @@ pub struct PrRequest<'a> {
 pub trait Forge {
     fn settings(&self, repo: &Path, branch: &str) -> Result<RepoSettings>;
     fn create_pr(&self, repo: &Path, req: &PrRequest) -> Result<PrRef>;
+    fn find_open_pr(&self, repo: &Path, head: &str) -> Result<Option<PrRef>>;
     fn pr_state(&self, repo: &Path, number: u64) -> Result<PrState>;
     fn merge_pr(&self, repo: &Path, number: u64, method: MergeMethod) -> Result<()>;
 }
@@ -113,6 +114,19 @@ impl Forge for Gh {
             .and_then(|n| n.parse().ok())
             .ok_or_else(|| eyre!("could not read a PR number from {url:?}"))?;
         Ok(PrRef { number, url })
+    }
+
+    fn find_open_pr(&self, repo: &Path, head: &str) -> Result<Option<PrRef>> {
+        let v: Value = serde_json::from_str(&self.run(
+            repo,
+            &["pr", "list", "--head", head, "--state", "open", "--json", "number,url"],
+        )?)?;
+        Ok(v.as_array().and_then(|a| a.first()).and_then(|pr| {
+            Some(PrRef {
+                number: pr["number"].as_u64()?,
+                url: pr["url"].as_str()?.to_string(),
+            })
+        }))
     }
 
     fn pr_state(&self, repo: &Path, number: u64) -> Result<PrState> {

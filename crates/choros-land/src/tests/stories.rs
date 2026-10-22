@@ -300,6 +300,7 @@ fn concurrent_lands_serialize() {
                         title: None,
                         body: None,
                         sessions: Vec::new(),
+                        env_session: None,
                     };
                     crate::land::land(&w.env(), &req, None).map(|_| ()).map_err(|e| e.to_string())
                 })

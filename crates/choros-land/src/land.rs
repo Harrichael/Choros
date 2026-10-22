@@ -30,6 +30,9 @@ pub struct LandRequest {
     pub body: Option<String>,
     /// Sessions to fork into the landing; empty means "work it out".
     pub sessions: Vec<String>,
+    /// The Claude Code session `land` is running inside, if any (the CLI
+    /// reads `CLAUDE_CODE_SESSION_ID`).
+    pub env_session: Option<String>,
 }
 
 #[derive(Debug)]
@@ -240,13 +243,7 @@ fn rebase_workspace(
 /// The queue's merge head, rebuilt if it is out of date.
 fn current_merge_head(env: &Env, q: &Queue) -> Result<MergeHead> {
     let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
-    if !work.rebuild_merge_head()? {
-        return Err(eyre!(
-            "queue {}'s merge head is parked on a conflict; run `choros queue resolve {}` first",
-            q.name,
-            q.name
-        ));
-    }
+    work.rebuild_merge_head()?;
     work.save()?;
     Ok(work.st.merge_head.clone().unwrap())
 }
@@ -281,21 +278,22 @@ fn land_queued(
     ws: &Path,
     repo: &str,
     req: &LandRequest,
-    mut handler: Handler<'_>,
+    handler: Handler<'_>,
 ) -> Result<Landed> {
     let repo_dir = ws.join(repo);
     let mut warnings = Vec::new();
 
     let n = match &req.fork {
-        Some(deps) => land_fork(env, q, ws, repo, deps, req, handler.as_deref_mut())?,
-        None => land_normal(env, q, ws, repo, req, handler.as_deref_mut())?,
+        Some(deps) => land_fork(env, q, ws, repo, deps, req, handler)?,
+        None => land_normal(env, q, ws, repo, req)?,
     };
 
     // Settle the rest of the queue now — the new set may already be at the
     // front — rather than leave it to the daemon's next poll. The land itself
     // is done by here, so trouble (GitHub unreachable, say) is a warning: the
-    // daemon's next pass picks up where this one stopped.
-    if let Some(mut work) = Work::begin(q, env.agent, handler, true)? {
+    // daemon's next pass picks up where this one stopped. No handler: other
+    // sets' conflicts are not this land's to ask about.
+    if let Some(mut work) = Work::begin(q, env.agent, None, true)? {
         if let Err(e) = work.pass(env.forge) {
             warnings.push(format!("landed, but settling the queue failed ({e}); the daemon will retry"));
         }
@@ -323,7 +321,6 @@ fn land_normal(
     ws: &Path,
     repo: &str,
     req: &LandRequest,
-    mut handler: Handler<'_>,
 ) -> Result<u32> {
     let repo_dir = ws.join(repo);
     let git = Git::new(&repo_dir);
@@ -336,10 +333,10 @@ fn land_normal(
             return Err(eyre!("nothing left to land in {repo}: its commits are already in the queue"));
         }
 
-        let mut work = Work::begin(q, env.agent, handler.as_deref_mut(), true)?.unwrap();
-        if !work.rebuild_merge_head()? {
-            return Err(eyre!("queue {}'s merge head is parked on a conflict; run `choros queue resolve {}`", q.name, q.name));
-        }
+        // No handler: a clash elsewhere in the queue is not this land's to
+        // resolve; it parks that set and the merge head goes on without it.
+        let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+        work.rebuild_merge_head()?;
         let now = work.st.merge_head.clone().unwrap();
         if now.composition != mh.composition {
             continue;
@@ -427,7 +424,7 @@ fn land_fork(
         let what = crate::state::branch(&q.name, n);
         let base = work
             .build(&main, &tips, &format!("the base of {what}"))?
-            .map_err(|files| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
+            .map_err(|(_, files)| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
         let tip = match work.replay(&base, &own, &what)? {
             Ok(t) => t,
             // No one here to resolve in the sync clone (a land from inside a
@@ -778,10 +775,9 @@ fn pick_sessions(env: &Env, ws: &Path, scope: &Path, req: &LandRequest) -> Vec<S
     if !req.sessions.is_empty() {
         return req.sessions.clone();
     }
-    if let Ok(id) = std::env::var("CLAUDE_CODE_SESSION_ID")
-        && !id.is_empty() {
-            return vec![id];
-        }
+    if let Some(id) = req.env_session.as_ref().filter(|id| !id.is_empty()) {
+        return vec![id.clone()];
+    }
     let Some(home) = &env.home else {
         return Vec::new();
     };

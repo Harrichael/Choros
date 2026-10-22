@@ -83,6 +83,7 @@ impl Queue {
         for (k, v) in [("rerere.enabled", "true"), ("rerere.autoUpdate", "true")] {
             git.run(&["config", k, v])?;
         }
+        ensure_notes(&git)?;
         let main = git
             .run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])?
             .trim_start_matches("origin/")
@@ -182,13 +183,42 @@ impl Queue {
         let git = self.git();
         git.abort_in_progress()?;
         git.run(&["reset", "--quiet", "--hard"])?;
+        // Excluded files (the notes) survive: clean without -x keeps them.
         git.run(&["clean", "--quiet", "-fd"])?;
-        Ok(())
+        ensure_notes(&git)
     }
 
     pub fn fetch(&self) -> Result<()> {
         self.git().fetch("origin", &[])
     }
+}
+
+/// The resync agent's notes on this queue, for whichever session comes next.
+/// Excluded from git so they can never be staged into a resolution; skipped
+/// when the repo tracks a CLAUDE.md of its own, which must not be shadowed.
+fn ensure_notes(git: &Git) -> Result<()> {
+    let notes = git.dir().join("CLAUDE.md");
+    if notes.exists() || git.succeeds(&["ls-files", "--error-unmatch", "CLAUDE.md"])? {
+        return Ok(());
+    }
+    let exclude = PathBuf::from(git.run(&["rev-parse", "--absolute-git-dir"])?).join("info/exclude");
+    std::fs::create_dir_all(exclude.parent().unwrap())?;
+    let mut body = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if !body.lines().any(|l| l.trim() == "/CLAUDE.md") {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("/CLAUDE.md\n");
+        std::fs::write(&exclude, body)?;
+    }
+    std::fs::write(
+        notes,
+        "# Resync notes\n\n\
+         Choros's resync agent works here to resolve conflicts in this landing queue. \
+         This file is not part of the repo. Keep short notes for the next session: \
+         recurring conflicts, how they were settled, anything surprising about the code.\n",
+    )?;
+    Ok(())
 }
 
 pub fn sync_dir(root: &Path, queue: &str, repo: &str) -> PathBuf {

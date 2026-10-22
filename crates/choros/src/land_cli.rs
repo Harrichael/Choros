@@ -111,6 +111,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         title,
         body,
         sessions,
+        env_session: std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
     };
     let handler: Option<&mut (dyn ConflictHandler + 'static)> =
         if interactive() { Some(&mut handler) } else { None };
@@ -233,9 +234,6 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
     }
     for q in report {
         println!("{} ({}) @ {}", q.name, q.repo, q.root.display());
-        if let Some(p) = &q.merge_head_park {
-            println!("  ! merge head parked: conflicts in {}", p.files.join(", "));
-        }
         for s in &q.sets {
             if s.state == "merged" {
                 continue;
@@ -363,8 +361,8 @@ fn print_report(name: &str, r: &PassReport) {
             eprintln!("{name}: {what} {}", list(v));
         }
     }
-    if r.merge_head_parked {
-        eprintln!("{name}: merge head parked; run `choros queue resolve {name}`");
+    for e in &r.errors {
+        eprintln!("{name}: {e}");
     }
 }
 

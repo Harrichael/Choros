@@ -92,7 +92,9 @@ pub fn conflict_prompt(brief: &ConflictBrief) -> String {
          Resolve every conflict so both sides' intent survives, then `git add` each file. \
          Do not commit, continue, abort, reset or push: Choros checks your result and \
          finishes the operation itself. If the right resolution is genuinely unclear, \
-         say so plainly in your final message instead of guessing.\n",
+         say so plainly in your final message instead of guessing.\n\
+         CLAUDE.md here holds notes from earlier resync sessions on this queue (it is \
+         not part of the repo); add to it anything the next session should know.\n",
         brief.dir.display(),
         brief.operation,
         if brief.files.is_empty() {

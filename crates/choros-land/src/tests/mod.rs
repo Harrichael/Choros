@@ -36,7 +36,6 @@ fn isolate_git() {
         unsafe {
             std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
         }
     });
 }
@@ -134,6 +133,10 @@ impl Forge for FakeForge {
             return Err(eyre!("GitHub refuses a PR for a branch it does not have: {}", req.head));
         }
         let mut prs = self.prs.lock().unwrap();
+        // As GitHub does: one open PR per head branch.
+        if prs.values().any(|p| p.head == req.head && p.state == Some(PrState::Open)) {
+            return Err(eyre!("a pull request for branch {:?} already exists", req.head));
+        }
         let number = prs.len() as u64 + 1;
         prs.insert(
             number,
@@ -149,6 +152,19 @@ impl Forge for FakeForge {
             number,
             url: format!("https://github.test/pull/{number}"),
         })
+    }
+
+    fn find_open_pr(&self, _repo: &Path, head: &str) -> Result<Option<PrRef>> {
+        Ok(self
+            .prs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.head == head && p.state == Some(PrState::Open))
+            .map(|(n, _)| PrRef {
+                number: *n,
+                url: format!("https://github.test/pull/{n}"),
+            }))
     }
 
     fn pr_state(&self, _repo: &Path, number: u64) -> Result<PrState> {
@@ -311,6 +327,7 @@ impl World {
             title: None,
             body: None,
             sessions: vec!["source-session".into()],
+            env_session: None,
         };
         crate::land::land(
             &self.env(),

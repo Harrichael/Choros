@@ -75,9 +75,10 @@ pub struct PassReport {
     pub updated_public: Vec<u32>,
     pub opened: Vec<u32>,
     pub parked: Vec<u32>,
-    pub merge_head_parked: bool,
     /// Pushes origin refused; the old tip was kept and the next pass retries.
     pub push_failed: Vec<u32>,
+    /// Other trouble the pass worked around, to be retried next pass.
+    pub errors: Vec<String>,
 }
 
 /// One locked session of work on a queue.
@@ -213,9 +214,11 @@ impl<'q, 'h> Work<'q, 'h> {
     /// Start at `main` and merge in each tip. Tips already contained are
     /// skipped and a tip containing everything so far is fast-forwarded to,
     /// so the same inputs always give the same commit when no merge is needed.
-    pub fn build(&mut self, main: &str, tips: &[String], what: &str) -> Result<std::result::Result<String, Vec<String>>> {
+    /// On a conflict that was not resolved: the index of the tip that clashed,
+    /// and the files.
+    pub fn build(&mut self, main: &str, tips: &[String], what: &str) -> Result<std::result::Result<String, (usize, Vec<String>)>> {
         self.git.checkout_detached(main)?;
-        for tip in tips {
+        for (i, tip) in tips.iter().enumerate() {
             let head = self.git.head()?;
             if self.git.is_ancestor(tip, &head)? {
                 continue;
@@ -226,7 +229,7 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             let step = self.git.merge(tip, &format!("Merge {tip:.12} into {what}"))?;
             if let Some(files) = self.settle(step, &format!("building {what}"))? {
-                return Ok(Err(files));
+                return Ok(Err((i, files)));
             }
         }
         Ok(Ok(self.git.head()?))
@@ -280,7 +283,7 @@ impl<'q, 'h> Work<'q, 'h> {
         let what = set.branch(&self.q.name);
         let base = match self.build(&main, &tips, &format!("the base of {what}"))? {
             Ok(b) => b,
-            Err(files) => return self.park(n, ParkOp::BaseMerge, files, spec.key()),
+            Err((_, files)) => return self.park(n, ParkOp::BaseMerge, files, spec.key()),
         };
         let tip = match self.replay(&base, &own, &what)? {
             Ok(t) => t,
@@ -454,46 +457,102 @@ impl<'q, 'h> Work<'q, 'h> {
             old_base: set.base.clone(),
             old_base_sha: set.base_sha.clone(),
         });
-        set.park = None;
+        // A set parked out of the merge head stays parked; that is another matter.
+        if set.park.as_ref().is_some_and(|p| p.op == ParkOp::MainIntoPublic) {
+            set.park = None;
+        }
         self.publish(n).map(Some)
     }
 
-    /// Rebuild the merge head if what it should contain changed.
-    pub fn rebuild_merge_head(&mut self) -> Result<bool> {
-        let live = graph::live(&self.st);
-        let leaves = graph::leaves(&self.st, &live);
-        let composition = Composition {
-            main: self.main_sha()?,
-            sets: leaves.iter().map(|n| (*n, self.st.sets[n].tip.clone())).collect(),
-        };
-        let key = composition.key();
-        if self.st.merge_head.as_ref().is_some_and(|m| m.composition == composition) {
-            return Ok(true);
+    /// Rebuild the merge head if what it should contain changed. A leaf that
+    /// clashes with the others and is not resolved here is parked out of it
+    /// (with what it built on), so one clash never stops the rest of the
+    /// queue — or anyone landing on it.
+    pub fn rebuild_merge_head(&mut self) -> Result<()> {
+        // What the merge head would hold with every set in: a set parked out
+        // of it is retried only once that has changed.
+        let parked_out: Vec<(u32, Park)> = self
+            .st
+            .sets
+            .iter()
+            .filter_map(|(n, s)| s.park.clone().filter(|p| p.op == ParkOp::MergeHead).map(|p| (*n, p)))
+            .collect();
+        for (n, _) in &parked_out {
+            self.st.sets.get_mut(n).unwrap().park = None;
         }
-        if self.st.merge_head_park.as_ref().is_some_and(|p| p.on == key) && self.handler.is_none() {
-            return Ok(false);
-        }
-        let tips: Vec<String> = composition.sets.iter().map(|(_, t)| t.clone()).collect();
-        let what = format!("{}/merge-head", self.q.name);
-        let sha = match self.build(&composition.main, &tips, &what)? {
-            Ok(sha) => sha,
-            Err(files) => {
-                self.st.merge_head_park = Some(Park {
-                    op: ParkOp::MergeHead,
-                    files,
-                    on: key,
-                });
-                return Ok(false);
+        let main = self.main_sha()?;
+        let full = self.composition(&main).key();
+        for (n, park) in parked_out {
+            if park.on == full && self.handler.is_none() {
+                self.st.sets.get_mut(&n).unwrap().park = Some(park);
             }
-        };
-        self.git
-            .run(&["update-ref", &format!("refs/heads/{what}"), &sha])?;
-        if self.q.config.push.merge_head {
-            self.git.push_force("origin", &sha, &what)?;
         }
-        self.st.merge_head = Some(MergeHead { sha, composition });
-        self.st.merge_head_park = None;
-        Ok(true)
+
+        let what = format!("{}/merge-head", self.q.name);
+        loop {
+            let composition = self.composition(&main);
+            if self.st.merge_head.as_ref().is_some_and(|m| m.composition == composition) {
+                return Ok(());
+            }
+            let tips: Vec<String> = composition.sets.iter().map(|(_, t)| t.clone()).collect();
+            match self.build(&main, &tips, &what)? {
+                Ok(sha) => {
+                    self.git
+                        .run(&["update-ref", &format!("refs/heads/{what}"), &sha])?;
+                    if self.q.config.push.merge_head {
+                        self.git.push_force("origin", &sha, &what)?;
+                    }
+                    self.st.merge_head = Some(MergeHead { sha, composition });
+                    return Ok(());
+                }
+                Err((i, files)) => {
+                    let n = self.clash_culprit(&composition, i)?;
+                    self.st.sets.get_mut(&n).unwrap().park = Some(Park {
+                        op: ParkOp::MergeHead,
+                        files,
+                        on: full.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Leaf `i` would not merge onto the leaves before it. Of the pair that
+    /// clash, park the one that was knowingly landed beside the other's work
+    /// (it lists it, or something under it, in `conflicts_with`); failing
+    /// that, the newer one, since the older was there first.
+    fn clash_culprit(&self, composition: &Composition, i: usize) -> Result<u32> {
+        let (n, tip) = &composition.sets[i];
+        let Some((m, _)) = composition.sets[..i]
+            .iter()
+            .find(|(_, t)| !self.git.merge_conflicts(t, tip).unwrap_or_default().is_empty())
+        else {
+            return Ok(*n);
+        };
+        let knows = |a: u32, b: u32| {
+            let mut under = graph::ancestors(&self.st, b);
+            under.insert(b);
+            self.st.sets[&a].conflicts_with.iter().any(|c| under.contains(c))
+        };
+        Ok(if knows(*m, *n) {
+            *m
+        } else if knows(*n, *m) {
+            *n
+        } else {
+            (*n).max(*m)
+        })
+    }
+
+    /// The merge head's contents: main and the live leaves.
+    fn composition(&self, main: &str) -> Composition {
+        let live = graph::live(&self.st);
+        Composition {
+            main: main.to_string(),
+            sets: graph::leaves(&self.st, &live)
+                .into_iter()
+                .map(|n| (n, self.st.sets[&n].tip.clone()))
+                .collect(),
+        }
     }
 
     pub fn open_pr(&mut self, n: u32, forge: &dyn Forge) -> Result<()> {
@@ -517,6 +576,12 @@ impl<'q, 'h> Work<'q, 'h> {
                 self.git.subject(&first)?
             }
         };
+        // A PR opened by a pass that died before saving is still there; GitHub
+        // would refuse a second one for the same branch.
+        if let Some(pr) = forge.find_open_pr(self.git.dir(), &branch)? {
+            self.st.sets.get_mut(&n).unwrap().pr = Some(pr);
+            return Ok(());
+        }
         let pr = forge.create_pr(
             self.git.dir(),
             &PrRequest {
@@ -561,7 +626,9 @@ impl<'q, 'h> Work<'q, 'h> {
                 continue;
             }
             if set.is_public() {
-                if set.park.as_ref().is_some_and(|p| p.on == self.main_sha().unwrap_or_default()) {
+                if set.park.as_ref().is_some_and(|p| {
+                    p.op == ParkOp::MainIntoPublic && p.on == self.main_sha().unwrap_or_default()
+                }) {
                     continue;
                 }
                 if settings.is_none() {
@@ -575,7 +642,7 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 continue;
             }
-            if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge)) {
+            if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge | ParkOp::MergeHead)) {
                 continue;
             }
             let spec = self.desired_base(n)?;
@@ -595,7 +662,15 @@ impl<'q, 'h> Work<'q, 'h> {
             }
         }
 
-        report.merge_head_parked = !self.rebuild_merge_head()?;
+        self.rebuild_merge_head()?;
+        let parked_out: Vec<u32> = self
+            .st
+            .sets
+            .iter()
+            .filter(|(n, s)| s.park.as_ref().is_some_and(|p| p.op == ParkOp::MergeHead) && !report.parked.contains(n))
+            .map(|(n, _)| *n)
+            .collect();
+        report.parked.extend(parked_out);
 
         let cross = |queue: &str, n: u32| self.cross_merged()(queue, n);
         let front: Vec<u32> = graph::front(&self.st, &cross)
@@ -610,7 +685,7 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             match self.open_pr(n, forge) {
                 Ok(()) => report.opened.push(n),
-                Err(_) => report.push_failed.push(n),
+                Err(e) => report.errors.push(format!("landing-{n}: opening its PR failed: {e}")),
             }
         }
         self.tend_landings(&report);

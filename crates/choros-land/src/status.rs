@@ -16,7 +16,6 @@ pub struct QueueStatus {
     pub name: String,
     pub repo: String,
     pub sets: Vec<SetLine>,
-    pub merge_head_park: Option<Park>,
     /// Workspaces (and repos) whose base the merge head has moved past.
     pub needs_sync: Vec<(PathBuf, String)>,
 }
@@ -120,7 +119,6 @@ fn queue_status(root: &Path, name: &str) -> Result<QueueStatus> {
         name: name.to_string(),
         repo: q.config.repo.clone(),
         sets,
-        merge_head_park: st.merge_head_park.clone(),
         needs_sync,
     })
 }
@@ -141,8 +139,7 @@ pub fn prompt_token(cwd: &Path) -> String {
         let Ok(st) = crate::state::read_state(&queue::queues_dir(&root).join(name).join("state.json")) else {
             continue;
         };
-        if st.merge_head_park.is_some()
-            || st
+        if st
                 .sets
                 .values()
                 .any(|s| (s.is_open() && s.park.is_some()) || s.status == SetStatus::Closed)
