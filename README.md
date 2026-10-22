@@ -81,7 +81,7 @@ choros repo ls                  # inside a workspace: list its cloned repos
 eval "$(choros shell-init)"
 ```
 
-After that, `choros work …` is silent on success and your shell ends up in the new choros dir.
+After that, `choros work …` is silent on success and your shell ends up in the new choros dir, and `choros archive` run from inside a workspace leaves your shell at the choros root rather than in the moved-away directory.
 
 Keys (main screen):
 

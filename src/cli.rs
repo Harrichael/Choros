@@ -9,13 +9,23 @@ use crate::registry;
 
 const SHELL_INIT: &str = r#"# choros shell integration — works in bash and zsh
 choros() {
-  if [ "$1" = "work" ]; then
-    local target
-    target="$(command choros "$@")" || return $?
-    [ -n "$target" ] && cd "$target"
-  else
-    command choros "$@"
-  fi
+  local target
+  case "$1" in
+    work)
+      target="$(command choros "$@")" || return $?
+      [ -n "$target" ] && cd "$target"
+      ;;
+    archive)
+      target="$(command choros "$@")" || return $?
+      printf '%s\n' "$target"
+      # Archiving the workspace you stand in moves it out from under the
+      # shell; land on the choros root instead of a path that is gone.
+      [ -d "$PWD" ] || cd "${target%/.choros-config/archive/*}"
+      ;;
+    *)
+      command choros "$@"
+      ;;
+  esac
 }
 "#;
 
@@ -151,11 +161,6 @@ pub fn run_archive(args: Vec<String>) -> Result<()> {
     let name_arg = args.into_iter().next();
     let (root, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
     let dst = choros::archive(&root, &name)?;
-    if cwd.starts_with(root.join(&name)) {
-        eprintln!(
-            "warning: archived workspace contained your current directory; cd somewhere else"
-        );
-    }
     println!("{}", dst.display());
     Ok(())
 }
