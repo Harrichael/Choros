@@ -46,6 +46,10 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<PassReport> {
     if !matches!(set.status, SetStatus::Queued | SetStatus::Closed) {
         return Err(eyre!("landing-{n} is already {:?}", set.status));
     }
+    // Choros stops watching a dropped set; an open PR would be orphaned.
+    if set.status == SetStatus::Queued && set.pr.is_some() {
+        return Err(eyre!("landing-{n} has an open PR; close it on GitHub, then drop the set"));
+    }
     if set.remote.is_some() && set.pr.is_none() {
         let branch = set.branch(&q.name);
         work.git.delete_remote_branch("origin", &branch)?;
@@ -99,11 +103,10 @@ pub fn landing_session(q: &Queue, n: u32, session: Option<&str>) -> Result<(Path
         .sets
         .get(&n)
         .ok_or_else(|| eyre!("no landing-{n} in {}", q.name))?;
-    let dir = if q.landing_dir(n).exists() {
-        q.landing_dir(n)
-    } else {
-        q.archived_landing_dir(n)
-    };
+    let dir = [q.landing_dir(n), q.archived_landing_dir(n)]
+        .into_iter()
+        .find(|d| d.exists())
+        .ok_or_else(|| eyre!("landing-{n} of {} has no folder", q.name))?;
     let fork = match session {
         Some(s) => Some(
             set.sessions

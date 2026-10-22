@@ -16,7 +16,7 @@ use crate::forge::PrRequest;
 use crate::git::Git;
 use crate::graph;
 use crate::queue::Queue;
-use crate::state::{BaseSpec, Dep, LandMode, LandingSet, SessionFork, SetStatus, Source};
+use crate::state::{BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
 use crate::workspace::{self, LandingOf, RepoLanding};
 
 pub struct LandRequest {
@@ -51,11 +51,18 @@ pub struct LandOutcome {
 
 pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<LandOutcome> {
     let (root, ws) = core::find_workspace(&req.cwd)?;
+    refuse_landing_folder(&ws)?;
     let meta = core::read_meta(&ws)?;
-    let scope: Vec<String> = match repo_of(&ws, &req.cwd, &meta) {
+    let mut scope: Vec<String> = match repo_of(&ws, &req.cwd, &meta) {
         Some(repo) => vec![repo],
         None => meta.repos.clone(),
     };
+    for repo in &scope {
+        settle_pending(&ws, repo)?;
+    }
+    // One queue lock at a time, taken in queue-name order.
+    let wl = workspace::read(&ws)?;
+    scope.sort_by_key(|r| wl.repo.get(r).and_then(|rl| rl.queue.clone()));
 
     let mut landed = Vec::new();
     for repo in &scope {
@@ -96,6 +103,20 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
     Ok(LandOutcome { landed, archived_to })
 }
 
+/// A landing folder's branch is already a landing-set: landing it again would
+/// put the PR's commits somewhere else (with no queue, straight onto main).
+fn refuse_landing_folder(ws: &Path) -> Result<()> {
+    if let Some(l) = workspace::read(ws)?.landing {
+        return Err(eyre!(
+            "this is landing-{} of queue {}: push review fixes to {} instead",
+            l.n,
+            l.queue,
+            crate::state::branch(&l.queue, l.n)
+        ));
+    }
+    Ok(())
+}
+
 /// The repo `cwd` is inside, if any.
 fn repo_of(ws: &Path, cwd: &Path, meta: &ChorosMeta) -> Option<String> {
     let rel = cwd.strip_prefix(ws).ok()?;
@@ -134,6 +155,32 @@ fn update_repo(ws: &Path, repo: &str, f: impl FnOnce(&mut RepoLanding)) -> Resul
     workspace::write(ws, &wl)
 }
 
+/// Finish the bookkeeping of a rebase this repo was sent into: once HEAD
+/// contains the commit it was rebasing onto, that commit is where landing
+/// resumes — however the conflict was resolved, and by whom.
+fn settle_pending(ws: &Path, repo: &str) -> Result<()> {
+    let git = Git::new(&ws.join(repo));
+    if git.in_progress()?.is_some() {
+        return Err(eyre!(
+            "{:?} is in the middle of a rebase or merge; finish it (`git rebase --continue`) \
+             or abort it, then try again",
+            git.dir()
+        ));
+    }
+    let Some(pending) = workspace::read(ws)?.repo.get(repo).and_then(|r| r.pending.clone()) else {
+        return Ok(());
+    };
+    let reached = git.is_ancestor(&pending, "HEAD")?;
+    update_repo(ws, repo, |rl| {
+        let composition = rl.pending_composition.take();
+        if reached {
+            rl.landed_through = Some(pending);
+            rl.composition = composition;
+        }
+        rl.pending = None;
+    })
+}
+
 fn check_clean(git: &Git, through: &str) -> Result<()> {
     if !git.is_clean()? {
         return Err(eyre!("{:?} has uncommitted changes; commit or stash them first", git.dir()));
@@ -160,6 +207,74 @@ fn check_landable(git: &Git, through: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rebase the repo's unlanded commits onto `onto_ref` of the queue's sync
+/// clone, in place. A conflict is left in progress for whoever is in the
+/// workspace; `pending` remembers where it was headed.
+#[allow(clippy::too_many_arguments)]
+fn rebase_workspace(
+    q: &Queue,
+    ws: &Path,
+    repo: &str,
+    git: &Git,
+    onto_ref: &str,
+    onto_sha: &str,
+    composition: Option<String>,
+    what: &str,
+) -> Result<()> {
+    let through = landed_through(ws, repo)?;
+    update_repo(ws, repo, |rl| {
+        rl.pending = Some(onto_sha.to_string());
+        rl.pending_composition = composition;
+    })?;
+    git.fetch(q.sync_dir().to_str().unwrap(), &[&format!("+{onto_ref}:refs/choros/onto")])?;
+    if !git.succeeds(&["rebase", "--onto", "refs/choros/onto", &through])? {
+        return Err(eyre!(
+            "rebasing {repo} onto {what} conflicts in: {}\n\
+             resolve them, `git rebase --continue`, then run the same command again",
+            git.unmerged()?.join(", ")
+        ));
+    }
+    settle_pending(ws, repo)
+}
+
+/// The queue's merge head, rebuilt if it is out of date.
+fn current_merge_head(env: &Env, q: &Queue) -> Result<MergeHead> {
+    let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+    if !work.rebuild_merge_head()? {
+        return Err(eyre!(
+            "queue {}'s merge head is parked on a conflict; run `choros queue resolve {}` first",
+            q.name,
+            q.name
+        ));
+    }
+    work.save()?;
+    Ok(work.st.merge_head.clone().unwrap())
+}
+
+/// Put the repo's unlanded commits on the queue's current merge head. Whether
+/// that is needed is a question of content, not position: the merge head can
+/// also move *back* (a set closed or dropped), and then the rebase is what
+/// takes its commits out of this workspace.
+fn sync_to_merge_head(env: &Env, q: &Queue, ws: &Path, repo: &str) -> Result<MergeHead> {
+    let git = Git::new(&ws.join(repo));
+    let through = landed_through(ws, repo)?;
+    check_clean(&git, &through)?;
+    let mh = current_merge_head(env, q)?;
+    let key = mh.composition.key();
+    let known = workspace::read(ws)?.repo.get(repo).and_then(|r| r.composition.clone());
+    // A merge in the range (main merged in by hand) is straightened out too:
+    // the rebase drops it, and main's commits already in the merge head.
+    let needed = known.as_deref() != Some(key.as_str())
+        || !git.is_ancestor(&mh.sha, "HEAD")?
+        || git.has_merges(&through, "HEAD")?;
+    if needed {
+        let mh_ref = format!("refs/heads/{}/merge-head", q.name);
+        let what = format!("{}'s merge head", q.name);
+        rebase_workspace(q, ws, repo, &git, &mh_ref, &mh.sha, Some(key), &what)?;
+    }
+    Ok(mh)
+}
+
 fn land_queued(
     env: &Env,
     q: &Queue,
@@ -169,18 +284,12 @@ fn land_queued(
     mut handler: Handler<'_>,
 ) -> Result<Landed> {
     let repo_dir = ws.join(repo);
-    let git = Git::new(&repo_dir);
     let mut warnings = Vec::new();
 
-    let n = if let Some(deps) = &req.fork {
-        let through = landed_through(ws, repo)?;
-        check_landable(&git, &through)?;
-        land_fork(env, q, ws, repo, &through, deps, req, handler.as_deref_mut())?
-    } else {
-        land_normal(env, q, ws, repo, req, handler.as_deref_mut())?
+    let n = match &req.fork {
+        Some(deps) => land_fork(env, q, ws, repo, deps, req, handler.as_deref_mut())?,
+        None => land_normal(env, q, ws, repo, req, handler.as_deref_mut())?,
     };
-    let head = git.head()?;
-    update_repo(ws, repo, |rl| rl.landed_through = Some(head))?;
 
     // Settle the rest of the queue now — the new set may already be at the
     // front — rather than leave it to the daemon's next poll. The land itself
@@ -221,56 +330,41 @@ fn land_normal(
     // Each round either lands or moves the workspace onto a newer merge head;
     // the merge head only moves when someone else lands meanwhile.
     for _ in 0..5 {
-        let through = landed_through(ws, repo)?;
-        check_clean(&git, &through)?;
+        let mh = sync_to_merge_head(env, q, ws, repo)?;
+        let head = git.head()?;
+        if head == mh.sha {
+            return Err(eyre!("nothing left to land in {repo}: its commits are already in the queue"));
+        }
+
         let mut work = Work::begin(q, env.agent, handler.as_deref_mut(), true)?.unwrap();
         if !work.rebuild_merge_head()? {
-            return Err(eyre!(
-                "queue {}'s merge head is parked on a conflict; run `choros queue resolve {}` first",
-                q.name,
-                q.name
-            ));
+            return Err(eyre!("queue {}'s merge head is parked on a conflict; run `choros queue resolve {}`", q.name, q.name));
         }
-        let mh = work.st.merge_head.clone().unwrap();
-        work.save()?;
-
-        let head = git.head()?;
-        // Syncing also straightens out a workspace that merged main in: the
-        // rebase drops the merge and the main commits already in the merge head.
-        if !git.is_ancestor(&mh.sha, &head)? || git.has_merges(&through, &head)? {
-            drop(work);
-            sync_onto(q, &git, &through)?;
-            update_repo(ws, repo, |rl| {
-                rl.base = Some(mh.sha.clone());
-                rl.landed_through = Some(mh.sha.clone());
-                rl.composition = Some(mh.composition.key());
-            })?;
+        let now = work.st.merge_head.clone().unwrap();
+        if now.composition != mh.composition {
             continue;
         }
 
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
         let deps = work.next_dep_set();
-        let live = graph::live(&work.st);
         let base = BaseSpec {
-            main: Some(mh.composition.main.clone()),
-            deps: graph::leaves(&work.st, &live)
-                .into_iter()
-                .map(|d| (d, work.st.sets[&d].tip.clone()))
-                .collect(),
+            main: Some(now.composition.main.clone()),
+            deps: now.composition.sets.clone(),
         };
         work.git
             .fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
         work.st.sets.insert(
             n,
-            new_set(n, deps, base, mh.sha.clone(), head.clone(), ws, repo, req),
+            new_set(n, deps, base, now.sha.clone(), head.clone(), ws, repo, req),
         );
+        // A refused push is retried by the pass that follows.
         work.publish(n)?;
         work.rebuild_merge_head()?;
         work.save()?;
         let key = work.st.merge_head.as_ref().map(|m| m.composition.key());
         update_repo(ws, repo, |rl| {
-            rl.base = Some(head.clone());
+            rl.landed_through = Some(head.clone());
             rl.composition = key;
         })?;
         return Ok(n);
@@ -280,21 +374,24 @@ fn land_normal(
 
 /// Land beside the queue rather than on top of it: on main, or on the
 /// dependencies picked. The workspace's own earlier sets always come along.
-#[allow(clippy::too_many_arguments)]
 fn land_fork(
     env: &Env,
     q: &Queue,
     ws: &Path,
     repo: &str,
-    through: &str,
     picked: &[Dep],
     req: &LandRequest,
     handler: Handler<'_>,
 ) -> Result<u32> {
     let repo_dir = ws.join(repo);
-    let head = Git::new(&repo_dir).head()?;
+    let git = Git::new(&repo_dir);
+    let through = landed_through(ws, repo)?;
+    check_landable(&git, &through)?;
+    let head = git.head()?;
     let mut work = Work::begin(q, env.agent, handler, true)?.unwrap();
     let mut deps: Vec<Dep> = picked.to_vec();
+    let moved_onto = workspace::read(ws)?.repo.get(repo).map(|r| r.fork_deps.clone()).unwrap_or_default();
+    deps.extend(moved_onto.into_iter().map(Dep::Set));
     for (m, set) in &work.st.sets {
         if set.is_open() && set.source.workspace == ws && set.source.repo == repo && !deps.contains(&Dep::Set(*m)) {
             deps.push(Dep::Set(*m));
@@ -302,13 +399,14 @@ fn land_fork(
     }
     for d in &deps {
         if let Dep::Set(m) = d
-            && !work.st.sets.get(m).is_some_and(|s| s.is_open()) {
-                return Err(eyre!("{} is not a queued landing-set", crate::state::branch(&q.name, *m)));
-            }
+            && !work.st.sets.get(m).is_some_and(|s| s.is_open())
+        {
+            return Err(eyre!("{} is not a queued landing-set", crate::state::branch(&q.name, *m)));
+        }
     }
     work.git
         .fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
-    let own = work.git.commits(through, &head)?;
+    let own = work.git.commits(&through, &head)?;
     let n = work.st.next_n.max(1);
     work.st.next_n = n + 1;
 
@@ -330,9 +428,23 @@ fn land_fork(
         let base = work
             .build(&main, &tips, &format!("the base of {what}"))?
             .map_err(|files| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
-        let tip = work
-            .replay(&base, &own, &what)?
-            .map_err(|files| eyre!("{what} does not apply onto its dependencies; conflicts in: {}", files.join(", ")))?;
+        let tip = match work.replay(&base, &own, &what)? {
+            Ok(t) => t,
+            // No one here to resolve in the sync clone (a land from inside a
+            // session): move the workspace onto the base instead, so the
+            // session that wrote the commits resolves them where they live.
+            Err(_) if work.handler.is_none() => {
+                work.git.run(&["update-ref", "refs/choros/fork-base", &base])?;
+                drop(work);
+                update_repo(ws, repo, |rl| rl.fork_deps = set_deps.clone())?;
+                let onto = format!("{what}'s dependencies");
+                rebase_workspace(q, ws, repo, &git, "refs/choros/fork-base", &base, None, &onto)?;
+                return land_fork(env, q, ws, repo, &deps, req, None);
+            }
+            Err(files) => {
+                return Err(eyre!("{what} does not apply onto its dependencies; conflicts in: {}", files.join(", ")));
+            }
+        };
 
         // Settle the fork's place before anything about it is public: check it
         // against every other leaf of the merge head it would sit beside.
@@ -379,10 +491,14 @@ fn land_fork(
         set.conflicts_with = clashes;
         work.st.sets.insert(n, set);
         work.publish(n)?;
-        if !work.rebuild_merge_head()? {
-            // Left parked: resolvable later with `choros queue resolve`.
-        }
+        // A clash kept beside may park the merge head; `choros queue resolve`
+        // settles it, and status says so.
+        work.rebuild_merge_head()?;
         work.save()?;
+        update_repo(ws, repo, |rl| {
+            rl.landed_through = Some(head.clone());
+            rl.fork_deps.clear();
+        })?;
         return Ok(n);
     }
 }
@@ -418,31 +534,15 @@ fn new_set(
         body: req.body.clone(),
         sessions: Vec::new(),
         conflicts_with: Vec::new(),
+        pending: None,
     }
-}
-
-/// Rebase the workspace's unlanded commits onto the queue's merge head, in
-/// place. A conflict is left in progress for whoever is in the workspace.
-fn sync_onto(q: &Queue, git: &Git, through: &str) -> Result<()> {
-    let mh_ref = format!("refs/heads/{}/merge-head", q.name);
-    git.fetch(q.sync_dir().to_str().unwrap(), &[&format!("+{mh_ref}:refs/choros/merge-head")])?;
-    let out = git.succeeds(&["rebase", "--onto", "refs/choros/merge-head", through])?;
-    if !out {
-        let files = git.unmerged()?;
-        return Err(eyre!(
-            "syncing onto {}'s merge head conflicts in: {}\n\
-             resolve them, `git rebase --continue`, then land again",
-            q.name,
-            files.join(", ")
-        ));
-    }
-    Ok(())
 }
 
 /// `choros sync`: move a repo's unlanded commits onto its queue's current
 /// merge head.
 pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
     let (root, ws) = core::find_workspace(cwd)?;
+    refuse_landing_folder(&ws)?;
     let meta = core::read_meta(&ws)?;
     let repos = match repo_of(&ws, cwd, &meta) {
         Some(r) => vec![r],
@@ -450,30 +550,16 @@ pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
     };
     let mut synced = Vec::new();
     for repo in repos {
+        settle_pending(&ws, &repo)?;
         let Some(queue) = workspace::read(&ws)?.repo.get(&repo).and_then(|r| r.queue.clone()) else {
             continue;
         };
         let q = Queue::open(&root, &queue)?;
-        let git = Git::new(&ws.join(&repo));
-        let through = landed_through(&ws, &repo)?;
-        check_clean(&git, &through)?;
-        let mut work = Work::begin(&q, env.agent, None, true)?.unwrap();
-        if !work.rebuild_merge_head()? {
-            return Err(eyre!("queue {queue}'s merge head is parked; run `choros queue resolve {queue}`"));
+        let before = Git::new(&ws.join(&repo)).head()?;
+        sync_to_merge_head(env, &q, &ws, &repo)?;
+        if Git::new(&ws.join(&repo)).head()? != before {
+            synced.push(repo);
         }
-        work.save()?;
-        let mh = work.st.merge_head.clone().unwrap();
-        drop(work);
-        if git.is_ancestor(&mh.sha, "HEAD")? {
-            continue;
-        }
-        sync_onto(&q, &git, &through)?;
-        update_repo(&ws, &repo, |rl| {
-            rl.base = Some(mh.sha.clone());
-            rl.landed_through = Some(mh.sha.clone());
-            rl.composition = Some(mh.composition.key());
-        })?;
-        synced.push(repo);
     }
     Ok(synced)
 }
@@ -496,13 +582,7 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
         && only != ws_name {
             return Err(eyre!("queue {queue} belongs to workspace {only}"));
         }
-    let mut work = Work::begin(&q, env.agent, None, true)?.unwrap();
-    if !work.rebuild_merge_head()? {
-        return Err(eyre!("queue {queue}'s merge head is parked; run `choros queue resolve {queue}`"));
-    }
-    work.save()?;
-    let mh = work.st.merge_head.clone().unwrap();
-    drop(work);
+    let mh = current_merge_head(env, &q)?;
 
     git.fetch("origin", &[])?;
     let main = format!("refs/remotes/origin/{}", q.config.main);
@@ -513,7 +593,6 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
         git.reset_hard("refs/choros/merge-head")?;
         update_repo(ws, repo, |rl| {
             rl.queue = Some(queue.to_string());
-            rl.base = Some(mh.sha.clone());
             rl.landed_through = Some(mh.sha.clone());
             rl.composition = Some(mh.composition.key());
         })
@@ -521,7 +600,6 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
         let point = git.run(&["merge-base", "HEAD", &main])?;
         update_repo(ws, repo, |rl| {
             rl.queue = Some(queue.to_string());
-            rl.base = Some(point.clone());
             rl.landed_through.get_or_insert(point);
             rl.composition = None;
         })
@@ -537,6 +615,8 @@ fn land_instant(env: &Env, root: &Path, ws: &Path, repo: &str) -> Result<Landed>
     git.fetch("origin", &[])?;
     let main = main_branch(&git)?;
     let origin_main = format!("refs/remotes/origin/{main}");
+    let main_sha = git.sha(&origin_main)?;
+    update_repo(ws, repo, |rl| rl.pending = Some(main_sha))?;
     if !git.succeeds(&["rebase", "--onto", &origin_main, &through])? {
         return Err(eyre!(
             "rebasing onto {main} conflicts in: {}\nresolve them, `git rebase --continue`, then land again",
@@ -572,8 +652,8 @@ fn land_instant(env: &Env, root: &Path, ws: &Path, repo: &str) -> Result<Landed>
         }
     }
     update_repo(ws, repo, |rl| {
-        rl.base = Some(head.clone());
         rl.landed_through = Some(head.clone());
+        rl.pending = None;
     })?;
     Ok(Landed {
         repo: repo.to_string(),
@@ -636,7 +716,12 @@ fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
              Choros may move this branch (re-syncing it onto new dependencies, or \
              merging main into it once the PR is open). Run `git pull` before working.\n\
              Answer review feedback with new commits pushed to `{branch}`; never \
-             rewrite or force-push it.\n"
+             rewrite or force-push it.{}\n",
+            if q.config.push.private_sets {
+                ""
+            } else {
+                " Until its PR opens the branch is not on origin, so wait for that first."
+            }
         ),
     )?;
     Ok(dir)

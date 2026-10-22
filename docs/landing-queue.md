@@ -419,6 +419,20 @@ Where the build departs from the plan above, and why:
 - **Parks retry when their inputs change.** Each park records what conflicted
   (`on`); a pass that finds different inputs (a dependency moved, main
   moved) simply tries again, so a conflict that went away clears itself.
+- **A workspace rebase remembers where it was headed** (`pending` in
+  `.choros-landing.toml`). A sync or fork land that stops on a conflict can be
+  finished by hand (`git rebase --continue`) and the land re-run; landing
+  resumes from the commit the rebase was headed for. A fork moved onto the
+  sets it clashes with also remembers them (`fork_deps`) for the re-run.
+- **Pushes are journalled** (`pending` on the set): written before a
+  rewritten tip is pushed, cleared after. A crash in between, or a refused
+  push, resolves to whichever tip origin actually has. A refused push holds
+  back that set only.
+- **A merge commit pushed onto a private set parks it** (`pushed-merge`); its
+  commits could no longer be replayed one by one.
+- **Driving a conflict yourself (`c`) still holds the queue's lock** while
+  Claude Code is open. Other lands wait, and say they are waiting. Releasing
+  the lock mid-conflict would need the conflict itself journalled; not yet.
 - **`choros archive` and `choros repo add` still assume top-level
   workspaces**; inside a landing folder use the landing commands.
   `find_workspace` (core) is what the engine uses to find the root from

@@ -118,6 +118,18 @@ pub struct LandingSet {
     /// left beside rather than behind.
     #[serde(default)]
     pub conflicts_with: Vec<u32>,
+    /// Written before a rewritten tip is pushed, cleared after: if the
+    /// process dies in between, the next pass sees whether the push landed
+    /// and either keeps the new tip or puts the old one back.
+    #[serde(default)]
+    pub pending: Option<PendingPush>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPush {
+    pub old_tip: String,
+    pub old_base: BaseSpec,
+    pub old_base_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -170,6 +182,9 @@ pub enum ParkOp {
     MergeHead,
     /// Someone rewrote the set's branch on origin rather than adding to it.
     Diverged,
+    /// A merge commit was pushed to a private set's branch; its commits can
+    /// no longer be replayed one by one.
+    PushedMerge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -69,7 +69,7 @@ impl Queue {
         let url = core_git::remote_get_url(&reg, "origin")?;
         // A branch named exactly like the queue would make `<queue>/landing-N`
         // impossible to create on origin (a ref cannot also be a directory).
-        let clash = Git::new(&reg).run(&["ls-remote", "--heads", "origin", name])?;
+        let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{name}")])?;
         if !clash.is_empty() {
             return Err(eyre!("origin already has a branch named {name:?}; pick another queue name"));
         }

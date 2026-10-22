@@ -468,7 +468,7 @@ impl ConflictHandler for Interactive {
         match choice {
             'a' => {
                 c.agent.resolve(&brief())?;
-                Ok(Handled::Resolved { by_agent: true })
+                Ok(Handled::Resolved { used_session: true })
             }
             'b' => {
                 c.agent.resolve(&brief())?;
@@ -478,12 +478,12 @@ impl ConflictHandler for Interactive {
                     .args(["--no-pager", "diff", "--cached"])
                     .status();
                 match ask("push this resolution? [y] push / [i] intervene / [s] skip > ")?.as_str() {
-                    "y" | "" => Ok(Handled::Resolved { by_agent: true }),
-                    "i" => drive(c).map(|_| Handled::Resolved { by_agent: true }),
+                    "y" | "" => Ok(Handled::Resolved { used_session: true }),
+                    "i" => drive(c).map(|_| Handled::Resolved { used_session: true }),
                     _ => Ok(Handled::Declined),
                 }
             }
-            'c' => drive(c).map(|_| Handled::Resolved { by_agent: false }),
+            'c' => drive(c).map(|_| Handled::Resolved { used_session: true }),
             _ => Ok(Handled::Declined),
         }
     }

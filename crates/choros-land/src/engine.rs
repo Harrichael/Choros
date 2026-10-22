@@ -14,7 +14,7 @@ use crate::git::{Git, Step};
 use crate::graph;
 use crate::queue::{Queue, QueueLock};
 use crate::state::{
-    AgentSession, BaseSpec, Composition, Dep, MergeHead, Park, ParkOp, QueueState, Resolution,
+    AgentSession, BaseSpec, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, Resolution,
     SetStatus, branch,
 };
 
@@ -52,7 +52,9 @@ pub struct Conflict<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handled {
-    Resolved { by_agent: bool },
+    /// `used_session`: the resync agent's session was started or resumed
+    /// (by the agent, or by you driving it), so it now exists to resume.
+    Resolved { used_session: bool },
     Declined,
 }
 
@@ -74,6 +76,8 @@ pub struct PassReport {
     pub opened: Vec<u32>,
     pub parked: Vec<u32>,
     pub merge_head_parked: bool,
+    /// Pushes origin refused; the old tip was kept and the next pass retries.
+    pub push_failed: Vec<u32>,
 }
 
 /// One locked session of work on a queue.
@@ -96,7 +100,13 @@ impl<'q, 'h> Work<'q, 'h> {
         wait: bool,
     ) -> Result<Option<Self>> {
         let lock = if wait {
-            q.lock()?
+            match q.try_lock()? {
+                Some(l) => l,
+                None => {
+                    eprintln!("waiting for queue {} (someone is landing or resolving there)…", q.name);
+                    q.lock()?
+                }
+            }
         } else {
             match q.try_lock()? {
                 Some(l) => l,
@@ -105,14 +115,37 @@ impl<'q, 'h> Work<'q, 'h> {
         };
         q.recover()?;
         q.fetch()?;
-        Ok(Some(Work {
+        let mut work = Work {
             q,
             st: q.read_state()?,
             git: q.git(),
             agent,
             handler,
             _lock: lock,
-        }))
+        };
+        work.settle_pending_pushes()?;
+        Ok(Some(work))
+    }
+
+    /// A push journalled but never confirmed: keep its tip if origin has it,
+    /// otherwise put the old one back.
+    fn settle_pending_pushes(&mut self) -> Result<()> {
+        let name = self.q.name.clone();
+        let ids: Vec<u32> = self.st.sets.keys().copied().collect();
+        for n in ids {
+            let Some(pending) = self.st.sets[&n].pending.clone() else { continue };
+            let remote = self.git.rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
+            let set = self.st.sets.get_mut(&n).unwrap();
+            if remote.as_deref() == Some(set.tip.as_str()) {
+                set.remote = remote;
+            } else {
+                set.tip = pending.old_tip;
+                set.base = pending.old_base;
+                set.base_sha = pending.old_base_sha;
+            }
+            set.pending = None;
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
@@ -139,7 +172,7 @@ impl<'q, 'h> Work<'q, 'h> {
             self.git.abort_in_progress()?;
             return Ok(Some(files));
         };
-        let slot = agent_slot(&mut self.st, self.q.config.agent.rotate_after);
+        let slot = agent_slot(&self.st, self.q.config.agent.rotate_after);
         let recorded = recorded_for(&self.git, &self.st, &files);
         let handled = handler.resolve(&Conflict {
             queue: &self.q.name,
@@ -150,14 +183,9 @@ impl<'q, 'h> Work<'q, 'h> {
             slot: &slot,
             agent: self.agent,
         })?;
-        if let Handled::Resolved { by_agent } = handled {
-            if by_agent {
-                let session = self.st.agent.get_or_insert(AgentSession {
-                    id: slot.id.clone(),
-                    runs: 0,
-                    previous: Vec::new(),
-                });
-                session.runs += 1;
+        if let Handled::Resolved { used_session } = handled {
+            if used_session {
+                record_session(&mut self.st, &slot);
             }
             if let Some(problem) = self.git.resolution_problems()? {
                 self.git.abort_in_progress()?;
@@ -259,12 +287,13 @@ impl<'q, 'h> Work<'q, 'h> {
             Err(files) => return self.park(n, ParkOp::Resync, files, spec.key()),
         };
         let set = self.st.sets.get_mut(&n).unwrap();
-        set.base = spec;
-        set.base_sha = base;
-        set.tip = tip;
+        set.pending = Some(PendingPush {
+            old_tip: std::mem::replace(&mut set.tip, tip),
+            old_base: std::mem::replace(&mut set.base, spec),
+            old_base_sha: std::mem::replace(&mut set.base_sha, base),
+        });
         set.park = None;
-        self.publish(n)?;
-        Ok(true)
+        self.publish(n)
     }
 
     fn park(&mut self, n: u32, op: ParkOp, files: Vec<String>, on: String) -> Result<bool> {
@@ -273,29 +302,49 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     /// Point the set's branch at its tip: always in the sync clone, and on
-    /// origin when private sets are pushed or the set is public.
-    pub fn publish(&mut self, n: u32) -> Result<()> {
-        let name = self.q.name.clone();
+    /// origin when private sets are pushed or the set is public. A refused
+    /// push puts back whatever the set had before (`pending`) and returns
+    /// false; the rest of the pass carries on.
+    pub fn publish(&mut self, n: u32) -> Result<bool> {
         let set = &self.st.sets[&n];
-        let branch = set.branch(&name);
-        self.git
-            .run(&["update-ref", &format!("refs/heads/{branch}"), &set.tip])?;
-        if !(self.q.config.push.private_sets || set.pr.is_some() || set.remote.is_some()) {
-            return Ok(());
+        let wanted = self.q.config.push.private_sets || set.pr.is_some() || set.remote.is_some();
+        if wanted && set.remote.as_deref() != Some(set.tip.as_str()) {
+            // The journal entry must reach disk before origin can change.
+            self.save()?;
+            let set = &self.st.sets[&n];
+            let pushed = self
+                .git
+                .push_lease("origin", &set.tip, &set.branch(&self.q.name), set.remote.as_deref());
+            let set = self.st.sets.get_mut(&n).unwrap();
+            match pushed {
+                Ok(()) => set.remote = Some(set.tip.clone()),
+                Err(_) => {
+                    if let Some(p) = set.pending.take() {
+                        set.tip = p.old_tip;
+                        set.base = p.old_base;
+                        set.base_sha = p.old_base_sha;
+                    }
+                    self.set_local_ref(n)?;
+                    return Ok(false);
+                }
+            }
         }
-        if set.remote.as_deref() == Some(set.tip.as_str()) {
-            return Ok(());
-        }
+        self.st.sets.get_mut(&n).unwrap().pending = None;
+        self.set_local_ref(n)?;
+        Ok(true)
+    }
+
+    fn set_local_ref(&self, n: u32) -> Result<()> {
+        let set = &self.st.sets[&n];
         self.git
-            .push_lease("origin", &set.tip, &branch, set.remote.as_deref())?;
-        let tip = set.tip.clone();
-        self.st.sets.get_mut(&n).unwrap().remote = Some(tip);
+            .run(&["update-ref", &format!("refs/heads/{}", set.branch(&self.q.name)), &set.tip])?;
         Ok(())
     }
 
     /// Note merges and closes on GitHub.
     pub fn observe_prs(&mut self, forge: &dyn Forge, report: &mut PassReport) -> Result<()> {
-        let main = self.main_sha()?;
+        let mut main = self.main_sha()?;
+        let mut refetched = false;
         let ids: Vec<u32> = self.st.sets.keys().copied().collect();
         for n in ids {
             let set = &self.st.sets[&n];
@@ -304,6 +353,13 @@ impl<'q, 'h> Work<'q, 'h> {
                 continue;
             }
             let state = forge.pr_state(self.git.dir(), pr.number)?;
+            // A merge that happened after this pass fetched would leave main
+            // without it, and dependents would keep a base that lacks it.
+            if state == PrState::Merged && !refetched {
+                self.q.fetch()?;
+                main = self.main_sha()?;
+                refetched = true;
+            }
             let set = self.st.sets.get_mut(&n).unwrap();
             match (state, &set.status) {
                 (PrState::Merged, _) => {
@@ -341,6 +397,15 @@ impl<'q, 'h> Work<'q, 'h> {
             match remote {
                 None => set.remote = None,
                 Some(r) if r == seen => {}
+                // A merge commit cannot be replayed with its set; public sets
+                // are never replayed, so only a private one has to stop.
+                Some(r) if set.pr.is_none() && self.git.is_ancestor(&set.tip, &r)? && self.git.has_merges(&set.tip, &r)? => {
+                    set.park = Some(Park {
+                        op: ParkOp::PushedMerge,
+                        files: Vec::new(),
+                        on: r,
+                    });
+                }
                 Some(r) => {
                     if self.git.is_ancestor(&set.tip, &r)? {
                         set.tip = r.clone();
@@ -362,15 +427,17 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     /// A public set is only ever added to: main is merged in when the set
-    /// conflicts with it or the repo insists on up-to-date branches.
-    pub fn update_public(&mut self, n: u32, settings: &RepoSettings) -> Result<bool> {
+    /// conflicts with it or the repo insists on up-to-date branches. `None`:
+    /// nothing was needed; otherwise whether it went through (a park or a
+    /// refused push is `Some(false)`).
+    pub fn update_public(&mut self, n: u32, settings: &RepoSettings) -> Result<Option<bool>> {
         let main = self.main_sha()?;
         let tip = self.st.sets[&n].tip.clone();
         let behind = !self.git.is_ancestor(&main, &tip)?;
         let needed = behind
             && (settings.require_up_to_date || !self.git.merge_conflicts(&main, &tip)?.is_empty());
         if !needed {
-            return Ok(false);
+            return Ok(None);
         }
         let what = branch(&self.q.name, n);
         self.git.checkout_detached(&tip)?;
@@ -378,13 +445,17 @@ impl<'q, 'h> Work<'q, 'h> {
             .git
             .merge(&main, &format!("Merge {} into {what}", self.q.config.main))?;
         if let Some(files) = self.settle(step, &format!("merging {} into {what}", self.q.config.main))? {
-            return self.park(n, ParkOp::MainIntoPublic, files, main);
+            return self.park(n, ParkOp::MainIntoPublic, files, main).map(Some);
         }
+        let new_tip = self.git.head()?;
         let set = self.st.sets.get_mut(&n).unwrap();
-        set.tip = self.git.head()?;
+        set.pending = Some(PendingPush {
+            old_tip: std::mem::replace(&mut set.tip, new_tip),
+            old_base: set.base.clone(),
+            old_base_sha: set.base_sha.clone(),
+        });
         set.park = None;
-        self.publish(n)?;
-        Ok(true)
+        self.publish(n).map(Some)
     }
 
     /// Rebuild the merge head if what it should contain changed.
@@ -429,6 +500,8 @@ impl<'q, 'h> Work<'q, 'h> {
         let set = self.st.sets[&n].clone();
         let branch = set.branch(&self.q.name);
         if set.remote.as_deref() != Some(set.tip.as_str()) {
+            // A PR needs its branch on origin, whatever private_sets says.
+            self.save()?;
             self.git.push_lease("origin", &set.tip, &branch, set.remote.as_deref())?;
             self.st.sets.get_mut(&n).unwrap().remote = Some(set.tip.clone());
         }
@@ -494,15 +567,15 @@ impl<'q, 'h> Work<'q, 'h> {
                 if settings.is_none() {
                     settings = Some(forge.settings(self.git.dir(), &self.q.config.main)?);
                 }
-                if self.update_public(n, settings.as_ref().unwrap())? {
-                    report.updated_public.push(n);
-                }
-                if self.st.sets[&n].park.is_some() {
-                    report.parked.push(n);
+                match self.update_public(n, settings.as_ref().unwrap())? {
+                    None => {}
+                    Some(true) => report.updated_public.push(n),
+                    Some(false) if self.st.sets[&n].park.is_some() => report.parked.push(n),
+                    Some(false) => report.push_failed.push(n),
                 }
                 continue;
             }
-            if set.park.as_ref().is_some_and(|p| p.op == ParkOp::Diverged) {
+            if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge)) {
                 continue;
             }
             let spec = self.desired_base(n)?;
@@ -515,8 +588,10 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             if self.resync(n, spec)? {
                 report.resynced.push(n);
-            } else {
+            } else if self.st.sets[&n].park.is_some() {
                 report.parked.push(n);
+            } else {
+                report.push_failed.push(n);
             }
         }
 
@@ -533,8 +608,10 @@ impl<'q, 'h> Work<'q, 'h> {
             if !self.st.sets[&n].base.deps.is_empty() {
                 continue;
             }
-            self.open_pr(n, forge)?;
-            report.opened.push(n);
+            match self.open_pr(n, forge) {
+                Ok(()) => report.opened.push(n),
+                Err(_) => report.push_failed.push(n),
+            }
         }
         self.tend_landings(&report);
         Ok(report)
@@ -556,7 +633,7 @@ impl<'q, 'h> Work<'q, 'h> {
             let on_branch = landing
                 .run(&["branch", "--show-current"])
                 .is_ok_and(|b| b == branch);
-            if !on_branch || !landing.is_clean().unwrap_or(false) {
+            if !on_branch || !landing.is_clean_tracked().unwrap_or(false) {
                 continue;
             }
             let refspec = format!("+refs/heads/{branch}:refs/choros/latest");
@@ -609,36 +686,37 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 }
 
-fn agent_slot(st: &mut QueueState, rotate_after: u32) -> AgentSlot {
-    match &mut st.agent {
+fn agent_slot(st: &QueueState, rotate_after: u32) -> AgentSlot {
+    match &st.agent {
         Some(s) if s.runs < rotate_after => AgentSlot {
             id: s.id.clone(),
             fresh: false,
-            handoff: None,
         },
-        _ => {
-            let id = crate::uuid::v4();
-            let previous = st
-                .agent
-                .take()
-                .map(|s| {
-                    let mut p = s.previous;
-                    p.push(s.id);
-                    p
-                })
-                .unwrap_or_default();
-            st.agent = Some(AgentSession {
-                id: id.clone(),
-                runs: 0,
-                previous,
-            });
-            AgentSlot {
-                id,
-                fresh: true,
-                handoff: None,
-            }
-        }
+        _ => AgentSlot {
+            id: crate::uuid::v4(),
+            fresh: true,
+        },
     }
+}
+
+/// Only a session that was actually started is worth resuming next time.
+fn record_session(st: &mut QueueState, slot: &AgentSlot) {
+    if !slot.fresh {
+        if let Some(s) = &mut st.agent {
+            s.runs += 1;
+        }
+        return;
+    }
+    let mut previous = Vec::new();
+    if let Some(old) = st.agent.take() {
+        previous = old.previous;
+        previous.push(old.id);
+    }
+    st.agent = Some(AgentSession {
+        id: slot.id.clone(),
+        runs: 1,
+        previous,
+    });
 }
 
 /// Earlier resolutions that touched any of `files`, newest first.

@@ -21,8 +21,6 @@ pub struct ConflictBrief<'a> {
 pub struct AgentSlot {
     pub id: String,
     pub fresh: bool,
-    /// A summary from the previous session, given to a fresh one.
-    pub handoff: Option<String>,
 }
 
 pub trait Agent {
@@ -87,11 +85,6 @@ impl Agent for Claude {
 
 pub fn conflict_prompt(brief: &ConflictBrief) -> String {
     let mut p = String::new();
-    if let Some(handoff) = &brief.session.handoff {
-        p.push_str("Notes from the previous resync session:\n");
-        p.push_str(handoff);
-        p.push_str("\n\n");
-    }
     p.push_str(&format!(
         "You are the resync agent for a Choros landing queue, working in {}.\n\
          A conflict is in progress while {}.\n\

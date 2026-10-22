@@ -3,6 +3,7 @@
 //! work` makes them. GitHub is a fake that performs real merges on origin;
 //! conflicts go to a scripted handler.
 
+mod regressions;
 mod stories;
 
 use std::collections::BTreeMap;
@@ -104,6 +105,10 @@ impl FakeForge {
         self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Merged);
     }
 
+    pub fn reopen(&self, number: u64) {
+        self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Open);
+    }
+
     pub fn close(&self, number: u64) {
         self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Closed);
     }
@@ -201,7 +206,7 @@ impl ConflictHandler for Scripted {
             files: c.files.clone(),
             recorded: c.recorded.len(),
         });
-        Ok(Handled::Resolved { by_agent: false })
+        Ok(Handled::Resolved { used_session: false })
     }
 
     fn fork_conflict(&mut self, _fork: u32, _with: &[u32]) -> Result<Option<OnConflict>> {

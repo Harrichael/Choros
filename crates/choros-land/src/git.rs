@@ -107,6 +107,11 @@ impl Git {
         Ok(self.run(&["status", "--porcelain"])?.is_empty())
     }
 
+    /// Clean apart from untracked files, which a reset would not touch anyway.
+    pub fn is_clean_tracked(&self) -> Result<bool> {
+        Ok(self.run(&["status", "--porcelain", "--untracked-files=no"])?.is_empty())
+    }
+
     pub fn fetch(&self, remote: &str, refspecs: &[&str]) -> Result<()> {
         let mut args = vec!["fetch", "--quiet", "--prune", remote];
         args.extend_from_slice(refspecs);

@@ -29,9 +29,6 @@ pub struct RepoLanding {
     /// Absent: instant mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
-    /// The commit the repo's branch currently builds on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
     /// Everything up to here has been landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_through: Option<String>,
@@ -39,6 +36,18 @@ pub struct RepoLanding {
     /// can tell "needs sync" from files alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<String>,
+    /// Set while the workspace is being rebased onto this commit (a sync, or
+    /// a fork's base). Once HEAD contains it with no rebase in progress, it
+    /// becomes `landed_through`; a conflict resolved by hand therefore
+    /// finishes the sync rather than looking like rewritten history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_composition: Option<String>,
+    /// Sets a fork land moved this repo onto: the commits now build on them,
+    /// so the fork must keep depending on them when the land is re-run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fork_deps: Vec<u32>,
     /// Unix seconds of the last land, so a raw-terminal land forks only the
     /// sessions active since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
