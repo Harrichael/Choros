@@ -203,15 +203,7 @@ fn create_in<P: ProgressSink>(
     target: &Path,
 ) -> Result<ChorosInfo> {
     for repo in repos {
-        progress.status(format!("cloning {repo}…"));
-        let reg_path = registry::ensure_repo_exists(root, repo)?;
-        let url = git::remote_get_url(&reg_path, "origin")?;
-        if let Err(e) = git::fetch(&reg_path, "origin") {
-            progress.status(format!("fetch warning ({repo}): {e}; continuing"));
-        }
-        let dest = target.join(repo);
-        git::clone_with_reference(&reg_path, &url, &dest)?;
-        git::checkout_new_branch(&dest, name)?;
+        clone_into(root, target, name, repo, progress)?;
     }
 
     cache::setup_workspace_caches(root, target, repos, progress)
@@ -232,6 +224,68 @@ fn create_in<P: ProgressSink>(
         path: target.to_path_buf(),
         meta,
     })
+}
+
+/// Clone `repos` from the registry into an existing workspace, on its branch,
+/// and record them in its meta. All or nothing, like [`create`]: a failure
+/// removes the clones this call made and leaves the meta as it was.
+pub fn add_repos<P: ProgressSink>(
+    root: &Path,
+    name: &str,
+    repos: &[String],
+    progress: &P,
+) -> Result<ChorosMeta> {
+    let target = root.join(name);
+    let mut meta = read_meta(&target)?;
+    for (i, repo) in repos.iter().enumerate() {
+        registry::ensure_repo_exists(root, repo)?;
+        if meta.repos.contains(repo) || repos[..i].contains(repo) {
+            return Err(eyre!("{repo} is already in workspace {name}"));
+        }
+        // Not in the meta but on disk: a hand-made clone or stray dir that a
+        // rollback must never delete, so refuse before cloning anything.
+        if target.join(repo).exists() {
+            return Err(eyre!("{:?} already exists", target.join(repo)));
+        }
+    }
+
+    let mut cloned = Vec::new();
+    let result = (|| {
+        for repo in repos {
+            clone_into(root, &target, name, repo, progress)?;
+            cloned.push(repo);
+        }
+        cache::setup_workspace_caches(root, &target, repos, progress)
+            .wrap_err("setting up workspace caches")
+    })();
+    if let Err(e) = result {
+        for repo in cloned {
+            let _ = std::fs::remove_dir_all(target.join(repo));
+        }
+        return Err(e);
+    }
+
+    meta.repos.extend(repos.iter().cloned());
+    write_meta(&target, &meta)?;
+    Ok(meta)
+}
+
+fn clone_into<P: ProgressSink>(
+    root: &Path,
+    workspace: &Path,
+    branch: &str,
+    repo: &str,
+    progress: &P,
+) -> Result<()> {
+    progress.status(format!("cloning {repo}…"));
+    let reg_path = registry::ensure_repo_exists(root, repo)?;
+    let url = git::remote_get_url(&reg_path, "origin")?;
+    if let Err(e) = git::fetch(&reg_path, "origin") {
+        progress.status(format!("fetch warning ({repo}): {e}; continuing"));
+    }
+    let dest = workspace.join(repo);
+    git::clone_with_reference(&reg_path, &url, &dest)?;
+    git::checkout_new_branch(&dest, branch)
 }
 
 pub fn archive_dir(root: &Path) -> PathBuf {
@@ -448,6 +502,50 @@ mod tests {
         delete(&info).unwrap();
         assert!(!root.join("PROJ-1").exists());
         assert!(scan(root).unwrap().is_empty());
+    }
+
+    /// A repo added to a live workspace lands like one it was created with:
+    /// cloned from the registry onto the workspace's branch and listed in its
+    /// meta. Asking for one it already has, or one the registry lacks, changes
+    /// nothing.
+    #[test]
+    fn add_repos_joins_an_existing_workspace() {
+        let tmp = tempdir();
+        let root = tmp.path();
+        let registry = root.join(".choros-config/registry");
+        for name in ["alpha", "beta"] {
+            let src = root.join(format!("origins/{name}.git-src"));
+            make_source_repo(&src);
+            git(&[
+                "clone",
+                "--quiet",
+                src.to_str().unwrap(),
+                registry.join(name).to_str().unwrap(),
+            ]);
+        }
+        create(root, "PROJ-1", &["alpha".to_string()], &()).unwrap();
+
+        let meta = add_repos(root, "PROJ-1", &["beta".to_string()], &()).unwrap();
+        assert_eq!(meta.repos, ["alpha", "beta"]);
+        assert_eq!(
+            read_meta(&root.join("PROJ-1")).unwrap().repos,
+            ["alpha", "beta"]
+        );
+        assert!(root.join("PROJ-1/beta/hello.txt").exists());
+        let head = std::process::Command::new("git")
+            .args(["-C", root.join("PROJ-1/beta").to_str().unwrap()])
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "PROJ-1");
+
+        assert!(add_repos(root, "PROJ-1", &["alpha".to_string()], &()).is_err());
+        assert!(add_repos(root, "PROJ-1", &["gamma".to_string()], &()).is_err());
+        assert_eq!(
+            read_meta(&root.join("PROJ-1")).unwrap().repos,
+            ["alpha", "beta"]
+        );
+        assert!(root.join("PROJ-1/alpha/hello.txt").exists());
     }
 
     #[test]

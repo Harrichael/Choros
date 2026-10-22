@@ -68,6 +68,7 @@ choros agent save settings      # inside a workspace: TUI to promote claude
 choros agent ls                 # list resumable claude / cursor sessions for
                                 # the current directory
 choros repo ls                  # inside a workspace: list its cloned repos
+choros repo add REPO [REPO…]    # inside a workspace: clone registry repos into it
 ```
 
 `choros work` is the quick path for "I want a fresh choros right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new choros on success.

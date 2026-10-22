@@ -50,6 +50,8 @@ USAGE:
     choros agent ls                 list resumable claude / cursor sessions recorded under the
                                     current directory (matches the cwd of `claude --resume`)
     choros repo ls                  inside a workspace: list the repos cloned into it
+    choros repo add REPO [REPO…]    inside a workspace: clone registry repos into it, on its
+                                    branch, and wire up their build caches
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -119,15 +121,23 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
 }
 
 pub fn run_repo(args: Vec<String>) -> Result<()> {
-    match args.as_slice() {
-        [verb] if verb == "ls" => {}
+    let (verb, repos) = match args.split_first() {
+        Some((verb, rest)) if verb == "ls" && rest.is_empty() => (verb, rest),
+        Some((verb, rest)) if verb == "add" && !rest.is_empty() => (verb, rest),
         _ => {
-            eprintln!("usage: choros repo ls");
+            eprintln!("usage: choros repo ls | choros repo add REPO [REPO…]");
             std::process::exit(2);
         }
-    }
+    };
     let cwd = std::env::current_dir()?;
     let (root, name) = choros::resolve_target(&cwd, None)?;
+    if verb == "add" {
+        choros::add_repos(&root, &name, repos, &StderrProgress)?;
+        for repo in repos {
+            eprintln!("added {repo}");
+        }
+        return Ok(());
+    }
     let meta = choros::read_meta(&root.join(&name))?;
     for repo in meta.repos {
         println!("{repo}");
