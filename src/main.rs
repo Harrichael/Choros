@@ -18,7 +18,10 @@ fn main() -> Result<()> {
     let sub = args.next();
     let rest: Vec<String> = args.collect();
     match sub.as_deref() {
-        None => cli::run_full_tui(),
+        None => {
+            cli::print_usage();
+            std::process::exit(2);
+        }
         Some("work") => cli::run_work(rest),
         Some("init") => {
             reject_extra_args("init", &rest);

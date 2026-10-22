@@ -188,8 +188,8 @@ pub fn create<P: ProgressSink>(
     std::fs::create_dir(&target)?;
 
     // Meta is written last, so a half-built workspace is invisible to `scan`
-    // (undeletable from the TUI) yet still blocks the name; remove it rather
-    // than strand it.
+    // (unlisted by `choros ls`, unarchivable) yet still blocks the name;
+    // remove it rather than strand it.
     create_in(root, name, repos, progress, &target).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&target);
     })
@@ -354,34 +354,6 @@ pub fn archive(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(dst)
 }
 
-pub fn delete(choros: &ChorosInfo) -> Result<()> {
-    if !choros.path.join(META_FILE).exists() {
-        return Err(eyre!(
-            "refusing to delete: {:?} is not a choros (no {})",
-            choros.path,
-            META_FILE
-        ));
-    }
-    // Remove the meta file last (a bare remove_dir_all unlinks in readdir
-    // order). If the process dies mid-delete — this runs on a killable worker
-    // thread — the remnant then still has its meta, so it stays visible to
-    // `scan` and re-deletable instead of invisibly blocking the name.
-    for entry in std::fs::read_dir(&choros.path)? {
-        let entry = entry?;
-        if entry.file_name() == META_FILE {
-            continue;
-        }
-        if entry.file_type()?.is_dir() {
-            std::fs::remove_dir_all(entry.path())?;
-        } else {
-            std::fs::remove_file(entry.path())?;
-        }
-    }
-    std::fs::remove_file(choros.path.join(META_FILE))?;
-    std::fs::remove_dir(&choros.path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,7 +471,7 @@ mod tests {
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].meta.name, "PROJ-1");
 
-        delete(&info).unwrap();
+        archive(root, &info.meta.name).unwrap();
         assert!(!root.join("PROJ-1").exists());
         assert!(scan(root).unwrap().is_empty());
     }
@@ -559,8 +531,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].meta.name, "PROJ-BAD");
         assert!(found[0].meta.repos.is_empty());
-        // Still deletable despite the unreadable meta.
-        delete(&found[0]).unwrap();
+        // Still archivable despite the unreadable meta.
+        archive(tmp.path(), &found[0].meta.name).unwrap();
         assert!(!dir.exists());
     }
 

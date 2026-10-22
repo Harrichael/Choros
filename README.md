@@ -1,6 +1,6 @@
 # choros
 
-A small TUI for managing short-lived multi-repo work environments. One choros per Jira-task-sized unit of work.
+A small CLI for managing short-lived multi-repo work environments. One choros per Jira-task-sized unit of work.
 
 ## How it works
 
@@ -36,7 +36,7 @@ from the URL. Only SSH remotes are supported — the registry copy is later
 used as a `--reference-if-able` source for every workspace clone, which needs
 a stable local git repo, not an HTTP(S) endpoint.
 
-The TUI scans `.choros-config/registry/` on launch and lets you pick repos from there.
+`choros work` scans `.choros-config/registry/` and lets you pick repos from there.
 
 ## Install
 
@@ -56,7 +56,6 @@ cargo install --path .
 Run from inside the directory you want choros to live in.
 
 ```bash
-choros                          # full TUI (manage existing + create new)
 choros work                     # fast-create: just name + repos, then exit
 choros work PROJ-1              # name pre-filled, jumps to repo selection
 choros work PROJ-1 api web      # fully non-interactive (no TUI)
@@ -71,7 +70,7 @@ choros repo ls                  # inside a workspace: list its cloned repos
 choros repo add REPO [REPO…]    # inside a workspace: clone registry repos into it
 ```
 
-`choros work` is the quick path for "I want a fresh choros right now". It skips the main screen and drops you straight into the name + repo picker. With the shell integration below, your shell is `cd`'d into the new choros on success.
+`choros work` is the way to make a fresh choros: it opens the name + repo picker, shows progress over it while cloning, and exits once the workspace exists. With the shell integration below, your shell is `cd`'d into the new choros on success.
 
 ### Shell integration
 
@@ -84,18 +83,7 @@ eval "$(choros shell-init)"
 
 After that, `choros work …` is silent on success and your shell ends up in the new choros dir, and `choros archive` run from inside a workspace leaves your shell at the choros root rather than in the moved-away directory.
 
-Keys (main screen):
-
-| key | action |
-| --- | --- |
-| `n` | new choros |
-| `d` | delete the selected choros (with confirm) |
-| `Enter` | show choros details |
-| `j` / `k` / arrows | move selection |
-| `r` | re-scan |
-| `q` | quit |
-
-In the new-choros modal: `Tab` switches between the name field and the repo list. `Space` toggles a repo. `Enter` creates. `Esc` cancels.
+In the picker: `Tab` switches between the name field and the repo list. `j` / `k` or arrows move. `Space` toggles a repo. `Enter` creates; on failure you're back in the picker with the error. `Esc` cancels.
 
 ## What choros does on "create"
 
@@ -209,12 +197,10 @@ repo to its origin, then run `choros archive` to retire the workspace.
 
 ## Not yet supported
 
-- Adding/removing registry repos from inside the TUI
 - `gh`-CLI integration to browse repos
 - "Open in editor" / shell drop-in
 - Pulling latest main on existing choros clones
 - Async parallel cloning
-- Dirty-state checks on delete (delete is `rm -rf` — choros are ephemeral by design)
 
 ## Development
 

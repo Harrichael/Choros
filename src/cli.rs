@@ -33,7 +33,6 @@ const USAGE: &str = "\
 choros — multi-repo work-environment manager
 
 USAGE:
-    choros                          launch the full TUI in the current directory
     choros work                     fast-create: name + repo multi-select, exits on create
     choros work NAME                fast-create with name pre-filled
     choros work NAME REPO [REPO…]   non-interactive create
@@ -175,14 +174,6 @@ pub fn run_archive(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn run_full_tui() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let mut app = app::App::new(cwd);
-    app.refresh();
-    run_tui(&mut app)?;
-    Ok(())
-}
-
 pub fn run_work(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let mut iter = args.into_iter();
@@ -196,7 +187,7 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
     } else {
         NewFocus::Name
     };
-    let mut app = app::App::new_work(cwd, name, focus);
+    let mut app = app::App::new(cwd, name, focus);
     run_tui(&mut app)?;
     if let Some(path) = app.created_path {
         println!("{}", path.display());
