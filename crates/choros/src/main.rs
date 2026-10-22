@@ -1,6 +1,8 @@
 mod app;
 mod cli;
+mod land_cli;
 mod ls;
+mod queue_tui;
 mod settings_tui;
 mod tui;
 mod ui;
@@ -32,6 +34,11 @@ fn main() -> Result<()> {
         Some("add") => cli::run_add(rest),
         Some("agent") => cli::run_agent(rest),
         Some("repo") => cli::run_repo(rest),
+        Some("land") => land_cli::run_land(rest),
+        Some("sync") => land_cli::run_sync(rest),
+        Some("status") => land_cli::run_status(rest),
+        Some("queue") => land_cli::run_queue(rest),
+        Some("landing") => land_cli::run_landing(rest),
         Some("shell-init") => {
             reject_extra_args("shell-init", &rest);
             cli::emit_shell_init();

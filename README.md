@@ -202,6 +202,25 @@ repo to its origin, then run `choros archive` to retire the workspace.
 - Pulling latest main on existing choros clones
 - Async parallel cloning
 
+## Landing queues
+
+A queue takes landed work from workspaces, keeps it in a private dependency
+graph on top of a *merge head* (main plus everything queued), and sends only
+the front — sets whose dependencies have merged — to GitHub as draft PRs.
+`chorosd` notices merges and re-syncs what is behind them. Repos not bound to
+a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing-queue.md).
+
+```bash
+choros queue new appq app          # a queue for the registry repo `app`
+choros queue bind app appq         # inside a workspace (or press `b` in `choros work`)
+choros land continue               # land, keep working here
+choros land archive                # land, then archive the workspace
+choros land continue --fork        # land beside the queue (pick dependencies)
+choros status                      # queues, sets, PRs, parked conflicts
+choros queue resolve appq          # settle parked conflicts (a/b/c)
+choros landing open 3              # resume the session forked at landing-3
+```
+
 ## Development
 
 ```bash

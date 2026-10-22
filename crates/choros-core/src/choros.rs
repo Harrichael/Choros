@@ -18,6 +18,8 @@ impl ProgressSink for () {
 
 pub const META_FILE: &str = ".choros-meta.toml";
 pub const ARCHIVE_REL: &str = ".choros-config/archive";
+pub const CONFIG_DIR: &str = ".choros-config";
+pub const LANDING_DIR: &str = "landing";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChorosMeta {
@@ -120,6 +122,9 @@ pub fn last_active(workspace: &Path) -> Option<SystemTime> {
 
 pub fn validate_name(root: &Path, name: &str) -> Result<()> {
     validate_branch_name(name)?;
+    if name == LANDING_DIR {
+        return Err(eyre!("'{LANDING_DIR}' is reserved for landed changes"));
+    }
     let target = root.join(name);
     if target.exists() {
         return Err(eyre!("'{}' already exists", name));
@@ -327,6 +332,27 @@ pub fn resolve_target(cwd: &Path, name: Option<&str>) -> Result<(PathBuf, String
             }
         }
     }
+}
+
+/// The workspace containing `cwd` and the choros root above it. Unlike
+/// [`resolve_target`], the root is the nearest ancestor holding
+/// `.choros-config`, so this also works for workspaces nested under the root,
+/// such as landings at `<root>/landing/<queue>/landing-N`.
+pub fn find_workspace(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
+    let dir = cwd
+        .ancestors()
+        .find(|d| d.join(META_FILE).exists())
+        .ok_or_else(|| eyre!("not inside a choros workspace (no {META_FILE} above {cwd:?})"))?;
+    let root = find_root(dir)
+        .ok_or_else(|| eyre!("workspace {dir:?} is not under a choros root ({CONFIG_DIR})"))?;
+    Ok((root, dir.to_path_buf()))
+}
+
+/// The nearest ancestor of `cwd` (itself included) holding `.choros-config`.
+pub fn find_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .find(|d| d.join(CONFIG_DIR).is_dir())
+        .map(Path::to_path_buf)
 }
 
 /// Move `<root>/<name>/` into `<root>/.choros-config/archive/<name>/`.

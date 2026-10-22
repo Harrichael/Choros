@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 choros-core.workspace = true
+choros-land.workspace = true
 color-eyre.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true

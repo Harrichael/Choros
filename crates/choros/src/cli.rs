@@ -15,9 +15,9 @@ choros() {
       target="$(command choros "$@")" || return $?
       [ -n "$target" ] && cd "$target"
       ;;
-    archive)
+    archive|land)
       target="$(command choros "$@")" || return $?
-      printf '%s\n' "$target"
+      [ -n "$target" ] && printf '%s\n' "$target"
       # Archiving the workspace you stand in moves it out from under the
       # shell; land on the choros root instead of a path that is gone.
       [ -d "$PWD" ] || cd "${target%/.choros-config/archive/*}"
@@ -51,6 +51,25 @@ USAGE:
     choros repo ls                  inside a workspace: list the repos cloned into it
     choros repo add REPO [REPO…]    inside a workspace: clone registry repos into it, on its
                                     branch, and wire up their build caches
+    choros land continue|archive    land this repo (or, at the workspace root, every repo) into its
+                                    queue, or straight to main when it has none; `archive` then
+                                    archives the workspace. --fork [--deps SET,…|none] lands beside
+                                    the queue instead of on top; --title/--body-file set the PR text
+    choros sync                     rebase unlanded commits onto the queue's current merge head
+    choros status [--prompt]        landing queues and their sets; --prompt prints one token
+                                    (⇣sync / !resolve) for shell prompts
+    choros queue [NAME]             TUI: a queue's landing-sets; edit dependencies, drop, sync
+    choros queue new NAME REPO [--workspace WS]
+                                    create a landing queue for a registry repo
+    choros queue bind REPO QUEUE|none
+                                    inside a workspace: land REPO into QUEUE (none: instant mode)
+    choros queue sync [NAME]        run the daemon's pass now
+    choros queue resolve NAME [--agent trust|review|manual]
+                                    retry parked conflicts, asking how to resolve each
+    choros queue drop NAME N        remove a queued landing-set
+    choros queue doctor NAME        compare the queue's state with origin, then sync
+    choros landing open N [--queue Q] [--session ID]
+                                    open the landing's forked Claude Code session
     choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
     choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
     choros -h | --help              show this message
@@ -68,6 +87,9 @@ pub fn run_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let registry_dir = registry::init_dirs(&cwd)?;
     let templates_dir = agent::init_templates(&cwd)?;
+    if let Some(config) = choros_core::roots::config_home() {
+        choros_core::roots::register(&config, &cwd)?;
+    }
     eprintln!("initialized {}", registry_dir.display());
     eprintln!("initialized {}", templates_dir.display());
     Ok(())

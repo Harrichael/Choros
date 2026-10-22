@@ -43,7 +43,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         chunks[3],
     );
 
-    let footer = "Tab: switch focus   Space: toggle repo   Enter: create   Esc: cancel";
+    let footer = "Tab: switch focus   Space: toggle repo   b: landing queue   Enter: create   Esc: cancel";
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             footer,
@@ -85,13 +85,14 @@ fn draw_repo_list(f: &mut Frame, area: Rect, app: &App) {
         app.registry
             .iter()
             .zip(&app.repo_selected)
-            .map(|(r, selected)| {
+            .enumerate()
+            .map(|(i, (r, selected))| {
                 let mark = if *selected { "[x]" } else { "[ ]" };
-                ListItem::new(Line::from(vec![
-                    Span::raw(mark),
-                    Span::raw("  "),
-                    Span::raw(r.clone()),
-                ]))
+                let mut spans = vec![Span::raw(mark), Span::raw("  "), Span::raw(r.clone())];
+                if let Some(q) = app.queue_of(i) {
+                    spans.push(Span::styled(format!("  → {q}"), Style::default().fg(Color::Cyan)));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };

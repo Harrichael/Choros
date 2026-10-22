@@ -11,6 +11,9 @@ cd "$HERE"
 # receipt is orphaned and the old binary along with it.
 PKG="choros"
 BIN="choros"
+# The landing-queue daemon ships from the same workspace. Running it is
+# dev-setup's job (a launchd agent, like Ordo's); this only puts it on PATH.
+DAEMON="chorosd"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$PKG"
@@ -27,7 +30,7 @@ command -v cargo >/dev/null 2>&1 || {
 # exactly how two copies of this binary at different commits once ended up on
 # one PATH. -p pins the root package so a workspace member cannot be dragged in.
 echo "==> building"
-cargo build --release -p "$PKG"
+cargo build --release -p "$PKG" -p "$DAEMON"
 
 # A rename leaves the old name live on PATH at a stale commit forever, with
 # nothing remaining that would ever update it. The receipt remembers what the
@@ -42,6 +45,7 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
 install -m 0755 "target/release/$BIN" "$INSTALL_DIR/$BIN"
+install -m 0755 "target/release/$DAEMON" "$INSTALL_DIR/$DAEMON"
 
 # Which clone deployed this? Any checkout anywhere can run this script and
 # become the live version, so record the source. Best-effort, because it must
@@ -50,8 +54,8 @@ install -m 0755 "target/release/$BIN" "$INSTALL_DIR/$BIN"
 commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 dirty=no
 [ -n "$(git -C "$HERE" status --porcelain 2>/dev/null)" ] && dirty=yes
-printf 'bin=%s\nsource=%s\ncommit=%s\ndirty=%s\n' \
-  "$INSTALL_DIR/$BIN" "$HERE" "$commit" "$dirty" > "$RECEIPT"
+printf 'bin=%s\ndaemon=%s\nsource=%s\ncommit=%s\ndirty=%s\n' \
+  "$INSTALL_DIR/$BIN" "$INSTALL_DIR/$DAEMON" "$HERE" "$commit" "$dirty" > "$RECEIPT"
 
 echo "==> installed: $INSTALL_DIR/$BIN ($commit$([ "$dirty" = yes ] && echo -dirty))"
 

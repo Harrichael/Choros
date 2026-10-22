@@ -91,7 +91,7 @@ fn matches_cwd(dir_name: &str, encoded_cwd: &str) -> bool {
     }
 }
 
-fn claude_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
+pub fn claude_sessions(home: &Path, base: &Path) -> Result<Vec<Session>> {
     let session_base = home.join(".claude/projects");
     let encoded_base = encode_cwd(base);
     let rivals = rival_encodings(base, &encoded_base);

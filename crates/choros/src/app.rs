@@ -21,6 +21,10 @@ pub struct App {
     pub name: String,
     pub focus: NewFocus,
     pub repo_selected: Vec<bool>,
+    /// Per registry repo: the root's landing queues for it, and which one the
+    /// new workspace lands into (0 = none, i.e. instant mode).
+    pub queues: Vec<Vec<String>>,
+    pub queue_choice: Vec<usize>,
     pub repo_idx: usize,
     pub error: Option<String>,
     /// The latest progress line while a create runs; `None` when idle.
@@ -47,7 +51,10 @@ impl App {
             Ok(r) => (r, None),
             Err(e) => (Vec::new(), Some(format!("registry scan failed: {e}"))),
         };
+        let queues = registry.iter().map(|r| queues_for(&root, r)).collect();
         Self {
+            queue_choice: vec![0; registry.len()],
+            queues,
             root,
             repo_selected: vec![false; registry.len()],
             registry,
@@ -60,6 +67,26 @@ impl App {
             should_quit: false,
             created_path: None,
         }
+    }
+}
+
+fn queues_for(root: &std::path::Path, repo: &str) -> Vec<String> {
+    choros_land::queue::list(root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| {
+            choros_land::queue::Queue::open(root, name).is_ok_and(|q| {
+                q.config.repo == repo && q.config.scope == choros_land::state::Scope::Root
+            })
+        })
+        .collect()
+}
+
+impl App {
+    /// The queue the highlighted-or-given repo will land into.
+    pub fn queue_of(&self, i: usize) -> Option<&str> {
+        let choice = *self.queue_choice.get(i)?;
+        choice.checked_sub(1).and_then(|c| self.queues[i].get(c)).map(String::as_str)
     }
 }
 
@@ -152,6 +179,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                         *slot = !*slot;
                     }
                 }
+                KeyCode::Char('b') => {
+                    let i = app.repo_idx;
+                    if let (Some(c), Some(qs)) = (app.queue_choice.get_mut(i), app.queues.get(i)) {
+                        *c = (*c + 1) % (qs.len() + 1);
+                    }
+                }
                 _ => {}
             },
         },
@@ -170,6 +203,10 @@ fn submit(app: &mut App) {
         .filter(|(s, _)| **s)
         .map(|(_, r)| r.clone())
         .collect();
+    let bindings: Vec<(String, String)> = (0..app.registry.len())
+        .filter(|i| app.repo_selected[*i])
+        .filter_map(|i| app.queue_of(i).map(|q| (app.registry[i].clone(), q.to_string())))
+        .collect();
     if repos.is_empty() {
         app.error = Some("select at least one repo".into());
         return;
@@ -183,7 +220,13 @@ fn submit(app: &mut App) {
     app.work_rx = Some(rx);
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
-        let result = choros::create(&root, &name, &repos, &progress);
+        let result = choros::create(&root, &name, &repos, &progress).and_then(|info| {
+            for (repo, queue) in &bindings {
+                progress.status(format!("{repo} lands into {queue}; moving it onto the merge head…"));
+                crate::land_cli::bind_new(&info.path, repo, queue)?;
+            }
+            Ok(info)
+        });
         let _ = tx.send(WorkMsg::Done(result.map_err(|e| e.to_string())));
     });
 }

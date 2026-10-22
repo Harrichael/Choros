@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 choros-core = { path = "crates/choros-core" }
+choros-land = { path = "crates/choros-land" }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 ignore = "0.4.33"

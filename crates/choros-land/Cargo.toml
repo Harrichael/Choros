@@ -1,0 +1,15 @@
+[package]
+name = "choros-land"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+choros-core.workspace = true
+color-eyre.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

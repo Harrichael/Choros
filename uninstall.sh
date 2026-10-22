@@ -21,6 +21,13 @@ else
   echo "not found: $target"
 fi
 
+daemon=""
+[ -f "$RECEIPT" ] && daemon="$(sed -n 's/^daemon=//p' "$RECEIPT")"
+if [ -n "$daemon" ] && [ -e "$daemon" ]; then
+  rm -f "$daemon"
+  echo "removed $daemon"
+fi
+
 if [ -d "$STATE_DIR" ]; then
   rm -rf "$STATE_DIR"
   echo "removed $STATE_DIR"
