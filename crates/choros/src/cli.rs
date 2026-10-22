@@ -116,7 +116,7 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, name) = choros::resolve_target(&cwd, None)?;
     let workspace = root.join(&name);
-    agent::settings_tui::run(workspace, root)
+    crate::settings_tui::run(workspace, root)
 }
 
 pub fn run_repo(args: Vec<String>) -> Result<()> {

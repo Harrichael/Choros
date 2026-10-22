@@ -1,14 +1,11 @@
-mod agent;
 mod app;
-mod cache;
-mod choros;
 mod cli;
-mod git;
-mod json_diff;
 mod ls;
-mod registry;
+mod settings_tui;
 mod tui;
 mod ui;
+
+use choros_core::{agent, choros, git, json_diff, registry};
 
 use color_eyre::Result;
 

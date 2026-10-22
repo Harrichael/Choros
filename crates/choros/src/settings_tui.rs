@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use super::settings::{load_template, load_workspace, save_template, DiffSource};
+use crate::agent::settings::{load_template, load_workspace, save_template, DiffSource};
 use crate::json_diff::{apply_additions, diff_additions, Addition};
 
 pub struct SettingsApp {

@@ -1,0 +1,14 @@
+[package]
+name = "choros"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+choros-core.workspace = true
+color-eyre.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

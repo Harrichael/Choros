@@ -6,7 +6,6 @@
 
 pub mod ls;
 pub mod settings;
-pub mod settings_tui;
 
 use std::path::{Path, PathBuf};
 
