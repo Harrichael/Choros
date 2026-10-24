@@ -15,6 +15,7 @@ use choros_land::{admin, status};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::choros;
+use choros_core::space;
 
 /// What the engine needs, owned, so an `Env` can borrow it.
 struct Tools {
@@ -23,8 +24,8 @@ struct Tools {
 }
 
 impl Tools {
-    fn for_root(root: &Path) -> Tools {
-        let gh_dir = root.join(choros::CONFIG_DIR).join("gh");
+    fn for_trunk(trunk: &Path) -> Tools {
+        let gh_dir = trunk.join(choros::CONFIG_DIR).join("gh");
         Tools {
             gh: Gh {
                 config_dir: gh_dir.exists().then_some(gh_dir),
@@ -42,9 +43,20 @@ impl Tools {
     }
 }
 
-fn root_here() -> Result<PathBuf> {
+fn trunk_here() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    choros::find_root(&cwd).ok_or_else(|| eyre!("not under a choros root (no .choros-config above here)"))
+    space::find_trunk(&cwd).ok_or_else(|| eyre!("not under a choros trunk (no .choros-config above here)"))
+}
+
+/// The queues `choros queue` and `landing open` offer from here, narrowed
+/// like `choros status`.
+fn visible_here(trunk: &Path) -> Result<Vec<String>> {
+    let cwd = std::env::current_dir()?;
+    Ok(status::visible_queues(&cwd, None, false)?
+        .into_iter()
+        .filter(|(t, _)| t == trunk)
+        .map(|(_, q)| q)
+        .collect())
 }
 
 fn interactive() -> bool {
@@ -90,18 +102,18 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         }
     }
     let cwd = std::env::current_dir()?;
-    let (root, ws) = choros::find_workspace(&cwd)?;
+    let (trunk, ws) = choros::find_workspace(&cwd)?;
     let fork = if fork {
         Some(match deps {
             Some(d) => d,
-            None if interactive() => pick_fork_deps(&root, &ws, &cwd)?,
+            None if interactive() => pick_fork_deps(&trunk, &ws, &cwd)?,
             None => return Err(eyre!("--fork without a terminal needs --deps (SET,… or none)")),
         })
     } else {
         None
     };
 
-    let tools = Tools::for_root(&root);
+    let tools = Tools::for_trunk(&trunk);
     let mut handler = Interactive::default();
     let req = LandRequest {
         cwd,
@@ -119,7 +131,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     for l in &out.landed {
         match (&l.queue, l.n) {
             (Some(q), Some(n)) => {
-                let st = Queue::open(&root, q)?.read_state()?;
+                let st = Queue::open(&trunk, q)?.read_state()?;
                 let where_ = match st.sets.get(&n).and_then(|s| s.pr.as_ref()) {
                     Some(pr) => format!("at the front: {}", pr.url),
                     None => "queued".to_string(),
@@ -170,7 +182,7 @@ fn parse_deps(s: &str) -> Result<Vec<Dep>> {
         .collect()
 }
 
-fn pick_fork_deps(root: &Path, ws: &Path, cwd: &Path) -> Result<Vec<Dep>> {
+fn pick_fork_deps(trunk: &Path, ws: &Path, cwd: &Path) -> Result<Vec<Dep>> {
     let wl = choros_land::workspace::read(ws)?;
     let repo = cwd
         .strip_prefix(ws)
@@ -184,7 +196,7 @@ fn pick_fork_deps(root: &Path, ws: &Path, cwd: &Path) -> Result<Vec<Dep>> {
         .or_else(|| wl.repo.values().find(|r| r.queue.is_some()))
         .and_then(|r| r.queue.clone())
         .ok_or_else(|| eyre!("no repo here lands into a queue"))?;
-    let q = Queue::open(root, &queue)?;
+    let q = Queue::open(trunk, &queue)?;
     let st = q.read_state()?;
     let items: Vec<(Dep, String)> = st
         .sets
@@ -203,11 +215,11 @@ fn pick_fork_deps(root: &Path, ws: &Path, cwd: &Path) -> Result<Vec<Dep>> {
 
 pub fn run_sync(args: Vec<String>) -> Result<()> {
     if !args.is_empty() {
-        usage("choros sync");
+        usage("choros repo sync");
     }
     let cwd = std::env::current_dir()?;
-    let root = root_here()?;
-    let tools = Tools::for_root(&root);
+    let trunk = trunk_here()?;
+    let tools = Tools::for_trunk(&trunk);
     let synced = land::sync_workspace(&tools.env(), &cwd)?;
     if synced.is_empty() {
         eprintln!("already on the merge head");
@@ -223,17 +235,19 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         print!("{}", status::prompt_token(&cwd));
         return Ok(());
     }
-    if !args.is_empty() {
-        usage("choros status [--prompt]");
-    }
-    let config = choros_core::roots::config_home();
-    let report = status::report(&cwd, config.as_deref())?;
+    let all = match args.as_slice() {
+        [] => false,
+        [a] if a == "--all" => true,
+        _ => usage("choros status [--prompt | --all]"),
+    };
+    let config = choros_core::trunks::config_home();
+    let report = status::report(&cwd, config.as_deref(), all)?;
     if report.is_empty() {
         println!("no landing queues here");
         return Ok(());
     }
     for q in report {
-        println!("{} ({}) @ {}", q.name, q.repo, q.root.display());
+        println!("{} ({}) @ {}", q.name, q.repo, q.trunk.display());
         for s in &q.sets {
             if s.state == "merged" {
                 continue;
@@ -264,49 +278,45 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
             println!("  ({merged} merged)");
         }
         for (ws, repo) in &q.needs_sync {
-            println!("  ⇣ {} ({repo}) needs `choros sync`", ws.display());
+            println!("  ⇣ {} ({repo}) needs `choros repo sync`", ws.display());
         }
     }
     Ok(())
 }
 
 pub fn run_queue(args: Vec<String>) -> Result<()> {
-    let root = root_here()?;
-    let tools = Tools::for_root(&root);
+    let trunk = trunk_here()?;
+    let tools = Tools::for_trunk(&trunk);
     let env = tools.env();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
-        [] => crate::queue_tui::run(&root, None, &env),
+        [] => crate::queue_tui::run(&trunk, None, &visible_here(&trunk)?, &env),
         ["new", name, repo, rest @ ..] => {
             let scope = match rest {
-                [] => Scope::Root,
-                ["--workspace", ws] => Scope::Workspace(ws.to_string()),
-                _ => usage("choros queue new NAME REPO [--workspace WS]"),
+                [] => Scope::Trunk,
+                ["--workspace", ws] => Scope::Workspace(ws.trim_end_matches('/').to_string()),
+                ["--branch", b] => Scope::Branch(b.trim_end_matches('/').to_string()),
+                _ => usage("choros queue new NAME REPO [--workspace PATH | --branch PATH]"),
             };
-            let q = Queue::create(&root, name, repo, scope)?;
-            warn_push_workflows(&q);
-            eprintln!("created queue {name} for {repo}; bind a workspace with `choros queue bind {repo} {name}`");
-            Ok(())
-        }
-        ["bind", repo, queue] => {
-            let cwd = std::env::current_dir()?;
-            let (_, ws) = choros::find_workspace(&cwd)?;
-            let queue = (*queue != "none").then_some(*queue);
-            land::bind(&env, &ws, repo, queue)?;
-            match queue {
-                Some(q) => eprintln!("{repo} now lands into {q}"),
-                None => eprintln!("{repo} now lands straight to main"),
+            if let Scope::Workspace(p) | Scope::Branch(p) = &scope
+                && !trunk.join(p).is_dir()
+            {
+                return Err(eyre!("no {p:?} under {}; give its path below the trunk", trunk.display()));
             }
+            let q = Queue::create(&trunk, name, repo, scope)?;
+            warn_push_workflows(&q);
+            eprintln!("created queue {name} for {repo}; bind a workspace with `choros repo bind {repo} {name}`");
             Ok(())
         }
+        ["bind", repo, queue] => run_repo_bind(&env, repo, queue),
         ["sync", rest @ ..] => {
             let names = match rest {
-                [] => queue::list(&root)?,
+                [] => queue::list(&trunk)?,
                 [name] => vec![name.to_string()],
                 _ => usage("choros queue sync [NAME]"),
             };
             for name in names {
-                let report = admin::sync(&env, &Queue::open(&root, &name)?, None)?;
+                let report = admin::sync(&env, &Queue::open(&trunk, &name)?, None)?;
                 print_report(&name, &report);
             }
             Ok(())
@@ -323,25 +333,25 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
                 return Err(eyre!("no terminal to ask in; pass --agent trust|review|manual"));
             }
             let mut handler = Interactive { preset };
-            let report = admin::sync(&env, &Queue::open(&root, name)?, Some(&mut handler))?;
+            let report = admin::sync(&env, &Queue::open(&trunk, name)?, Some(&mut handler))?;
             print_report(name, &report);
             Ok(())
         }
         ["drop", name, n] => {
             let n: u32 = n.trim_start_matches("landing-").parse()?;
-            let report = admin::drop_set(&env, &Queue::open(&root, name)?, n)?;
+            let report = admin::drop_set(&env, &Queue::open(&trunk, name)?, n)?;
             print_report(name, &report);
             Ok(())
         }
         ["doctor", name] => {
-            for note in admin::doctor(&env, &Queue::open(&root, name)?)? {
+            for note in admin::doctor(&env, &Queue::open(&trunk, name)?)? {
                 println!("{note}");
             }
             Ok(())
         }
-        [name] => crate::queue_tui::run(&root, Some(name), &env),
+        [name] => crate::queue_tui::run(&trunk, Some(name), &[], &env),
         _ => usage(
-            "choros queue [NAME] | queue new NAME REPO [--workspace WS] | queue bind REPO QUEUE|none \
+            "choros queue [NAME] | queue new NAME REPO [--workspace PATH | --branch PATH] \
              | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME",
         ),
     }
@@ -390,7 +400,7 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
         ["open", n, rest @ ..] => (n.trim_start_matches("landing-").parse::<u32>()?, rest),
         _ => usage("choros landing open N [--queue Q] [--session ID]"),
     };
-    let root = root_here()?;
+    let trunk = trunk_here()?;
     let mut queue = None;
     let mut session = None;
     let mut i = 0;
@@ -404,12 +414,12 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
     }
     let queue = match queue {
         Some(q) => q,
-        None => match queue::list(&root)?.as_slice() {
+        None => match visible_here(&trunk)?.as_slice() {
             [only] => only.clone(),
             _ => return Err(eyre!("which queue? pass --queue")),
         },
     };
-    let q = Queue::open(&root, &queue)?;
+    let q = Queue::open(&trunk, &queue)?;
     let (dir, fork) = admin::landing_session(&q, n, session.as_deref())?;
     let mut cmd = Command::new("claude");
     cmd.current_dir(&dir);
@@ -516,9 +526,29 @@ fn drive(c: &Conflict) -> Result<()> {
     Ok(())
 }
 
-/// Bind a just-created workspace's repo to a queue (the `work` picker's `b`).
+/// `choros repo bind REPO QUEUE|none`: where this workspace lands `repo`.
+pub fn run_repo_bind(env: &Env, repo: &str, queue: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let (_, ws) = choros::find_workspace(&cwd)?;
+    let queue = (queue != "none").then_some(queue);
+    land::bind(env, &ws, repo, queue)?;
+    match queue {
+        Some(q) => eprintln!("{repo} now lands into {q}"),
+        None => eprintln!("{repo} now lands straight to main"),
+    }
+    Ok(())
+}
+
+pub fn run_repo_bind_here(repo: &str, queue: &str) -> Result<()> {
+    let trunk = trunk_here()?;
+    let tools = Tools::for_trunk(&trunk);
+    run_repo_bind(&tools.env(), repo, queue)
+}
+
+/// Bind a just-created workspace's repo to a queue (the `work` picker's `b`,
+/// or its branch-space's default).
 pub fn bind_new(ws: &Path, repo: &str, queue: &str) -> Result<()> {
-    let root = choros::find_root(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros root"))?;
-    let tools = Tools::for_root(&root);
+    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros trunk"))?;
+    let tools = Tools::for_trunk(&trunk);
     land::bind(&tools.env(), ws, repo, Some(queue))
 }

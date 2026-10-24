@@ -599,7 +599,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// Whether a dependency in another queue has merged.
     pub fn cross_merged(&self) -> impl Fn(&str, u32) -> bool + '_ {
         |queue, n| {
-            Queue::open(&self.q.root, queue)
+            Queue::open(&self.q.trunk, queue)
                 .and_then(|q| q.read_state())
                 .ok()
                 .and_then(|s| s.sets.get(&n).map(|set| set.status == SetStatus::Merged))

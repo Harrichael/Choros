@@ -141,7 +141,7 @@ pub fn set_deps(env: &Env, q: &Queue, n: u32, deps: Vec<Dep>) -> Result<PassRepo
                 }
             }
             Dep::Cross { queue, n: m } => {
-                let other = Queue::open(&q.root, queue)?;
+                let other = Queue::open(&q.trunk, queue)?;
                 // Two queues on one repo would make the edge a real base
                 // spanning two merge heads; across repos it only orders PRs.
                 if other.config.repo == q.config.repo {

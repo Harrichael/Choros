@@ -47,16 +47,38 @@ impl Agent {
     }
 }
 
-pub fn templates_dir(root: &Path) -> PathBuf {
-    root.join(TEMPLATES_REL)
+pub fn templates_dir(trunk: &Path) -> PathBuf {
+    trunk.join(TEMPLATES_REL)
+}
+
+/// A branch-space's own templates, which win over the trunk's file by file.
+pub const BRANCH_TEMPLATES_REL: &str = ".choros-branch-config/templates";
+
+/// Where a workspace's templates come from, nearest space first.
+fn template_dirs(workspace: &Path) -> Result<Vec<PathBuf>> {
+    let space = workspace.parent().and_then(crate::space::find_space);
+    let Some(space) = space else {
+        return Ok(Vec::new());
+    };
+    Ok(crate::space::chain(&space)?
+        .into_iter()
+        .map(|s| {
+            if crate::space::is_trunk(&s) {
+                templates_dir(&s)
+            } else {
+                s.join(BRANCH_TEMPLATES_REL)
+            }
+        })
+        .collect())
 }
 
 /// Set up everything agent-related in a fresh workspace: the choros-archive
-/// skill plus any per-agent baselines staged under `.choros-config/templates/`.
-pub fn provision(root: &Path, workspace: &Path) -> Result<()> {
+/// skill plus any per-agent baselines staged under `.choros-config/templates/`,
+/// or a branch-space's `.choros-branch-config/templates/` above it.
+pub fn provision(workspace: &Path) -> Result<()> {
     write_skill(workspace)?;
-    copy_templates(&templates_dir(root), workspace)
-        .wrap_err("copying .choros-config/templates into workspace")
+    copy_templates(&template_dirs(workspace)?, workspace)
+        .wrap_err("copying templates into workspace")
 }
 
 fn write_skill(workspace: &Path) -> Result<()> {
@@ -66,8 +88,8 @@ fn write_skill(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn init_templates(root: &Path) -> Result<PathBuf> {
-    let dir = templates_dir(root);
+pub fn init_templates(trunk: &Path) -> Result<PathBuf> {
+    let dir = templates_dir(trunk);
     std::fs::create_dir_all(&dir)?;
     for agent in Agent::ALL {
         for tf in agent.template_files() {
@@ -87,16 +109,12 @@ pub fn init_templates(root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn copy_templates(templates_root: &Path, workspace: &Path) -> Result<()> {
-    if !templates_root.exists() {
-        return Ok(());
-    }
+fn copy_templates(dirs: &[PathBuf], workspace: &Path) -> Result<()> {
     for agent in Agent::ALL {
         for tf in agent.template_files() {
-            let src = templates_root.join(tf.rel);
-            if !src.exists() {
+            let Some(src) = dirs.iter().map(|d| d.join(tf.rel)).find(|p| p.exists()) else {
                 continue;
-            }
+            };
             let dest = workspace.join(tf.rel);
             if dest.exists() {
                 return Err(eyre!(
@@ -124,19 +142,19 @@ mod tests {
     #[test]
     fn copy_templates_errors_on_collision() {
         let tmp = tempdir();
-        let root = tmp.path();
+        let trunk = tmp.path();
 
-        let templates = root.join("templates");
+        let templates = trunk.join("templates");
         let claude_t = templates.join(".claude");
         std::fs::create_dir_all(&claude_t).unwrap();
         std::fs::write(claude_t.join("settings.json"), b"from-template").unwrap();
 
-        let workspace = root.join("ws");
+        let workspace = trunk.join("ws");
         let claude_w = workspace.join(".claude");
         std::fs::create_dir_all(&claude_w).unwrap();
         std::fs::write(claude_w.join("settings.json"), b"from-workspace").unwrap();
 
-        let err = copy_templates(&templates, &workspace).unwrap_err();
+        let err = copy_templates(&[templates], &workspace).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("template collision"), "got: {msg}");
 
@@ -150,11 +168,11 @@ mod tests {
     #[test]
     fn init_templates_preserves_existing_settings() {
         let tmp = tempdir();
-        let root = tmp.path();
-        init_templates(root).unwrap();
-        let settings = root.join(".choros-config/templates/.claude/settings.json");
+        let trunk = tmp.path();
+        init_templates(trunk).unwrap();
+        let settings = trunk.join(".choros-config/templates/.claude/settings.json");
         std::fs::write(&settings, b"user-edited").unwrap();
-        init_templates(root).unwrap();
+        init_templates(trunk).unwrap();
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "user-edited");
     }
 }

@@ -1,5 +1,6 @@
-//! How instant mode reaches main: `<root>/.choros-config/instant.toml`,
-//! overridable per workspace in its `.choros-landing.toml`.
+//! How instant mode reaches main: `<trunk>/.choros-config/instant.toml`,
+//! overridable by a branch-space's `landing.toml` and per workspace in its
+//! `.choros-landing.toml`, nearest first.
 
 use std::path::Path;
 
@@ -31,11 +32,16 @@ struct Section {
     via: Via,
 }
 
-pub fn via(root: &Path, ws: &Path) -> Result<Via> {
+pub fn via(trunk: &Path, ws: &Path) -> Result<Via> {
     if let Some(v) = workspace::read(ws)?.instant {
         return Ok(v);
     }
-    let path = root.join(CONFIG_DIR).join("instant.toml");
+    if let Some(space) = ws.parent().and_then(choros_core::space::find_space)
+        && let Some(v) = crate::branch::default_instant(&space)?
+    {
+        return Ok(v);
+    }
+    let path = trunk.join(CONFIG_DIR).join("instant.toml");
     if !path.exists() {
         return Ok(Via::default());
     }

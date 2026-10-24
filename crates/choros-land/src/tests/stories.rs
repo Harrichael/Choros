@@ -339,7 +339,7 @@ fn a_workspace_that_merged_main_lands_only_its_own_commits() {
 }
 
 /// The prompt token tells a workspace when the queue moved under it, and
-/// `choros sync` clears it.
+/// `choros repo sync` clears it.
 #[test]
 fn the_prompt_says_sync_until_the_workspace_is_synced() {
     let w = World::new();
@@ -366,7 +366,7 @@ fn a_land_makes_a_landing_with_the_session_forked_into_it() {
     let out = w.land(&ws).unwrap();
 
     let landing = out.landed[0].landing.clone().unwrap();
-    assert_eq!(landing, w.root.join("landing/appq/landing-1"));
+    assert_eq!(landing, w.trunk.join("landing/appq/landing-1"));
     assert_eq!(git(&landing.join(REPO), &["branch", "--show-current"]), "appq/landing-1");
     assert!(landing.join(".choros-meta.toml").exists());
     let forks = w.agent.forks.lock().unwrap();
@@ -380,8 +380,8 @@ fn a_land_makes_a_landing_with_the_session_forked_into_it() {
 #[test]
 fn instant_mode_lands_on_main() {
     let w = World::new();
-    choros_core::choros::create(&w.root, "ws", &[REPO.to_string()], &()).unwrap();
-    let ws = w.root.join("ws");
+    choros_core::choros::create(&w.trunk, "ws", &[REPO.to_string()], &()).unwrap();
+    let ws = w.trunk.join("ws");
     w.commit(&ws, "a.txt", "a\n");
     w.land(&ws).unwrap();
     let main = w.origin_main();
@@ -417,7 +417,7 @@ fn landing_folders_follow_their_sets_and_retire_on_merge() {
     w.pass();
 
     assert!(!first.exists());
-    assert!(w.root.join(".choros-config/archive/landing/appq/landing-1").exists());
+    assert!(w.trunk.join(".choros-config/archive/landing/appq/landing-1").exists());
     let tip = w.state().sets[&2].tip.clone();
     assert_eq!(git(&second.join(REPO), &["rev-parse", "HEAD"]), tip);
 }

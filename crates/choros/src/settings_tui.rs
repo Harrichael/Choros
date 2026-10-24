@@ -15,7 +15,7 @@ use crate::json_diff::{apply_additions, diff_additions, Addition};
 
 pub struct SettingsApp {
     pub workspace: PathBuf,
-    pub root: PathBuf,
+    pub trunk: PathBuf,
     pub source: DiffSource,
     pub additions: Vec<Addition>,
     pub selected: Vec<bool>,
@@ -25,10 +25,10 @@ pub struct SettingsApp {
 }
 
 impl SettingsApp {
-    pub fn new(workspace: PathBuf, root: PathBuf) -> Result<Self> {
+    pub fn new(workspace: PathBuf, trunk: PathBuf) -> Result<Self> {
         let mut app = Self {
             workspace,
-            root,
+            trunk,
             source: DiffSource::Both,
             additions: Vec::new(),
             selected: Vec::new(),
@@ -41,7 +41,7 @@ impl SettingsApp {
     }
 
     fn refresh(&mut self) -> Result<()> {
-        let template = load_template(&self.root)?;
+        let template = load_template(&self.trunk)?;
         let workspace = load_workspace(&self.workspace, self.source)?;
         let additions = diff_additions(&template, &workspace);
         self.selected = vec![true; additions.len()];
@@ -77,9 +77,9 @@ impl SettingsApp {
             self.status = "nothing selected".into();
             return Ok(());
         }
-        let mut template = load_template(&self.root)?;
+        let mut template = load_template(&self.trunk)?;
         apply_additions(&mut template, &picks);
-        save_template(&self.root, &template)?;
+        save_template(&self.trunk, &template)?;
         let n = picks.len();
         self.refresh()?;
         self.status = format!(
@@ -102,8 +102,8 @@ impl SettingsApp {
     }
 }
 
-pub fn run(workspace: PathBuf, root: PathBuf) -> Result<()> {
-    let mut app = SettingsApp::new(workspace, root)?;
+pub fn run(workspace: PathBuf, trunk: PathBuf) -> Result<()> {
+    let mut app = SettingsApp::new(workspace, trunk)?;
     crate::tui::with_tui(|terminal| run_loop(terminal, &mut app))
 }
 

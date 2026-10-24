@@ -9,6 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 
 use crate::choros::{self, ChorosInfo, ProgressSink};
+use choros_core::space;
 use crate::registry;
 use crate::ui;
 
@@ -16,13 +17,15 @@ use crate::ui;
 /// Enter is pressed — a progress popup over the same picker until the
 /// workspace exists.
 pub struct App {
-    pub root: PathBuf,
+    /// Where the workspace is made: the trunk or a branch-space.
+    pub space: PathBuf,
     pub registry: Vec<String>,
     pub name: String,
     pub focus: NewFocus,
     pub repo_selected: Vec<bool>,
-    /// Per registry repo: the root's landing queues for it, and which one the
-    /// new workspace lands into (0 = none, i.e. instant mode).
+    /// Per registry repo: the landing queues for it that take workspaces from
+    /// this space, and which one the new workspace lands into (0 = none, i.e.
+    /// instant mode; preset from the branch-space's default).
     pub queues: Vec<Vec<String>>,
     pub queue_choice: Vec<usize>,
     pub repo_idx: usize,
@@ -46,16 +49,26 @@ enum WorkMsg {
 }
 
 impl App {
-    pub fn new(root: PathBuf, prefill_name: Option<String>, focus: NewFocus) -> Self {
-        let (registry, error) = match registry::scan(&root) {
+    pub fn new(space: PathBuf, prefill_name: Option<String>, focus: NewFocus) -> Self {
+        let trunk = space::find_trunk(&space).unwrap_or_else(|| space.clone());
+        let (registry, error) = match registry::scan(&trunk) {
             Ok(r) => (r, None),
             Err(e) => (Vec::new(), Some(format!("registry scan failed: {e}"))),
         };
-        let queues = registry.iter().map(|r| queues_for(&root, r)).collect();
+        let rel = space::rel(&trunk, &space).unwrap_or_default();
+        let queues: Vec<Vec<String>> = registry.iter().map(|r| queues_for(&trunk, &rel, r)).collect();
+        let queue_choice = registry
+            .iter()
+            .zip(&queues)
+            .map(|(repo, qs)| match choros_land::branch::default_binding(&space, repo) {
+                Ok(Some(Some(q))) => qs.iter().position(|x| *x == q).map_or(0, |i| i + 1),
+                _ => 0,
+            })
+            .collect();
         Self {
-            queue_choice: vec![0; registry.len()],
+            queue_choice,
             queues,
-            root,
+            space,
             repo_selected: vec![false; registry.len()],
             registry,
             name: prefill_name.unwrap_or_default(),
@@ -70,14 +83,13 @@ impl App {
     }
 }
 
-fn queues_for(root: &std::path::Path, repo: &str) -> Vec<String> {
-    choros_land::queue::list(root)
+fn queues_for(trunk: &std::path::Path, space_rel: &str, repo: &str) -> Vec<String> {
+    choros_land::queue::list(trunk)
         .unwrap_or_default()
         .into_iter()
         .filter(|name| {
-            choros_land::queue::Queue::open(root, name).is_ok_and(|q| {
-                q.config.repo == repo && q.config.scope == choros_land::state::Scope::Root
-            })
+            choros_land::queue::Queue::open(trunk, name)
+                .is_ok_and(|q| q.config.repo == repo && q.config.scope.admits_space(space_rel))
         })
         .collect()
 }
@@ -192,7 +204,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn submit(app: &mut App) {
-    if let Err(e) = choros::validate_name(&app.root, &app.name) {
+    if let Err(e) = choros::validate_name(&app.space, &app.name) {
         app.error = Some(e.to_string());
         return;
     }
@@ -213,14 +225,14 @@ fn submit(app: &mut App) {
     }
 
     let (tx, rx) = mpsc::channel();
-    let root = app.root.clone();
+    let space = app.space.clone();
     let name = app.name.clone();
     app.error = None;
     app.working = Some(format!("creating '{name}'"));
     app.work_rx = Some(rx);
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
-        let result = choros::create(&root, &name, &repos, &progress).and_then(|info| {
+        let result = choros::create(&space, &name, &repos, &progress).and_then(|info| {
             for (repo, queue) in &bindings {
                 progress.status(format!("{repo} lands into {queue}; moving it onto the merge head…"));
                 crate::land_cli::bind_new(&info.path, repo, queue)?;

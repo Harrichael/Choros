@@ -26,10 +26,8 @@ fn main() -> Result<()> {
             reject_extra_args("init", &rest);
             cli::run_init()
         }
-        Some("ls") => {
-            reject_extra_args("ls", &rest);
-            cli::run_ls()
-        }
+        Some("ls") => cli::run_ls(rest),
+        Some("branch") => cli::run_branch(rest),
         Some("archive") => cli::run_archive(rest),
         Some("add") => cli::run_add(rest),
         Some("agent") => cli::run_agent(rest),

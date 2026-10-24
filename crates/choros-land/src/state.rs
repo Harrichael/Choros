@@ -27,8 +27,35 @@ pub struct QueueConfig {
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     #[default]
-    Root,
+    #[serde(alias = "root")]
+    Trunk,
+    /// One workspace, by its path below the trunk.
     Workspace(String),
+    /// Every workspace in a branch-space and below it, by the branch-space's
+    /// path below the trunk.
+    Branch(String),
+}
+
+impl Scope {
+    /// May the workspace at `ws_rel` (its path below the trunk) land here?
+    pub fn admits(&self, ws_rel: &str) -> bool {
+        match self {
+            Scope::Trunk => true,
+            Scope::Workspace(only) => only == ws_rel,
+            Scope::Branch(b) => ws_rel.strip_prefix(b.as_str()).is_some_and(|r| r.starts_with('/')),
+        }
+    }
+
+    /// May a workspace made in the space at `space_rel` land here?
+    pub fn admits_space(&self, space_rel: &str) -> bool {
+        match self {
+            Scope::Trunk => true,
+            Scope::Workspace(_) => false,
+            Scope::Branch(b) => {
+                space_rel == b || space_rel.strip_prefix(b.as_str()).is_some_and(|r| r.starts_with('/'))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

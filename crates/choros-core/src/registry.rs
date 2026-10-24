@@ -6,22 +6,22 @@ use crate::git;
 
 const REGISTRY_REL: &str = ".choros-config/registry";
 
-pub fn registry_dir(root: &Path) -> PathBuf {
-    root.join(REGISTRY_REL)
+pub fn registry_dir(trunk: &Path) -> PathBuf {
+    trunk.join(REGISTRY_REL)
 }
 
-pub fn init_dirs(root: &Path) -> Result<PathBuf> {
-    let dir = registry_dir(root);
+pub fn init_dirs(trunk: &Path) -> Result<PathBuf> {
+    let dir = registry_dir(trunk);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
-pub fn repo_path(root: &Path, name: &str) -> PathBuf {
-    registry_dir(root).join(name)
+pub fn repo_path(trunk: &Path, name: &str) -> PathBuf {
+    registry_dir(trunk).join(name)
 }
 
-pub fn scan(root: &Path) -> Result<Vec<String>> {
-    let dir = registry_dir(root);
+pub fn scan(trunk: &Path) -> Result<Vec<String>> {
+    let dir = registry_dir(trunk);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -43,13 +43,13 @@ pub fn scan(root: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-pub fn ensure_repo_exists(root: &Path, name: &str) -> Result<PathBuf> {
+pub fn ensure_repo_exists(trunk: &Path, name: &str) -> Result<PathBuf> {
     // Repo args double as clone destinations inside the workspace; a path-ish
     // name (`../x`, `/abs`) would escape both the registry and the workspace.
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
         return Err(eyre!("invalid repo name {:?}", name));
     }
-    let path = repo_path(root, name);
+    let path = repo_path(trunk, name);
     if !path.exists() {
         return Err(eyre!("registry repo {:?} does not exist", path));
     }
@@ -103,10 +103,10 @@ fn repo_name_from_ssh_url(url: &str) -> Result<String> {
 
 /// Clone `url` (an SSH remote) into the registry, deriving the directory name
 /// from the URL. Returns the derived name and its path under the registry.
-pub fn add(root: &Path, url: &str) -> Result<(String, PathBuf)> {
+pub fn add(trunk: &Path, url: &str) -> Result<(String, PathBuf)> {
     let name = repo_name_from_ssh_url(url)?;
-    init_dirs(root)?;
-    let dest = repo_path(root, &name);
+    init_dirs(trunk)?;
+    let dest = repo_path(trunk, &name);
     if dest.exists() {
         return Err(eyre!("'{}' already exists in the registry", name));
     }
@@ -211,20 +211,20 @@ mod tests {
     #[test]
     fn add_rejects_non_ssh_url_without_touching_registry() {
         let tmp = tempdir();
-        let root = tmp.path();
-        let err = add(root, "https://github.com/org/repo.git").unwrap_err();
+        let trunk = tmp.path();
+        let err = add(trunk, "https://github.com/org/repo.git").unwrap_err();
         assert!(err.to_string().contains("ssh"), "got: {err}");
-        assert!(!registry_dir(root).join("repo").exists());
+        assert!(!registry_dir(trunk).join("repo").exists());
     }
 
     #[test]
     fn add_rejects_duplicate_name() {
         let tmp = tempdir();
-        let root = tmp.path();
-        let reg = registry_dir(root);
+        let trunk = tmp.path();
+        let reg = registry_dir(trunk);
         fake_repo(&reg, "repo");
 
-        let err = add(root, "git@github.com:org/repo.git").unwrap_err();
+        let err = add(trunk, "git@github.com:org/repo.git").unwrap_err();
         assert!(err.to_string().contains("already exists"), "got: {err}");
         // Pre-existing fake repo must be untouched, not overwritten by a clone attempt.
         assert!(reg.join("repo/.git").exists());

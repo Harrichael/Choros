@@ -17,7 +17,7 @@ pub struct Session {
     pub modified: SystemTime,
     pub preview: String,
     /// Path the session was invoked from, relative to `base` (the workspace
-    /// root if cwd is inside one, else cwd itself). `"."` for sessions
+    /// trunk if cwd is inside one, else cwd itself). `"."` for sessions
     /// invoked at `base` itself.
     pub path: String,
 }
@@ -33,7 +33,7 @@ pub fn run(cwd: &Path) -> Result<()> {
     // Prefer the choros workspace root as the base so the PATH column is
     // workspace-relative. Fall back to cwd if we're not inside a workspace.
     let base = match choros::resolve_target(cwd, None) {
-        Ok((root, name)) => root.join(name),
+        Ok((trunk, name)) => trunk.join(name),
         Err(_) => cwd.to_path_buf(),
     };
     let mut stdout = std::io::stdout().lock();
@@ -535,16 +535,16 @@ mod tests {
     #[test]
     fn claude_sessions_skip_sibling_with_colliding_encoding() {
         let home = tempdir();
-        let root = tempdir();
-        let base = root.path().join("ordo");
+        let trunk = tempdir();
+        let base = trunk.path().join("ordo");
         std::fs::create_dir_all(base.join("src")).unwrap();
-        std::fs::create_dir_all(root.path().join("ordo_better")).unwrap();
+        std::fs::create_dir_all(trunk.path().join("ordo_better")).unwrap();
         for (dir, id) in [
             (base.clone(), "mine"),
             (base.join("src"), "mine-sub"),
             (base.join("gone"), "mine-deleted-subdir"),
-            (root.path().join("ordo_better"), "sibling"),
-            (root.path().join("ordo_better/src"), "sibling-sub"),
+            (trunk.path().join("ordo_better"), "sibling"),
+            (trunk.path().join("ordo_better/src"), "sibling-sub"),
         ] {
             let sdir = home.path().join(".claude/projects").join(encode_cwd(&dir));
             std::fs::create_dir_all(&sdir).unwrap();
@@ -573,12 +573,12 @@ mod tests {
     #[test]
     fn claude_sessions_skip_archived_and_deleted_siblings() {
         let home = tempdir();
-        let root = tempdir();
-        let base = root.path().join("ordo");
+        let trunk = tempdir();
+        let base = trunk.path().join("ordo");
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::create_dir_all(root.path().join(".choros-config/archive/ordo_shelved")).unwrap();
-        let shelved = root.path().join("ordo_shelved");
-        let gone = root.path().join("ordo_gone");
+        std::fs::create_dir_all(trunk.path().join(".choros-config/archive/ordo_shelved")).unwrap();
+        let shelved = trunk.path().join("ordo_shelved");
+        let gone = trunk.path().join("ordo_gone");
         for (dir, id, body) in [
             (base.clone(), "mine", format!(r#"{{"cwd":{:?}}}"#, base)),
             (shelved.clone(), "shelved", String::new()),

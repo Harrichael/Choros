@@ -1,8 +1,9 @@
 //! Stories about the landing queue, told against real git: a bare repo as
-//! origin, a choros root with a registry, workspaces made the way `choros
+//! origin, a choros trunk with a registry, workspaces made the way `choros
 //! work` makes them. GitHub is a fake that performs real merges on origin;
 //! conflicts go to a scripted handler.
 
+mod branches;
 mod regressions;
 mod stories;
 
@@ -232,7 +233,7 @@ impl ConflictHandler for Scripted {
 
 pub struct World {
     _tmp: tempfile::TempDir,
-    pub root: PathBuf,
+    pub trunk: PathBuf,
     pub origin: PathBuf,
     pub forge: FakeForge,
     pub agent: FakeAgent,
@@ -242,7 +243,7 @@ pub const REPO: &str = "app";
 pub const QUEUE: &str = "appq";
 
 impl World {
-    /// A root whose registry holds `app` (one commit on main), with a queue
+    /// A trunk whose registry holds `app` (one commit on main), with a queue
     /// `appq` for it.
     pub fn new() -> World {
         isolate_git();
@@ -257,11 +258,11 @@ impl World {
         git(&seed, &["commit", "--quiet", "-m", "init"]);
         git(&seed, &["push", "--quiet", "origin", "main"]);
 
-        let root = base.join("root");
-        let registry = root.join(".choros-config/registry");
+        let trunk = base.join("trunk");
+        let registry = trunk.join(".choros-config/registry");
         std::fs::create_dir_all(&registry).unwrap();
         git(&registry, &["clone", "--quiet", origin.to_str().unwrap(), REPO]);
-        Queue::create(&root, QUEUE, REPO, Scope::Root).unwrap();
+        Queue::create(&trunk, QUEUE, REPO, Scope::Trunk).unwrap();
         World {
             _tmp: tmp,
             forge: FakeForge {
@@ -270,7 +271,7 @@ impl World {
                 require_up_to_date: Mutex::new(false),
             },
             agent: FakeAgent::default(),
-            root,
+            trunk,
             origin,
         }
     }
@@ -284,7 +285,7 @@ impl World {
     }
 
     pub fn queue(&self) -> Queue {
-        Queue::open(&self.root, QUEUE).unwrap()
+        Queue::open(&self.trunk, QUEUE).unwrap()
     }
 
     pub fn state(&self) -> QueueState {
@@ -294,8 +295,8 @@ impl World {
     /// A workspace with `app` bound to the queue: its branch starts on the
     /// merge head.
     pub fn workspace(&self, name: &str) -> PathBuf {
-        choros_core::choros::create(&self.root, name, &[REPO.to_string()], &()).unwrap();
-        let ws = self.root.join(name);
+        choros_core::choros::create(&self.trunk, name, &[REPO.to_string()], &()).unwrap();
+        let ws = self.trunk.join(name);
         crate::land::bind(&self.env(), &ws, REPO, Some(QUEUE)).unwrap();
         ws
     }

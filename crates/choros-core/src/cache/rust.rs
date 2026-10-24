@@ -8,8 +8,8 @@ use crate::choros::ProgressSink;
 
 /// Point the workspace's cargo at sccache. sccache keeps one cache for the
 /// whole machine on purpose: it reads its cache dir only when its server
-/// starts, so a per-root dir would quietly lose to whichever build started
-/// the server first — and sharing across roots is the point anyway.
+/// starts, so a per-trunk dir would quietly lose to whichever build started
+/// the server first — and sharing across trunks is the point anyway.
 pub fn setup<P: ProgressSink>(workspace: &Path, progress: &P) -> Result<()> {
     setup_inner(workspace, progress, tool::available)
 }

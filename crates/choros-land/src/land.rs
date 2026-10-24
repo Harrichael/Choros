@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use choros_core::choros::{self as core, ChorosMeta};
-use choros_core::{agent as core_agent, git as core_git, registry};
+use choros_core::{agent as core_agent, git as core_git, registry, space};
 use color_eyre::eyre::{Result, eyre};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -53,7 +53,7 @@ pub struct LandOutcome {
 }
 
 pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<LandOutcome> {
-    let (root, ws) = core::find_workspace(&req.cwd)?;
+    let (trunk, ws) = core::find_workspace(&req.cwd)?;
     refuse_landing_folder(&ws)?;
     let meta = core::read_meta(&ws)?;
     let mut scope: Vec<String> = match repo_of(&ws, &req.cwd, &meta) {
@@ -74,9 +74,9 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         }
         let rl = workspace::read(&ws)?.repo.get(repo).cloned().unwrap_or_default();
         let out = match &rl.queue {
-            None => land_instant(env, &root, &ws, repo)?,
+            None => land_instant(env, &trunk, &ws, repo)?,
             Some(queue) => {
-                let q = Queue::open(&root, queue)?;
+                let q = Queue::open(&trunk, queue)?;
                 land_queued(env, &q, &ws, repo, req, handler.as_deref_mut())?
             }
         };
@@ -99,7 +99,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
                 if left.len() == 1 { "has" } else { "have" }
             ));
         }
-        Some(core::archive(&root, &meta.name)?)
+        Some(core::archive(&trunk, &meta.name)?)
     } else {
         None
     };
@@ -135,6 +135,19 @@ fn has_unlanded(ws: &Path, repo: &str) -> Result<bool> {
 
 /// Where this repo's landing history starts. A workspace made before
 /// landing existed has no record; its branch point from main stands in.
+/// Repos of `ws` holding commits that haven't been landed, and how many.
+pub fn unlanded(ws: &Path) -> Result<Vec<(String, usize)>> {
+    let mut out = Vec::new();
+    for repo in core::read_meta(ws)?.repos {
+        let through = landed_through(ws, &repo)?;
+        let n = Git::new(&ws.join(&repo)).commits(&through, "HEAD")?.len();
+        if n > 0 {
+            out.push((repo, n));
+        }
+    }
+    Ok(out)
+}
+
 fn landed_through(ws: &Path, repo: &str) -> Result<String> {
     let rl = workspace::read(ws)?.repo.get(repo).cloned().unwrap_or_default();
     if let Some(sha) = rl.landed_through {
@@ -203,7 +216,7 @@ fn check_landable(git: &Git, through: &str) -> Result<()> {
     if git.has_merges(through, "HEAD")? {
         return Err(eyre!(
             "the commits to land in {:?} include a merge; rebase them onto the \
-             merge head instead (`choros sync`)",
+             merge head instead (`choros repo sync`)",
             git.dir()
         ));
     }
@@ -535,10 +548,10 @@ fn new_set(
     }
 }
 
-/// `choros sync`: move a repo's unlanded commits onto its queue's current
+/// `choros repo sync`: move a repo's unlanded commits onto its queue's current
 /// merge head.
 pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
-    let (root, ws) = core::find_workspace(cwd)?;
+    let (trunk, ws) = core::find_workspace(cwd)?;
     refuse_landing_folder(&ws)?;
     let meta = core::read_meta(&ws)?;
     let repos = match repo_of(&ws, cwd, &meta) {
@@ -551,7 +564,7 @@ pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
         let Some(queue) = workspace::read(&ws)?.repo.get(&repo).and_then(|r| r.queue.clone()) else {
             continue;
         };
-        let q = Queue::open(&root, &queue)?;
+        let q = Queue::open(&trunk, &queue)?;
         let before = Git::new(&ws.join(&repo)).head()?;
         sync_to_merge_head(env, &q, &ws, &repo)?;
         if Git::new(&ws.join(&repo)).head()? != before {
@@ -565,20 +578,18 @@ pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
 /// repo with no work of its own yet is moved onto the merge head, so new work
 /// starts there.
 pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()> {
-    let root = core::find_root(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros root"))?;
+    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros trunk"))?;
     let git = Git::new(&ws.join(repo));
     let Some(queue) = queue else {
         return update_repo(ws, repo, |rl| rl.queue = None);
     };
-    let q = Queue::open(&root, queue)?;
+    let q = Queue::open(&trunk, queue)?;
     if q.config.repo != repo {
         return Err(eyre!("queue {queue} lands {}, not {repo}", q.config.repo));
     }
-    let ws_name = ws.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    if let crate::state::Scope::Workspace(only) = &q.config.scope
-        && only != ws_name {
-            return Err(eyre!("queue {queue} belongs to workspace {only}"));
-        }
+    if !q.config.scope.admits(&space::rel(&trunk, ws)?) {
+        return Err(eyre!("queue {queue} only takes landings from {:?}", q.config.scope));
+    }
     let mh = current_merge_head(env, &q)?;
 
     git.fetch("origin", &[])?;
@@ -605,7 +616,7 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
 
 /// No queue: rebase onto main and put it there, by push or by a PR merged on
 /// the spot.
-fn land_instant(env: &Env, root: &Path, ws: &Path, repo: &str) -> Result<Landed> {
+fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed> {
     let git = Git::new(&ws.join(repo));
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
@@ -621,7 +632,7 @@ fn land_instant(env: &Env, root: &Path, ws: &Path, repo: &str) -> Result<Landed>
         ));
     }
     let head = git.head()?;
-    match crate::instant::via(root, ws)? {
+    match crate::instant::via(trunk, ws)? {
         crate::instant::Via::Push => {
             git.run(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{main}")])?;
         }
@@ -662,7 +673,7 @@ fn land_instant(env: &Env, root: &Path, ws: &Path, repo: &str) -> Result<Landed>
     })
 }
 
-/// `<root>/landing/<queue>/landing-N/`: a workspace of its own on the set's
+/// `<trunk>/landing/<queue>/landing-N/`: a workspace of its own on the set's
 /// branch, where review fixes are made and pushed.
 fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
     let dir = q.landing_dir(n);
@@ -674,7 +685,7 @@ fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
         return Ok(dir);
     }
     std::fs::create_dir_all(&dir)?;
-    let reg = registry::ensure_repo_exists(&q.root, repo)?;
+    let reg = registry::ensure_repo_exists(&q.trunk, repo)?;
     let url = core_git::remote_get_url(&reg, "origin")?;
     let clone = dir.join(repo);
     core_git::clone_with_reference(&reg, &url, &clone)?;
@@ -695,6 +706,7 @@ fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
             name: format!("landing-{n}"),
             created_at: now,
             repos: vec![repo.clone()],
+            branch: Some(branch.clone()),
         },
     )?;
     let mut wl = workspace::read(&dir)?;
@@ -704,7 +716,7 @@ fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
         parent: parent.to_path_buf(),
     });
     workspace::write(&dir, &wl)?;
-    core_agent::provision(&q.root, &dir)?;
+    core_agent::provision(&dir)?;
     std::fs::write(
         dir.join("CLAUDE.md"),
         format!(

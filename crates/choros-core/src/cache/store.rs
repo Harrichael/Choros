@@ -2,16 +2,16 @@ use std::path::{Path, PathBuf};
 
 pub const STORE_REL: &str = ".choros-config/store";
 
-pub fn store_dir(root: &Path) -> PathBuf {
-    root.join(STORE_REL)
+pub fn store_dir(trunk: &Path) -> PathBuf {
+    trunk.join(STORE_REL)
 }
 
-pub fn js_store(root: &Path) -> PathBuf {
-    store_dir(root).join("js")
+pub fn js_store(trunk: &Path) -> PathBuf {
+    store_dir(trunk).join("js")
 }
 
-pub fn pnpm_store(root: &Path) -> PathBuf {
-    js_store(root).join("pnpm-store")
+pub fn pnpm_store(trunk: &Path) -> PathBuf {
+    js_store(trunk).join("pnpm-store")
 }
 
 #[cfg(test)]
@@ -21,10 +21,10 @@ mod tests {
 
     #[test]
     fn paths_compose_under_choros_config() {
-        let root = Path::new("/proj");
-        assert_eq!(store_dir(root), Path::new("/proj/.choros-config/store"));
+        let trunk = Path::new("/proj");
+        assert_eq!(store_dir(trunk), Path::new("/proj/.choros-config/store"));
         assert_eq!(
-            pnpm_store(root),
+            pnpm_store(trunk),
             Path::new("/proj/.choros-config/store/js/pnpm-store")
         );
     }

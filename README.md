@@ -1,26 +1,29 @@
 # choros
 
-A small CLI for managing short-lived multi-repo work environments. One choros per Jira-task-sized unit of work.
+A small CLI for managing short-lived multi-repo work environments. One workspace per Jira-task-sized unit of work.
 
 ## How it works
 
-Choros is project-scoped to the directory it's launched in. Run it from the directory where you want your choros to live.
+Choros works inside a **trunk**: the directory you run `choros init` in. Workspaces live in the trunk or in a **branch-space**, a folder that groups workspaces (and further branch-spaces) and can carry its own defaults.
 
 ```
-<cwd>/
+<cwd>/                          ← the trunk
 ├── .choros-config/
 │   └── registry/
 │       ├── service-api/        ← added with `choros add`
 │       └── service-web/
-├── PROJ-1234/                  ← a choros, created by choros
+├── PROJ-1234/                  ← a workspace, created by `choros work`
 │   ├── .choros-meta.toml
-│   ├── service-api/            ← fresh clone of the registry repo
+│   ├── service-api/            ← fresh clone of the registry repo, on branch PROJ-1234
 │   └── service-web/
-└── PROJ-1235/
-    └── ...
+└── checkout/                   ← a branch-space, created by `choros branch`
+    ├── .choros-branch-config/
+    └── PROJ-1240/              ← a workspace in it, on branch checkout/PROJ-1240
 ```
 
-A directory is recognized as a choros iff it contains `.choros-meta.toml`.
+A directory is a workspace iff it contains `.choros-meta.toml`, a branch-space
+iff it contains `.choros-branch-config/`, and the trunk iff it contains
+`.choros-config/`.
 
 ## Setup
 
@@ -53,21 +56,23 @@ cargo install --path .
 
 ## Usage
 
-Run from inside the directory you want choros to live in.
+Run from the trunk or a branch-space; new workspaces go where you are.
 
 ```bash
 choros work                     # fast-create: just name + repos, then exit
 choros work PROJ-1              # name pre-filled, jumps to repo selection
 choros work PROJ-1 api web      # fully non-interactive (no TUI)
-choros ls                       # list active workspaces, most recently worked-in first
+choros branch checkout          # make a branch-space here
+choros ls                       # workspaces here and below, as a tree
 choros archive                  # archive the workspace your shell is in
-choros archive PROJ-1           # archive PROJ-1 from the project root
+choros archive PROJ-1           # archive PROJ-1 from its space
 choros agent save settings      # inside a workspace: TUI to promote claude
                                 # settings entries up to the template
 choros agent ls                 # list resumable claude / cursor sessions for
                                 # the current directory
 choros repo ls                  # inside a workspace: list its cloned repos
 choros repo add REPO [REPO…]    # inside a workspace: clone registry repos into it
+choros -h                       # every command
 ```
 
 `choros work` is the way to make a fresh choros: it opens the name + repo picker, shows progress over it while cloning, and exits once the workspace exists. With the shell integration below, your shell is `cd`'d into the new choros on success.
@@ -81,7 +86,7 @@ choros repo add REPO [REPO…]    # inside a workspace: clone registry repos int
 eval "$(choros shell-init)"
 ```
 
-After that, `choros work …` is silent on success and your shell ends up in the new choros dir, and `choros archive` run from inside a workspace leaves your shell at the choros root rather than in the moved-away directory.
+After that, `choros work …` and `choros branch NAME` leave your shell in what they made, and `choros archive` or `choros branch archive` run from inside what they archive leave your shell in the nearest space that's still there.
 
 In the picker: `Tab` switches between the name field and the repo list. `j` / `k` or arrows move. `Space` toggles a repo. `Enter` creates; on failure you're back in the picker with the error. `Esc` cancels.
 
@@ -92,11 +97,15 @@ For each selected repo `R`:
 1. reads `git -C .choros-config/registry/R remote get-url origin`
 2. best-effort `git fetch` in the registry copy
 3. `git clone --reference-if-able .choros-config/registry/R <url> <choros>/R`
-4. `git -C <choros>/R checkout -b <choros-name>` so each clone starts on a workspace-named branch
+4. `git -C <choros>/R checkout -b <branch>` so each clone starts on the
+   workspace's branch: its name, prefixed with the branch-space path when it
+   is in one (`checkout/PROJ-1240`). Choros first checks origin has no branch
+   that would collide (`checkout`, or `checkout/PROJ-1240/…`).
 
 Then:
 
-1. writes `<choros>/.choros-meta.toml`
+1. writes `<choros>/.choros-meta.toml`, recording the branch so repos added
+   later join the same one
 2. drops a `choros-archive` skill at `<choros>/.claude/skills/choros-archive/SKILL.md`
 3. copies any per-agent baselines from `.choros-config/templates/` (currently
    `.claude/settings.json`; cursor `.cursor/cli.json` is opt-in — see
@@ -119,14 +128,20 @@ cd <choros>
 choros agent save settings
 ```
 
+A branch-space can override any template file by placing its own under
+`<branch-space>/.choros-branch-config/templates/`; for each file the nearest
+space that has one wins.
+
 This opens a TUI that diffs the workspace's claude settings against the
 template and lets you check off entries to promote. `Tab` cycles the diff
 source between `settings.json`, `settings.local.json`, and both (default).
 
 ## Listing workspaces
 
-`choros ls`, run from the choros root, lists every active (non-archived)
-workspace, most recently worked-in first, with its last-active time (local
+`choros ls` lists the active (non-archived) workspaces in the space you're in
+and below, as a tree: each space's workspaces, most recently worked-in first,
+then its branch-spaces, then the landing-sets its workspaces have in flight.
+`--all` shows the whole trunk. Each workspace has its last-active time (local
 time zone, plus a rough "3d ago"), creation time, number of changed files
 (`git status` entries summed across its repos), and repos.
 
@@ -149,7 +164,7 @@ user message — feed the ID into `claude --resume <id>` or
 When run from inside a choros workspace, the scope expands to the whole
 workspace (not just cwd), and the `PATH` column is workspace-relative —
 `.` for sessions invoked at the workspace root, `<repo>` or `<repo>/<subdir>`
-for sessions invoked deeper. Outside a workspace (e.g. at the choros root)
+for sessions invoked deeper. Outside a workspace (e.g. at the trunk)
 the scope is the current directory and `PATH` is cwd-relative.
 
 ## Build cache
@@ -163,9 +178,9 @@ workspace create:
 | JS | `pnpm-lock.yaml` / `yarn.lock` / `package-lock.json` | `.choros-config/store/js/pnpm-store/` | runs `pnpm install --store-dir=...` (with `pnpm import` first for npm/yarn lockfiles); hardlinks files from the store into `<choros>/<repo>/node_modules/` |
 
 The second workspace pays effectively nothing for the same deps. The JS store
-is per Choros root (`rm -rf .choros-config/store/` is a clean reset). The Rust
-cache is sccache's single machine-wide one, shared by every root: sccache reads
-its cache dir only when its server starts, so a per-root dir would silently
+is per trunk (`rm -rf .choros-config/store/` is a clean reset). The Rust
+cache is sccache's single machine-wide one, shared by every trunk: sccache reads
+its cache dir only when its server starts, so a per-trunk dir would silently
 lose to whichever build started the server first.
 
 For npm/yarn repos, the `pnpm-lock.yaml` generated by `pnpm import` is added to
@@ -178,15 +193,46 @@ without failing workspace creation.
 
 ## Archiving a workspace
 
-`choros archive` moves a workspace under `.choros-config/archive/<name>/` so
-it disappears from the active list but is still recoverable. Pass a name
-explicitly to archive from the project root, or omit it to archive the
-workspace your current directory is inside.
+`choros archive` moves a workspace to the same path under
+`.choros-config/archive/` so it disappears from the active list but is still
+recoverable. Pass a name to archive a workspace in the space you're in, or
+omit it to archive the workspace your current directory is inside.
 
 Each new workspace also ships with a Claude Code skill at
 `.claude/skills/choros-archive/SKILL.md`. From inside the workspace, run
 `/choros-archive` and the AI will commit any pending work, push every cloned
 repo to its origin, then run `choros archive` to retire the workspace.
+
+## Branch-spaces
+
+A branch-space groups related workspaces, say everything for one epic. From
+inside it, `ls`, `status` and the queue TUI show only what's in it, and you
+can point a Claude Code session at it without exposing the rest of the trunk.
+
+```bash
+choros branch checkout          # make it (the picker sets default queues)
+cd checkout
+choros branch bind api appq     # new workspaces here land api into appq
+choros work PROJ-1240 api       # bound to appq automatically
+choros branch sso               # branch-spaces nest
+choros branch archive           # archive this branch-space and all inside
+```
+
+Settings resolve from the nearest space up to the trunk, per setting:
+
+- **Default queue bindings** (`[bind]` in `.choros-branch-config/landing.toml`,
+  `repo = "queue"` or `"none"`), applied when a workspace is created; later
+  changes leave existing workspaces alone.
+- **Instant mode's route** (`[instant] via` in the same file).
+- **Agent templates** (`.choros-branch-config/templates/`).
+
+There is one registry per trunk, and queues stay at the trunk; a queue can be
+limited to a branch-space with `choros queue new NAME REPO --branch PATH`.
+`branch archive` refuses while a workspace inside has uncommitted changes or
+unlanded commits (`--force` overrides); landed sets carry on in their queue.
+Within one space, a workspace and a branch-space can't share a name, and at
+the trunk neither can share a queue's name, since both become branch prefixes
+on origin.
 
 ## Not yet supported
 
@@ -205,8 +251,9 @@ a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing
 
 ```bash
 choros queue new appq app          # a queue for the registry repo `app`
-choros queue bind app appq         # inside a workspace (or press `b` in `choros work`)
+choros repo bind app appq          # inside a workspace (or press `b` in `choros work`)
 choros land continue               # land, keep working here
+choros repo sync                   # catch up when the prompt shows ⇣sync
 choros land archive                # land, then archive the workspace
 choros land continue --fork        # land beside the queue (pick dependencies)
 choros status                      # queues, sets, PRs, parked conflicts

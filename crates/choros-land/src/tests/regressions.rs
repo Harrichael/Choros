@@ -233,13 +233,13 @@ fn the_prompt_flags_a_closed_pr() {
     assert_eq!(crate::status::prompt_token(&ws.join(REPO)), "!resolve");
 }
 
-/// A workspace bound after it already had work shows ⇣sync; `choros sync`
+/// A workspace bound after it already had work shows ⇣sync; `choros repo sync`
 /// clears it even when no rebase turns out to be needed.
 #[test]
 fn a_sync_with_nothing_to_move_still_clears_the_prompt() {
     let w = World::new();
-    choros_core::choros::create(&w.root, "ws", &[REPO.to_string()], &()).unwrap();
-    let ws = w.root.join("ws");
+    choros_core::choros::create(&w.trunk, "ws", &[REPO.to_string()], &()).unwrap();
+    let ws = w.trunk.join("ws");
     w.commit(&ws, "a.txt", "a\n");
     crate::land::bind(&w.env(), &ws, REPO, Some(QUEUE)).unwrap();
     assert_eq!(crate::status::prompt_token(&ws.join(REPO)), "⇣sync");

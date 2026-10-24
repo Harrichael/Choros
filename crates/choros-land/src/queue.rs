@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
-use choros_core::choros::{ARCHIVE_REL, CONFIG_DIR, LANDING_DIR};
+use choros_core::choros::{ARCHIVE_REL, CONFIG_DIR, LANDING_DIR, QUEUES_REL};
 use choros_core::{git as core_git, registry};
 use color_eyre::eyre::{Result, eyre};
 
@@ -11,7 +11,7 @@ use crate::git::Git;
 use crate::state::{self, QueueConfig, QueueState, Scope};
 
 pub struct Queue {
-    pub root: PathBuf,
+    pub trunk: PathBuf,
     pub name: String,
     pub config: QueueConfig,
 }
@@ -21,12 +21,12 @@ pub struct QueueLock(#[allow(dead_code)] File);
 
 const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "merge-head"];
 
-pub fn queues_dir(root: &Path) -> PathBuf {
-    root.join(CONFIG_DIR).join("queues")
+pub fn queues_dir(trunk: &Path) -> PathBuf {
+    trunk.join(QUEUES_REL)
 }
 
-pub fn list(root: &Path) -> Result<Vec<String>> {
-    let dir = queues_dir(root);
+pub fn list(trunk: &Path) -> Result<Vec<String>> {
+    let dir = queues_dir(trunk);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -40,20 +40,20 @@ pub fn list(root: &Path) -> Result<Vec<String>> {
 }
 
 impl Queue {
-    pub fn open(root: &Path, name: &str) -> Result<Queue> {
-        let dir = queues_dir(root).join(name);
+    pub fn open(trunk: &Path, name: &str) -> Result<Queue> {
+        let dir = queues_dir(trunk).join(name);
         if !dir.join("queue.toml").exists() {
-            return Err(eyre!("no queue named {name:?} under {root:?}"));
+            return Err(eyre!("no queue named {name:?} under {trunk:?}"));
         }
         Ok(Queue {
-            root: root.to_path_buf(),
+            trunk: trunk.to_path_buf(),
             name: name.to_string(),
             config: state::read_config(&dir.join("queue.toml"))?,
         })
     }
 
     /// Create a queue for `repo` (a registry name) and its sync clone.
-    pub fn create(root: &Path, name: &str, repo: &str, scope: Scope) -> Result<Queue> {
+    pub fn create(trunk: &Path, name: &str, repo: &str, scope: Scope) -> Result<Queue> {
         if name.is_empty()
             || RESERVED.contains(&name)
             || name.contains(['/', '\\', ' ', '~', '^', ':', '?', '*', '['])
@@ -61,11 +61,16 @@ impl Queue {
         {
             return Err(eyre!("{name:?} cannot be a queue name"));
         }
-        let dir = queues_dir(root).join(name);
+        let dir = queues_dir(trunk).join(name);
         if dir.exists() {
             return Err(eyre!("queue {name:?} already exists"));
         }
-        let reg = registry::ensure_repo_exists(root, repo)?;
+        // `<name>/landing-N` on origin can't coexist with a workspace's
+        // branch `<name>` or a branch-space's `<name>/…`.
+        if trunk.join(name).exists() {
+            return Err(eyre!("{name:?} is already a workspace or branch-space here"));
+        }
+        let reg = registry::ensure_repo_exists(trunk, repo)?;
         let url = core_git::remote_get_url(&reg, "origin")?;
         // A branch named exactly like the queue would make `<queue>/landing-N`
         // impossible to create on origin (a ref cannot also be a directory).
@@ -74,7 +79,7 @@ impl Queue {
             return Err(eyre!("origin already has a branch named {name:?}; pick another queue name"));
         }
 
-        let sync = sync_dir(root, name, repo);
+        let sync = sync_dir(trunk, name, repo);
         if !sync.exists() {
             std::fs::create_dir_all(sync.parent().unwrap())?;
             core_git::clone_with_reference(&reg, &url, &sync)?;
@@ -100,7 +105,7 @@ impl Queue {
         };
         state::write_config(&dir.join("queue.toml"), &config)?;
         let queue = Queue {
-            root: root.to_path_buf(),
+            trunk: trunk.to_path_buf(),
             name: name.to_string(),
             config,
         };
@@ -109,7 +114,7 @@ impl Queue {
     }
 
     pub fn dir(&self) -> PathBuf {
-        queues_dir(&self.root).join(&self.name)
+        queues_dir(&self.trunk).join(&self.name)
     }
 
     fn state_path(&self) -> PathBuf {
@@ -148,7 +153,7 @@ impl Queue {
     }
 
     pub fn sync_dir(&self) -> PathBuf {
-        sync_dir(&self.root, &self.name, &self.config.repo)
+        sync_dir(&self.trunk, &self.name, &self.config.repo)
     }
 
     pub fn git(&self) -> Git {
@@ -160,20 +165,20 @@ impl Queue {
     }
 
     pub fn landing_dir(&self, n: u32) -> PathBuf {
-        self.root.join(LANDING_DIR).join(&self.name).join(format!("landing-{n}"))
+        self.trunk.join(LANDING_DIR).join(&self.name).join(format!("landing-{n}"))
     }
 
     pub fn archived_landing_dir(&self, n: u32) -> PathBuf {
-        self.root
+        self.trunk
             .join(ARCHIVE_REL)
             .join(LANDING_DIR)
             .join(&self.name)
             .join(format!("landing-{n}"))
     }
 
-    /// `gh` runs with the root's own account when it has one.
+    /// `gh` runs with the trunk's own account when it has one.
     pub fn gh_config_dir(&self) -> Option<PathBuf> {
-        let dir = self.root.join(CONFIG_DIR).join("gh");
+        let dir = self.trunk.join(CONFIG_DIR).join("gh");
         dir.exists().then_some(dir)
     }
 
@@ -221,6 +226,39 @@ fn ensure_notes(git: &Git) -> Result<()> {
     Ok(())
 }
 
-pub fn sync_dir(root: &Path, queue: &str, repo: &str) -> PathBuf {
-    root.join(LANDING_DIR).join(queue).join("_sync").join(repo)
+/// A queue scoped to a workspace or branch-space that has since been
+/// archived, with no set left open, goes to the archive too: its config to
+/// `archive/landing/<name>/_queue`, beside its archived landing folders, and
+/// its sync clone with it. Returns whether it went.
+pub fn retire_if_orphaned(trunk: &Path, name: &str) -> Result<bool> {
+    let q = Queue::open(trunk, name)?;
+    let owner = match &q.config.scope {
+        Scope::Trunk => return Ok(false),
+        Scope::Workspace(p) | Scope::Branch(p) => trunk.join(p),
+    };
+    if owner.exists() {
+        return Ok(false);
+    }
+    let Some(_lock) = q.try_lock()? else {
+        return Ok(false);
+    };
+    if q.read_state()?.sets.values().any(|s| s.is_open()) {
+        return Ok(false);
+    }
+    let dst = trunk.join(ARCHIVE_REL).join(LANDING_DIR).join(name);
+    std::fs::create_dir_all(&dst)?;
+    if dst.join("_queue").exists() || dst.join("_sync").exists() {
+        return Err(eyre!("{dst:?} already holds an archived queue named {name}"));
+    }
+    let landing = trunk.join(LANDING_DIR).join(name);
+    if landing.join("_sync").exists() {
+        std::fs::rename(landing.join("_sync"), dst.join("_sync"))?;
+    }
+    std::fs::rename(q.dir(), dst.join("_queue"))?;
+    let _ = std::fs::remove_dir(&landing);
+    Ok(true)
+}
+
+pub fn sync_dir(trunk: &Path, queue: &str, repo: &str) -> PathBuf {
+    trunk.join(LANDING_DIR).join(queue).join("_sync").join(repo)
 }

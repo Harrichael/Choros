@@ -1,11 +1,14 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use choros_core::space;
+use color_eyre::eyre::eyre;
 use color_eyre::Result;
 
 use crate::agent;
 use crate::app::{self, NewFocus};
 use crate::choros::{self, ProgressSink};
-use crate::registry;
+use crate::{git, registry};
 
 const SHELL_INIT: &str = r#"# choros shell integration — works in bash and zsh
 choros() {
@@ -15,63 +18,98 @@ choros() {
       target="$(command choros "$@")" || return $?
       [ -n "$target" ] && cd "$target"
       ;;
+    branch)
+      target="$(command choros "$@")" || return $?
+      case "$2" in
+        archive)
+          [ -n "$target" ] && printf '%s\n' "$target"
+          __choros_leave "$target"
+          ;;
+        bind) ;;
+        *) [ -n "$target" ] && cd "$target" ;;
+      esac
+      ;;
     archive|land)
       target="$(command choros "$@")" || return $?
       [ -n "$target" ] && printf '%s\n' "$target"
-      # Archiving the workspace you stand in moves it out from under the
-      # shell; land on the choros root instead of a path that is gone.
-      [ -d "$PWD" ] || cd "${target%/.choros-config/archive/*}"
+      __choros_leave "$target"
       ;;
     *)
       command choros "$@"
       ;;
   esac
 }
+
+# Archiving the folder you stand in moves it out from under the shell; go to
+# the nearest space above it that still exists instead.
+__choros_leave() {
+  [ -d "$PWD" ] && return
+  [ -n "$1" ] || return
+  local trunk="${1%/.choros-config/archive/*}"
+  local dir="$trunk/$(dirname "${1#*/.choros-config/archive/}")"
+  while [ ! -d "$dir" ] && [ "$dir" != "$trunk" ]; do dir="$(dirname "$dir")"; done
+  cd "$dir"
+}
 "#;
 
 const USAGE: &str = "\
 choros — multi-repo work-environment manager
 
-USAGE:
-    choros work                     fast-create: name + repo multi-select, exits on create
-    choros work NAME                fast-create with name pre-filled
-    choros work NAME REPO [REPO…]   non-interactive create
-                                    (detects Rust / JS toolchains in cloned repos and wires up
-                                    a shared build cache at .choros-config/store/)
-    choros ls                       from the choros root: list active workspaces, most recently
-                                    worked-in first, with created date, changed-file count, repos
-    choros archive [NAME]           archive a workspace (move it under .choros-config/archive/);
-                                    NAME defaults to the workspace containing the current directory
-    choros add <ssh-url>            clone a repo into .choros-config/registry/ (ssh URLs only);
-                                    the registry name is derived from the URL
-    choros agent save settings      open a TUI in the current workspace; diff workspace claude
-                                    settings against the template and promote selected entries
-    choros agent ls                 list resumable claude / cursor sessions recorded under the
-                                    current directory (matches the cwd of `claude --resume`)
-    choros repo ls                  inside a workspace: list the repos cloned into it
-    choros repo add REPO [REPO…]    inside a workspace: clone registry repos into it, on its
-                                    branch, and wire up their build caches
+A trunk is the folder `choros init` ran in. Branch-spaces are folders in it that
+group workspaces (and further branch-spaces); workspaces live in either.
+
+SETUP (once per machine or trunk)
+    choros init                     make this folder a trunk: .choros-config/ with its registry
+                                    and templates, registered for chorosd
+    choros add <ssh-url>            clone a repo into the trunk's registry (ssh URLs only)
+    choros shell-init               shell function for `eval \"$(choros shell-init)\"`, so work,
+                                    branch and archive can move your shell
+
+SPACES (in the trunk or a branch-space; acts where you are)
+    choros work [NAME [REPO…]]      create a workspace here: name + repo picker (b picks a repo's
+                                    queue, defaulting to the branch-space's); with REPOs, no picker
+    choros branch NAME [--no-pick]  create a branch-space here; the picker sets which queue new
+                                    workspaces in it land each repo into
+    choros branch bind REPO QUEUE|none
+                                    in a branch-space: change that default (new workspaces only)
+    choros branch archive [NAME] [--force]
+                                    archive a branch-space and everything in it; refuses while a
+                                    workspace has uncommitted or unlanded work, unless --force
+    choros ls [--all]               workspaces here and below, as a tree, most recent first,
+                                    with what each space has landing; --all: the whole trunk
+    choros archive [NAME]           archive a workspace (to the same path under
+                                    .choros-config/archive/); NAME defaults to the one you're in
+
+INSIDE A WORKSPACE
+    choros repo ls                  the repos cloned into it
+    choros repo add REPO [REPO…]    clone more registry repos in, on its branch
+    choros repo sync                rebase unlanded commits onto the queue's current merge head
+    choros repo bind REPO QUEUE|none
+                                    land REPO into QUEUE (none: straight to main)
     choros land continue|archive    land this repo (or, at the workspace root, every repo) into its
                                     queue, or straight to main when it has none; `archive` then
                                     archives the workspace. --fork [--deps SET,…|none] lands beside
                                     the queue instead of on top; --title/--body-file set the PR text
-    choros sync                     rebase unlanded commits onto the queue's current merge head
-    choros status [--prompt]        landing queues and their sets; --prompt prints one token
+    choros landing open N [--queue Q] [--session ID]
+                                    open the landing's forked Claude Code session
+
+QUEUES (anywhere in a trunk; narrowed to where you are)
+    choros status [--prompt|--all]  landing queues and their sets; --prompt prints one token
                                     (⇣sync / !resolve) for shell prompts
     choros queue [NAME]             TUI: a queue's landing-sets; edit dependencies, drop, sync
-    choros queue new NAME REPO [--workspace WS]
-                                    create a landing queue for a registry repo
-    choros queue bind REPO QUEUE|none
-                                    inside a workspace: land REPO into QUEUE (none: instant mode)
+    choros queue new NAME REPO [--workspace PATH | --branch PATH]
+                                    create a landing queue for a registry repo, optionally only
+                                    for one workspace or branch-space (path below the trunk)
     choros queue sync [NAME]        run the daemon's pass now
     choros queue resolve NAME [--agent trust|review|manual]
                                     retry parked conflicts, asking how to resolve each
     choros queue drop NAME N        remove a queued landing-set
     choros queue doctor NAME        compare the queue's state with origin, then sync
-    choros landing open N [--queue Q] [--session ID]
-                                    open the landing's forked Claude Code session
-    choros init                     create .choros-config/ and .choros-config/registry/ in the current directory
-    choros shell-init               emit shell-integration function for `eval \"$(choros shell-init)\"`
+
+AGENTS
+    choros agent ls                 resumable claude / cursor sessions under the current directory
+    choros agent save settings      TUI: promote this workspace's claude settings to the template
+
     choros -h | --help              show this message
 ";
 
@@ -87,8 +125,8 @@ pub fn run_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let registry_dir = registry::init_dirs(&cwd)?;
     let templates_dir = agent::init_templates(&cwd)?;
-    if let Some(config) = choros_core::roots::config_home() {
-        choros_core::roots::register(&config, &cwd)?;
+    if let Some(config) = choros_core::trunks::config_home() {
+        choros_core::trunks::register(&config, &cwd)?;
     }
     eprintln!("initialized {}", registry_dir.display());
     eprintln!("initialized {}", templates_dir.display());
@@ -136,30 +174,36 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
         std::process::exit(2);
     }
     let cwd = std::env::current_dir()?;
-    let (root, name) = choros::resolve_target(&cwd, None)?;
-    let workspace = root.join(&name);
-    crate::settings_tui::run(workspace, root)
+    let (trunk, name) = choros::resolve_target(&cwd, None)?;
+    let workspace = trunk.join(&name);
+    crate::settings_tui::run(workspace, trunk)
 }
 
 pub fn run_repo(args: Vec<String>) -> Result<()> {
-    let (verb, repos) = match args.split_first() {
-        Some((verb, rest)) if verb == "ls" && rest.is_empty() => (verb, rest),
-        Some((verb, rest)) if verb == "add" && !rest.is_empty() => (verb, rest),
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["ls"] => {}
+        ["add", repos @ ..] if !repos.is_empty() => {}
+        ["sync"] => return crate::land_cli::run_sync(Vec::new()),
+        ["bind", repo, queue] => return crate::land_cli::run_repo_bind_here(repo, queue),
         _ => {
-            eprintln!("usage: choros repo ls | choros repo add REPO [REPO…]");
+            eprintln!(
+                "usage: choros repo ls | repo add REPO [REPO…] | repo sync | repo bind REPO QUEUE|none"
+            );
             std::process::exit(2);
         }
-    };
+    }
     let cwd = std::env::current_dir()?;
-    let (root, name) = choros::resolve_target(&cwd, None)?;
-    if verb == "add" {
-        choros::add_repos(&root, &name, repos, &StderrProgress)?;
+    let (space, name) = choros::resolve_target(&cwd, None)?;
+    if a[0] == "add" {
+        let repos = &args[1..];
+        choros::add_repos(&space, &name, repos, &StderrProgress)?;
         for repo in repos {
             eprintln!("added {repo}");
         }
         return Ok(());
     }
-    let meta = choros::read_meta(&root.join(&name))?;
+    let meta = choros::read_meta(&space.join(&name))?;
     for repo in meta.repos {
         println!("{repo}");
     }
@@ -182,34 +226,49 @@ pub fn run_add(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn run_ls() -> Result<()> {
+pub fn run_ls(args: Vec<String>) -> Result<()> {
+    let all = match args.as_slice() {
+        [] => false,
+        [a] if a == "--all" => true,
+        _ => {
+            eprintln!("usage: choros ls [--all]");
+            std::process::exit(2);
+        }
+    };
     let cwd = std::env::current_dir()?;
-    crate::ls::run(&cwd)
+    crate::ls::run(&cwd, all)
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let name_arg = args.into_iter().next();
-    let (root, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
-    let dst = choros::archive(&root, &name)?;
+    let (trunk, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
+    let dst = choros::archive(&trunk, &name)?;
     println!("{}", dst.display());
     Ok(())
 }
 
-pub fn run_work(args: Vec<String>) -> Result<()> {
+/// The trunk or branch-space a new workspace or branch-space goes in.
+fn space_here() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
+    space::find_space(&cwd)
+        .ok_or_else(|| eyre!("not in a choros trunk (no .choros-config above here); run `choros init` first"))
+}
+
+pub fn run_work(args: Vec<String>) -> Result<()> {
+    let space = space_here()?;
     let mut iter = args.into_iter();
     let name = iter.next();
     let repos: Vec<String> = iter.collect();
     if let (Some(name), false) = (&name, repos.is_empty()) {
-        return run_work_noninteractive(cwd, name.clone(), repos);
+        return run_work_noninteractive(space, name.clone(), repos);
     }
     let focus = if name.is_some() {
         NewFocus::Repos
     } else {
         NewFocus::Name
     };
-    let mut app = app::App::new(cwd, name, focus);
+    let mut app = app::App::new(space, name, focus);
     run_tui(&mut app)?;
     if let Some(path) = app.created_path {
         println!("{}", path.display());
@@ -217,14 +276,144 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn run_work_noninteractive(root: PathBuf, name: String, repos: Vec<String>) -> Result<()> {
-    choros::validate_name(&root, &name)?;
+fn run_work_noninteractive(space: PathBuf, name: String, repos: Vec<String>) -> Result<()> {
+    let trunk = space::find_trunk(&space).ok_or_else(|| eyre!("{space:?} is not under a trunk"))?;
+    choros::validate_name(&space, &name)?;
     for r in &repos {
-        registry::ensure_repo_exists(&root, r)?;
+        registry::ensure_repo_exists(&trunk, r)?;
     }
     let progress = StderrProgress;
-    let info = choros::create(&root, &name, &repos, &progress)?;
+    let info = choros::create(&space, &name, &repos, &progress)?;
+    for repo in &repos {
+        if let Some(Some(queue)) = choros_land::branch::default_binding(&space, repo)? {
+            progress.status(format!("{repo} lands into {queue}; moving it onto the merge head…"));
+            crate::land_cli::bind_new(&info.path, repo, &queue)?;
+        }
+    }
     println!("{}", info.cd_target().display());
+    Ok(())
+}
+
+pub fn run_branch(args: Vec<String>) -> Result<()> {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["bind", repo, queue] => {
+            let here = space_here()?;
+            let queue = (*queue != "none").then_some(*queue);
+            choros_land::branch::set_binding(&here, repo, queue)?;
+            match queue {
+                Some(q) => eprintln!("new workspaces here land {repo} into {q}"),
+                None => eprintln!("new workspaces here land {repo} straight to main"),
+            }
+            Ok(())
+        }
+        ["archive", rest @ ..] => {
+            let (name, force) = match rest {
+                [] => (None, false),
+                ["--force"] => (None, true),
+                [n] => (Some(*n), false),
+                [n, "--force"] | ["--force", n] => (Some(*n), true),
+                _ => usage_branch(),
+            };
+            let here = space_here()?;
+            let dir = match name {
+                Some(n) => here.join(n),
+                None => here,
+            };
+            if !space::is_branch_space(&dir) {
+                return Err(eyre!("{} is not a branch-space", dir.display()));
+            }
+            if !force {
+                let unfinished = unfinished_work(&dir)?;
+                if !unfinished.is_empty() {
+                    return Err(eyre!(
+                        "work that would be shelved unlanded:\n  {}\nland or commit it first, or pass --force",
+                        unfinished.join("\n  ")
+                    ));
+                }
+            }
+            let dst = space::archive_branch(&dir)?;
+            println!("{}", dst.display());
+            Ok(())
+        }
+        [name] | [name, "--no-pick"] => {
+            let parent = space_here()?;
+            let dir = space::create_branch(&parent, name)?;
+            if a.len() == 1 && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                pick_branch_defaults(&dir)?;
+            }
+            eprintln!("created branch-space {}", dir.display());
+            println!("{}", dir.display());
+            Ok(())
+        }
+        _ => usage_branch(),
+    }
+}
+
+fn usage_branch() -> ! {
+    eprintln!("usage: choros branch NAME [--no-pick] | branch bind REPO QUEUE|none | branch archive [NAME] [--force]");
+    std::process::exit(2);
+}
+
+/// Every workspace under `dir` with uncommitted changes or unlanded commits,
+/// one line each.
+fn unfinished_work(dir: &std::path::Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for ws in space::tree(dir)?.all_workspaces() {
+        let label = ws.path.strip_prefix(dir).unwrap_or(&ws.path).display().to_string();
+        let changed: usize = ws
+            .meta
+            .repos
+            .iter()
+            .map(|r| git::changed_count(&ws.path.join(r)).unwrap_or(0))
+            .sum();
+        if changed > 0 {
+            out.push(format!("{label}: {changed} uncommitted change(s)"));
+        }
+        match choros_land::land::unlanded(&ws.path) {
+            Ok(repos) => {
+                for (repo, n) in repos {
+                    out.push(format!("{label}/{repo}: {n} unlanded commit(s)"));
+                }
+            }
+            Err(e) => out.push(format!("{label}: couldn't tell what's unlanded ({e})")),
+        }
+    }
+    Ok(out)
+}
+
+/// Let the new branch-space choose, per repo, the queue its workspaces land
+/// into by default, among the queues that take landings from it.
+fn pick_branch_defaults(dir: &std::path::Path) -> Result<()> {
+    let trunk = space::find_trunk(dir).ok_or_else(|| eyre!("{dir:?} is not under a trunk"))?;
+    let rel = space::rel(&trunk, dir)?;
+    let mut options: Vec<(String, String)> = Vec::new();
+    for name in choros_land::queue::list(&trunk)? {
+        let q = choros_land::queue::Queue::open(&trunk, &name)?;
+        if q.config.scope.admits_space(&rel) {
+            options.push((q.config.repo.clone(), name));
+        }
+    }
+    if options.is_empty() {
+        return Ok(());
+    }
+    let labels: Vec<String> = options.iter().map(|(r, q)| format!("{r} → {q}")).collect();
+    let Some(chosen) = crate::queue_tui::pick(
+        " default queue per repo for new workspaces here (Enter with none: decide later) ",
+        &labels,
+        &[],
+    )?
+    else {
+        return Ok(());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for i in chosen {
+        let (repo, queue) = &options[i];
+        if !seen.insert(repo.clone()) {
+            return Err(eyre!("picked two queues for {repo}; set one with `choros branch bind`"));
+        }
+        choros_land::branch::set_binding(dir, repo, Some(queue))?;
+    }
     Ok(())
 }
 

@@ -9,16 +9,16 @@ use crate::cache::toolchain::Toolchain;
 use crate::choros::ProgressSink;
 
 pub fn install<P: ProgressSink>(
-    root: &Path,
+    trunk: &Path,
     repo_dir: &Path,
     toolchain: Toolchain,
     progress: &P,
 ) -> Result<()> {
-    install_inner(root, repo_dir, toolchain, progress, tool::available)
+    install_inner(trunk, repo_dir, toolchain, progress, tool::available)
 }
 
 fn install_inner<P, F>(
-    root: &Path,
+    trunk: &Path,
     repo_dir: &Path,
     toolchain: Toolchain,
     progress: &P,
@@ -36,8 +36,8 @@ where
         return Ok(());
     }
 
-    std::fs::create_dir_all(js_store(root))?;
-    let store = pnpm_store(root);
+    std::fs::create_dir_all(js_store(trunk))?;
+    let store = pnpm_store(trunk);
     std::fs::create_dir_all(&store)?;
 
     let repo_name = repo_dir
@@ -119,11 +119,11 @@ mod tests {
 
     #[test]
     fn install_skips_when_finder_returns_false() {
-        let root = tempdir();
+        let trunk = tempdir();
         let repo = tempdir();
-        install_inner(root.path(), repo.path(), Toolchain::JsPnpm, &(), |_| false).unwrap();
+        install_inner(trunk.path(), repo.path(), Toolchain::JsPnpm, &(), |_| false).unwrap();
         // No store dirs created when pnpm is "missing".
-        assert!(!root.path().join(".choros-config/store/js").exists());
+        assert!(!trunk.path().join(".choros-config/store/js").exists());
     }
 
     // Real pnpm-install test: only runs when pnpm is on PATH. Stays out of CI
@@ -134,7 +134,7 @@ mod tests {
             eprintln!("skipping: pnpm not on PATH");
             return;
         }
-        let root = tempdir();
+        let trunk = tempdir();
         let repo = tempdir();
         std::fs::write(
             repo.path().join("package.json"),
@@ -144,9 +144,9 @@ mod tests {
         // Empty pnpm lockfile is fine for an empty deps set.
         std::fs::write(repo.path().join("pnpm-lock.yaml"), b"lockfileVersion: '9.0'\n").unwrap();
 
-        install(root.path(), repo.path(), Toolchain::JsPnpm, &()).unwrap();
+        install(trunk.path(), repo.path(), Toolchain::JsPnpm, &()).unwrap();
         assert!(
-            root.path()
+            trunk.path()
                 .join(".choros-config/store/js/pnpm-store")
                 .exists(),
             "expected pnpm store dir created"

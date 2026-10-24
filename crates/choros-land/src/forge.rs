@@ -48,7 +48,7 @@ pub trait Forge {
 }
 
 pub struct Gh {
-    /// `<root>/.choros-config/gh` when the root has its own account.
+    /// `<trunk>/.choros-config/gh` when the trunk has its own account.
     pub config_dir: Option<PathBuf>,
 }
 

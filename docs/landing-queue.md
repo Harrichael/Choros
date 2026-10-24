@@ -26,20 +26,23 @@ to main straight away.
 | Dependency | Within a queue: A's commits sit on top of B's (B is part of A's base). Across queues (always different repos): ordering only — A's PR does not open until B merges. |
 | Front | Every queued, unparked landing-set whose dependencies have all merged. Several at once is normal. |
 | Merge head | `main` merged with every queued, unparked landing-set: what new work starts from. Branch `<queue>/merge-head`. |
-| Landing | The folder `<root>/landing/<queue>/landing-N/`: a small choros workspace on the landing branch, with a fork of the Claude session(s) that did the work. |
-| Sync clone | `<root>/landing/<queue>/_sync/<repo>/`: a clone owned by Choros where every engine-side rebase, merge-head build and agent run happens. User workspaces are never rewritten by the daemon. |
+| Landing | The folder `<trunk>/landing/<queue>/landing-N/`: a small choros workspace on the landing branch, with a fork of the Claude session(s) that did the work. |
+| Sync clone | `<trunk>/landing/<queue>/_sync/<repo>/`: a clone owned by Choros where every engine-side rebase, merge-head build and agent run happens. User workspaces are never rewritten by the daemon. |
 | Resync agent | A headless Claude Code session per queue, run in the sync clone, that resolves conflicts when you ask it to. |
 
 ## Configuration and scope
 
-A queue is defined either at the **choros root** (any workspace under the root
-may join it) or for **one workspace** (only that workspace may join it). A
-workspace-scoped queue replaces the root queue for the same repo in that
-workspace; a workspace never has two queues for one repo. All definitions live
-in one place so the daemon has one thing to scan:
+A queue is defined at the **trunk** and scoped to the whole trunk (any
+workspace may join it), to **one branch-space** (workspaces in it and below
+it), or to **one workspace**. A workspace binds each repo to at most one queue.
+All definitions live in one place, at the trunk, so the daemon has one thing to
+scan and branch-spaces can come and go without moving queue state. A queue
+scoped to a workspace or branch-space is archived by the daemon once that
+folder has been archived and no set is open (to
+`<trunk>/.choros-config/archive/landing/<queue>/_queue`).
 
 ```
-<root>/.choros-config/queues/<queue>/
+<trunk>/.choros-config/queues/<queue>/
     queue.toml      # settings (hand-editable)
     state.json      # graph + bookkeeping (engine-owned; written via temp file + rename)
     lock            # flock target
@@ -49,7 +52,7 @@ in one place so the daemon has one thing to scan:
 
 ```toml
 repo = "Ordo"                       # registry name; one repo per queue
-scope = "root"                      # or { workspace = "quick_updates" }
+scope = "trunk"                     # or { branch = "epic-x" } or { workspace = "epic-x/login" } (paths below the trunk; "root" is read as "trunk")
 [push]
 merge_head = true                   # force-push <queue>/merge-head; false keeps it in the sync clone only
 private_sets = true                 # push queued (not yet front) landing branches
@@ -85,7 +88,7 @@ head** (fetched from the sync clone when the merge head is not pushed), and
 taken as `merge-base HEAD origin/main` the first time.
 
 Instant mode settings: workspace meta, falling back to
-`<root>/.choros-config/instant.toml`:
+`<trunk>/.choros-config/instant.toml`:
 
 ```toml
 [instant]
@@ -112,7 +115,7 @@ commits.
 ### Normal land (lands on the merge head)
 
 1. **Sync the workspace first**, in place: if the queue's merge head has moved
-   past `base`, rebase `landed_through..HEAD` onto it (this is `choros sync`).
+   past `base`, rebase `landed_through..HEAD` onto it (this is `choros repo sync`).
    Conflicts stop the land with a message naming the files; the calling
    session (the one that wrote the code) resolves them and runs `land` again.
    This is where land-time conflicts belong.
@@ -152,7 +155,7 @@ a fork never loses commits it builds on.
   else queued), open its PR now.
 - `archive`: archive the workspace once every repo in scope has landed; refuse
   if another repo in the workspace still has unlanded commits outside the
-  scope. The shell function `cd`s to the root, as for `choros archive`.
+  scope. The shell function `cd`s to the nearest space still there, as for `choros archive`.
   `continue`: keep the workspace and its session for the next change.
 
 **PR text.** The land-the-plane skill passes `--title` and `--body-file` with
@@ -188,7 +191,8 @@ its `base` had.
 ## The daemon
 
 `chorosd` is a launchd agent (installed by dev-setup, like Ordo). It finds
-roots in `~/.config/choros/roots.toml` (written by `choros init`). Every 2
+trunks in `~/.config/choros/trunks.toml` (written by `choros init`; the older
+`roots.toml` is still read). Every 2
 minutes, or when `choros queue sync` pokes it (with no daemon running,
 `choros queue sync` runs the same pass in-process), for each queue it
 **try-locks** (skips a queue whose lock is held) and runs one
@@ -238,7 +242,7 @@ steps, never while waiting on a person.
 failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
-`gh` runs with the root's account (`GH_CONFIG_DIR=<root>/.choros-config/gh`
+`gh` runs with the trunk's account (`GH_CONFIG_DIR=<trunk>/.choros-config/gh`
 when present). The daemon never runs Claude.
 
 Branch cleanup: GitHub deletes merged PR branches itself when the repo setting
@@ -281,7 +285,7 @@ conflict markers (`git diff --check`). A resolution that fails them stays
 parked.
 
 **The resync agent** runs only from `choros queue resolve`, in your terminal,
-in `<root>/landing/<queue>/_sync/<repo>/`:
+in `<trunk>/landing/<queue>/_sync/<repo>/`:
 
 ```
 claude -p --resume <id> --permission-mode acceptEdits \
@@ -300,12 +304,12 @@ test gate (a configurable check command is a later addition).
 
 ## Landings and sessions
 
-`<root>/landing/<queue>/landing-N/` is a choros workspace: a
+`<trunk>/landing/<queue>/landing-N/` is a choros workspace: a
 `.choros-meta.toml` with `parent = "<source workspace>"` and
 `landing = { queue, n }`, a reference clone of the repo on `<queue>/landing-N`,
 the usual agent provisioning, and a `CLAUDE.md` saying the branch may be
 updated by Choros (pull before working; push review fixes as new commits).
-Choros commands find the root by walking up to `.choros-config`, so they work
+Choros commands find the trunk by walking up to `.choros-config`, so they work
 inside a landing. `landing` is a reserved workspace name.
 
 **Session fork, at land time.** Claude Code (verified on 2.1.307) forks a
@@ -336,9 +340,10 @@ reviews.
 
 ## Status
 
-`choros status`: outside a workspace, every queue in the root (every
-registered root when not in one); inside a workspace, the queues it is bound
-to. Per queue: each set's state (queued / front with PR link / merged / parked
+`choros status`: inside a workspace, the queues it is bound to; in a
+branch-space, the queues scoped to it or below and those its workspaces are
+bound to; at the trunk (or with `--all`), every queue there; outside any
+trunk, every queue of every registered trunk. Per queue: each set's state (queued / front with PR link / merged / parked
 and why), deps, flagged conflicting forks, dirty landing folders, and
 workspaces that need a sync.
 
@@ -346,7 +351,7 @@ workspaces that need a sync.
 nothing) from local files only — no git, no network, no lock — for the bash
 prompt and Gnomon.
 
-`choros sync` (in a workspace or repo): rebase unlanded commits onto the
+`choros repo sync` (in a workspace or repo): rebase unlanded commits onto the
 current merge head, in place, and update `base`. Explicit only.
 
 ## The queue TUI and recovery
@@ -454,7 +459,7 @@ Where the build departs from the plan above, and why:
   recovery would otherwise wipe a half-done resolution); not yet.
 - **`choros archive` and `choros repo add` still assume top-level
   workspaces**; inside a landing folder use the landing commands.
-  `find_workspace` (core) is what the engine uses to find the root from
+  `find_workspace` (core) is what the engine uses to find the trunk from
   anywhere, landings included.
 
 ## Decision log (the user's words, from the design grill)

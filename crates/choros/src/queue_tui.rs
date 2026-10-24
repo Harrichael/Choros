@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use choros_land::admin;
 use choros_land::engine::Env;
-use choros_land::queue::{self, Queue};
+use choros_land::queue::Queue;
 use choros_land::state::{Dep, LandingSet, QueueState, SetStatus};
 use color_eyre::eyre::{Result, eyre};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -120,10 +120,11 @@ enum Action {
     Quit,
 }
 
-pub fn run(root: &Path, name: Option<&str>, env: &Env) -> Result<()> {
+/// With no `name`, picks among `offered` (the queues in view from here).
+pub fn run(trunk: &Path, name: Option<&str>, offered: &[String], env: &Env) -> Result<()> {
     let name = match name {
         Some(n) => n.to_string(),
-        None => match queue::list(root)?.as_slice() {
+        None => match offered {
             [] => return Err(eyre!("no queues yet; create one with `choros queue new NAME REPO`")),
             [only] => only.clone(),
             many => {
@@ -135,7 +136,7 @@ pub fn run(root: &Path, name: Option<&str>, env: &Env) -> Result<()> {
             }
         },
     };
-    let q = Queue::open(root, &name)?;
+    let q = Queue::open(trunk, &name)?;
     let mut message = String::new();
     loop {
         let st = q.read_state()?;

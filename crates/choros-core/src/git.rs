@@ -67,6 +67,23 @@ pub fn changed_count(repo: &Path) -> Result<usize> {
     Ok(out.lines().count())
 }
 
+/// A branch on origin, as this clone last fetched it, that sits at either end
+/// of `branch`'s path: `a` for `a/b`, or `a/b/c`.
+pub fn remote_branch_clash(repo: &Path, branch: &str) -> Result<Option<String>> {
+    let out = run(Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["for-each-ref", "--format=%(refname:lstrip=3)", "refs/remotes/origin/"]))?;
+    Ok(out
+        .lines()
+        .find(|r| {
+            *r != "HEAD"
+                && (branch.strip_prefix(*r).is_some_and(|rest| rest.starts_with('/'))
+                    || r.strip_prefix(branch).is_some_and(|rest| rest.starts_with('/')))
+        })
+        .map(str::to_string))
+}
+
 pub fn checkout_new_branch(repo: &Path, branch: &str) -> Result<()> {
     run(Command::new("git")
         .arg("-C")

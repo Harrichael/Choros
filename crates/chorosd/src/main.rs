@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use choros_core::roots;
+use choros_core::trunks;
 use choros_land::agent::Claude;
 use choros_land::engine::{Env, PassReport, Work};
 use choros_land::forge::Gh;
@@ -32,27 +32,32 @@ fn main() -> Result<()> {
 }
 
 fn tick() -> Result<()> {
-    let Some(config) = roots::config_home() else {
+    let Some(config) = trunks::config_home() else {
         log("neither XDG_CONFIG_HOME nor HOME is set; nothing to watch");
         return Ok(());
     };
-    for root in roots::list(&config)? {
-        if !root.exists() {
+    for trunk in trunks::list(&config)? {
+        if !trunk.exists() {
             continue;
         }
-        for name in queue::list(&root)? {
+        for name in queue::list(&trunk)? {
             // One queue failing (a network blip, a bad state file) must not
             // stop the others.
-            if let Err(e) = pass(&root, &name) {
-                log(&format!("{name} @ {}: {e:#}", root.display()));
+            if let Err(e) = pass(&trunk, &name) {
+                log(&format!("{name} @ {}: {e:#}", trunk.display()));
+            }
+            match queue::retire_if_orphaned(&trunk, &name) {
+                Ok(true) => log(&format!("{name}: its workspace or branch-space is archived and nothing is open; archived it too")),
+                Ok(false) => {}
+                Err(e) => log(&format!("{name} @ {}: couldn't archive: {e:#}", trunk.display())),
             }
         }
     }
     Ok(())
 }
 
-fn pass(root: &Path, name: &str) -> Result<()> {
-    let q = Queue::open(root, name)?;
+fn pass(trunk: &Path, name: &str) -> Result<()> {
+    let q = Queue::open(trunk, name)?;
     let gh = Gh {
         config_dir: q.gh_config_dir(),
     };

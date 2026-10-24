@@ -16,7 +16,7 @@ use crate::choros::ProgressSink;
 /// Best-effort: missing tools (sccache, pnpm) skip with a warning. Hard
 /// failures (e.g. pnpm install errors) propagate and abort workspace creation.
 pub fn setup_workspace_caches<P: ProgressSink>(
-    root: &Path,
+    trunk: &Path,
     workspace: &Path,
     repos: &[String],
     progress: &P,
@@ -39,7 +39,7 @@ pub fn setup_workspace_caches<P: ProgressSink>(
         for tc in tcs {
             if tc.is_js() {
                 let repo_dir = workspace.join(repo);
-                js::install(root, &repo_dir, *tc, progress)?;
+                js::install(trunk, &repo_dir, *tc, progress)?;
             }
         }
     }

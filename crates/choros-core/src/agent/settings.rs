@@ -33,8 +33,8 @@ impl DiffSource {
 
 pub const CLAUDE_LOCAL_REL: &str = ".claude/settings.local.json";
 
-pub fn claude_template_path(root: &Path) -> PathBuf {
-    templates_dir(root).join(CLAUDE_SETTINGS_REL)
+pub fn claude_template_path(trunk: &Path) -> PathBuf {
+    templates_dir(trunk).join(CLAUDE_SETTINGS_REL)
 }
 
 pub fn claude_workspace_settings_path(workspace: &Path) -> PathBuf {
@@ -57,8 +57,8 @@ fn read_json_or_empty(path: &Path) -> Result<Value> {
     serde_json::from_str(&body).wrap_err_with(|| format!("parsing {path:?} as JSON"))
 }
 
-pub fn load_template(root: &Path) -> Result<Value> {
-    read_json_or_empty(&claude_template_path(root))
+pub fn load_template(trunk: &Path) -> Result<Value> {
+    read_json_or_empty(&claude_template_path(trunk))
 }
 
 pub fn load_workspace(workspace: &Path, source: DiffSource) -> Result<Value> {
@@ -74,8 +74,8 @@ pub fn load_workspace(workspace: &Path, source: DiffSource) -> Result<Value> {
     }
 }
 
-pub fn save_template(root: &Path, value: &Value) -> Result<()> {
-    let path = claude_template_path(root);
+pub fn save_template(trunk: &Path, value: &Value) -> Result<()> {
+    let path = claude_template_path(trunk);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -133,10 +133,10 @@ mod tests {
     #[test]
     fn save_template_round_trip() {
         let tmp = tempdir();
-        let root = tmp.path();
+        let trunk = tmp.path();
         let v = serde_json::json!({"permissions":{"allow":["X"]}});
-        save_template(root, &v).unwrap();
-        let back = load_template(root).unwrap();
+        save_template(trunk, &v).unwrap();
+        let back = load_template(trunk).unwrap();
         assert_eq!(back, v);
     }
 
@@ -145,12 +145,12 @@ mod tests {
         use crate::json_diff::{apply_additions, diff_additions};
 
         let tmp = tempdir();
-        let root = tmp.path();
-        let workspace = root.join("PROJ-1");
+        let trunk = tmp.path();
+        let workspace = trunk.join("PROJ-1");
 
         // Template baseline.
         save_template(
-            root,
+            trunk,
             &serde_json::json!({"permissions":{"allow":["Bash(ls:*)"]}}),
         )
         .unwrap();
@@ -169,7 +169,7 @@ mod tests {
         .unwrap();
 
         // Diff against Both.
-        let template = load_template(root).unwrap();
+        let template = load_template(trunk).unwrap();
         let merged = load_workspace(&workspace, DiffSource::Both).unwrap();
         let adds = diff_additions(&template, &merged);
         assert!(adds.len() >= 3, "expected new entries, got: {adds:?}");
@@ -177,10 +177,10 @@ mod tests {
         // Promote all.
         let mut t_mut = template.clone();
         apply_additions(&mut t_mut, &adds);
-        save_template(root, &t_mut).unwrap();
+        save_template(trunk, &t_mut).unwrap();
 
         // After promote, the diff is empty.
-        let template2 = load_template(root).unwrap();
+        let template2 = load_template(trunk).unwrap();
         let merged2 = load_workspace(&workspace, DiffSource::Both).unwrap();
         let adds2 = diff_additions(&template2, &merged2);
         assert!(adds2.is_empty(), "expected empty diff after promote, got: {adds2:?}");

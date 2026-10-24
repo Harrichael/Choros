@@ -27,7 +27,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("@ {}", app.root.display()),
+            format!("@ {}", app.space.display()),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(" — new", Style::default().fg(Color::DarkGray)),

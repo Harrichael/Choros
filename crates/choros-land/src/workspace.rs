@@ -19,7 +19,7 @@ pub struct WorkspaceLanding {
     /// Set when this workspace is itself a landing folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<LandingOf>,
-    /// Instant mode's route to main for this workspace, overriding the root's.
+    /// Instant mode's route to main for this workspace, overriding the trunk's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instant: Option<crate::instant::Via>,
 }
