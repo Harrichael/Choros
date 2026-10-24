@@ -27,8 +27,13 @@ pub fn find_trunk(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// The space `cwd` is in: the nearest trunk or branch-space at or above it.
-/// From inside a workspace, that is the space holding the workspace.
+/// From inside a workspace, that is the space holding the workspace. Inside
+/// `.choros-config` (an archived branch-space, say) there is none: nothing
+/// may be made there.
 pub fn find_space(cwd: &Path) -> Option<PathBuf> {
+    if cwd.components().any(|c| c.as_os_str() == CONFIG_DIR) {
+        return None;
+    }
     cwd.ancestors()
         .find(|d| is_trunk(d) || is_branch_space(d))
         .map(Path::to_path_buf)
@@ -175,9 +180,10 @@ fn merge_move(src: &Path, dst: &Path) -> Result<()> {
     }
     for entry in std::fs::read_dir(src)?.flatten() {
         let to = dst.join(entry.file_name());
+        // A branch-space archived before under the same path: the settings
+        // it had last are the ones worth keeping.
         if entry.file_name() == BRANCH_CONFIG_DIR && to.exists() {
-            std::fs::remove_dir_all(entry.path())?;
-            continue;
+            std::fs::remove_dir_all(&to)?;
         }
         merge_move(&entry.path(), &to)?;
     }
@@ -276,5 +282,25 @@ mod tests {
         workspace(&epic, "other");
         assert!(archive_branch(&epic).is_err());
         assert!(epic.join("other").exists());
+    }
+
+    /// A branch-space made again under an archived one's name and archived
+    /// again keeps its newer settings; and inside the archive nothing counts
+    /// as a space, so nothing can be made there.
+    #[test]
+    fn re_archiving_keeps_the_newer_settings_and_the_archive_is_no_space() {
+        let tmp = trunk();
+        let t = tmp.path();
+        let epic = create_branch(t, "epic-x").unwrap();
+        std::fs::write(epic.join(BRANCH_CONFIG_DIR).join("landing.toml"), "old").unwrap();
+        let dst = archive_branch(&epic).unwrap();
+
+        let epic = create_branch(t, "epic-x").unwrap();
+        std::fs::write(epic.join(BRANCH_CONFIG_DIR).join("landing.toml"), "new").unwrap();
+        archive_branch(&epic).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join(BRANCH_CONFIG_DIR).join("landing.toml")).unwrap(), "new");
+
+        assert_eq!(find_space(&dst), None);
+        assert_eq!(find_trunk(&dst), Some(t.to_path_buf()));
     }
 }

@@ -99,7 +99,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
                 if left.len() == 1 { "has" } else { "have" }
             ));
         }
-        Some(core::archive(&trunk, &meta.name)?)
+        Some(core::archive_at(&ws)?)
     } else {
         None
     };

@@ -33,14 +33,45 @@ fn a_branch_space_queue_lives_and_retires_with_its_space() {
     let epicq = Queue::open(&w.trunk, "epicq").unwrap();
     let pr = epicq.read_state().unwrap().sets[&1].pr.as_ref().unwrap().number;
 
+    let retire = |q: &Queue| {
+        let work = crate::engine::Work::begin(q, &w.agent, None, true).unwrap().unwrap();
+        crate::queue::retire_if_orphaned(q, &work.st).unwrap()
+    };
     space::archive_branch(&epic).unwrap();
-    assert!(!crate::queue::retire_if_orphaned(&w.trunk, "epicq").unwrap(), "a set is still open");
+    assert!(!retire(&epicq), "a set is still open");
 
     w.forge.merge(pr, MergeMethod::Merge);
     crate::admin::sync(&w.env(), &epicq, None).unwrap();
     assert_eq!(epicq.read_state().unwrap().sets[&1].status, SetStatus::Merged);
-    assert!(crate::queue::retire_if_orphaned(&w.trunk, "epicq").unwrap());
+    assert!(retire(&epicq));
     assert_eq!(crate::queue::list(&w.trunk).unwrap(), [QUEUE]);
     assert!(w.trunk.join(".choros-config/archive/landing/epicq/_queue/queue.toml").exists());
-    assert!(!crate::queue::retire_if_orphaned(&w.trunk, QUEUE).unwrap(), "trunk queues stay");
+    assert!(!retire(&w.queue()), "trunk queues stay");
+}
+
+/// `land archive` retires the workspace it ran in, not a same-named one in
+/// another space.
+#[test]
+fn land_archive_retires_the_workspace_it_ran_in() {
+    let w = World::new();
+    let at_trunk = w.workspace("login");
+    let epic = space::create_branch(&w.trunk, "epic-x").unwrap();
+    let in_epic = choros_core::choros::create(&epic, "login", &[REPO.to_string()], &()).unwrap().path;
+    crate::land::bind(&w.env(), &in_epic, REPO, Some(QUEUE)).unwrap();
+    w.commit(&in_epic, "a.txt", "a\n");
+
+    let req = LandRequest {
+        cwd: in_epic.join(REPO),
+        mode: LandMode::Archive,
+        fork: None,
+        on_conflict: None,
+        title: None,
+        body: None,
+        sessions: vec![],
+        env_session: None,
+    };
+    let out = crate::land::land(&w.env(), &req, None).unwrap();
+    assert_eq!(out.archived_to, Some(w.trunk.join(".choros-config/archive/epic-x/login")));
+    assert!(!in_epic.exists());
+    assert!(at_trunk.exists());
 }

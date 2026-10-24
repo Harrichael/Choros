@@ -242,8 +242,8 @@ pub fn run_ls(args: Vec<String>) -> Result<()> {
 pub fn run_archive(args: Vec<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let name_arg = args.into_iter().next();
-    let (trunk, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
-    let dst = choros::archive(&trunk, &name)?;
+    let (space, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
+    let dst = choros::archive(&space, &name)?;
     println!("{}", dst.display());
     Ok(())
 }

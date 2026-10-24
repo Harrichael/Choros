@@ -46,11 +46,7 @@ fn tick() -> Result<()> {
             if let Err(e) = pass(&trunk, &name) {
                 log(&format!("{name} @ {}: {e:#}", trunk.display()));
             }
-            match queue::retire_if_orphaned(&trunk, &name) {
-                Ok(true) => log(&format!("{name}: its workspace or branch-space is archived and nothing is open; archived it too")),
-                Ok(false) => {}
-                Err(e) => log(&format!("{name} @ {}: couldn't archive: {e:#}", trunk.display())),
-            }
+
         }
     }
     Ok(())
@@ -75,6 +71,9 @@ fn pass(trunk: &Path, name: &str) -> Result<()> {
     let report = work.pass(env.forge);
     work.save()?;
     describe(name, &report?);
+    if queue::retire_if_orphaned(&q, &work.st)? {
+        log(&format!("{name}: its workspace or branch-space is archived and nothing is open; archived it too"));
+    }
     Ok(())
 }
 

@@ -261,10 +261,12 @@ fn rival_encodings(base: &Path, encoded_base: &str) -> Vec<String> {
         return Vec::new();
     };
     let live = fs::read_dir(parent).into_iter().flatten().flatten();
-    let archived = fs::read_dir(parent.join(choros::ARCHIVE_REL))
-        .into_iter()
-        .flatten()
-        .flatten();
+    // A branch-space's archived workspaces sit at its own path under the
+    // trunk's archive, not beside it.
+    let archive = crate::space::find_trunk(parent)
+        .and_then(|t| crate::space::archive_path(&t, parent).ok())
+        .unwrap_or_else(|| parent.join(choros::ARCHIVE_REL));
+    let archived = fs::read_dir(archive).into_iter().flatten().flatten();
     live.chain(archived)
         .filter(|e| e.path().is_dir())
         .map(|e| parent.join(e.file_name()))

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use choros_land::admin;
 use choros_land::engine::Env;
+use choros_core::space;
 use choros_land::queue::Queue;
 use choros_land::state::{Dep, LandingSet, QueueState, SetStatus};
 use color_eyre::eyre::{Result, eyre};
@@ -33,12 +34,7 @@ pub fn describe(q: &Queue, s: &LandingSet) -> String {
             Dep::Cross { queue, n } => format!("{queue}/{n}"),
         })
         .collect();
-    let from = s
-        .source
-        .workspace
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("?");
+    let from = space::rel(&q.trunk, &s.source.workspace).unwrap_or_else(|_| "?".into());
     let title = s.title.clone().unwrap_or_default();
     format!(
         "{:<18} {:<14} after [{}]  from {from}  {title}",

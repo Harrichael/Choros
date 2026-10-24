@@ -298,10 +298,17 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
                 ["--branch", b] => Scope::Branch(b.trim_end_matches('/').to_string()),
                 _ => usage("choros queue new NAME REPO [--workspace PATH | --branch PATH]"),
             };
-            if let Scope::Workspace(p) | Scope::Branch(p) = &scope
-                && !trunk.join(p).is_dir()
-            {
-                return Err(eyre!("no {p:?} under {}; give its path below the trunk", trunk.display()));
+            let below = |p: &str| {
+                Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+            };
+            match &scope {
+                Scope::Workspace(p) if !below(p) || !trunk.join(p).join(choros::META_FILE).exists() => {
+                    return Err(eyre!("no workspace {p:?} in {}; give its path below the trunk", trunk.display()));
+                }
+                Scope::Branch(p) if !below(p) || !space::is_branch_space(&trunk.join(p)) => {
+                    return Err(eyre!("no branch-space {p:?} in {}; give its path below the trunk", trunk.display()));
+                }
+                _ => {}
             }
             let q = Queue::create(&trunk, name, repo, scope)?;
             warn_push_workflows(&q);

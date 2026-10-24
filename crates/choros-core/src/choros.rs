@@ -381,6 +381,14 @@ pub fn find_workspace(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((trunk, dir.to_path_buf()))
 }
 
+/// Archive the workspace at `ws`, wherever it sits.
+pub fn archive_at(ws: &Path) -> Result<PathBuf> {
+    let (Some(space), Some(name)) = (ws.parent(), ws.file_name().and_then(|n| n.to_str())) else {
+        return Err(eyre!("{ws:?} is not a workspace folder"));
+    };
+    archive(space, name)
+}
+
 /// Move workspace `name` out of `space` to the same path under
 /// `<trunk>/.choros-config/archive/`. Returns the destination path.
 pub fn archive(space: &Path, name: &str) -> Result<PathBuf> {

@@ -8,7 +8,7 @@ use choros_core::{git as core_git, registry};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::git::Git;
-use crate::state::{self, QueueConfig, QueueState, Scope};
+use crate::state::{self, QueueConfig, QueueState, Scope, SetStatus};
 
 pub struct Queue {
     pub trunk: PathBuf,
@@ -229,9 +229,10 @@ fn ensure_notes(git: &Git) -> Result<()> {
 /// A queue scoped to a workspace or branch-space that has since been
 /// archived, with no set left open, goes to the archive too: its config to
 /// `archive/landing/<name>/_queue`, beside its archived landing folders, and
-/// its sync clone with it. Returns whether it went.
-pub fn retire_if_orphaned(trunk: &Path, name: &str) -> Result<bool> {
-    let q = Queue::open(trunk, name)?;
+/// its sync clone with it. Returns whether it went. The caller holds the
+/// queue's lock and passes the state it read under it.
+pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
+    let (trunk, name) = (&q.trunk, &q.name);
     let owner = match &q.config.scope {
         Scope::Trunk => return Ok(false),
         Scope::Workspace(p) | Scope::Branch(p) => trunk.join(p),
@@ -239,10 +240,12 @@ pub fn retire_if_orphaned(trunk: &Path, name: &str) -> Result<bool> {
     if owner.exists() {
         return Ok(false);
     }
-    let Some(_lock) = q.try_lock()? else {
-        return Ok(false);
-    };
-    if q.read_state()?.sets.values().any(|s| s.is_open()) {
+    // A closed PR still waits on someone to reopen or drop it.
+    if st
+        .sets
+        .values()
+        .any(|s| !matches!(s.status, SetStatus::Merged | SetStatus::Dropped))
+    {
         return Ok(false);
     }
     let dst = trunk.join(ARCHIVE_REL).join(LANDING_DIR).join(name);
