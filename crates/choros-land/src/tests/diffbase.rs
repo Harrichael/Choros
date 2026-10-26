@@ -188,8 +188,8 @@ fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
     );
 }
 
-/// Adding and removing a PR edits only the `diffbase` line of queue.toml,
-/// and adding refuses what can't be built on.
+/// Adding and removing PRs edits only the `diffbase` line of queue.toml, and
+/// adding refuses what can't be built on. Several go at once, all or none.
 #[test]
 fn the_diffbase_is_edited_in_place_and_checked() {
     let w = World::new();
@@ -216,6 +216,17 @@ fn the_diffbase_is_edited_in_place_and_checked() {
     diffbase::remove(&w.env(), &w.queue(), &format!("{REPO}#{pr}")).unwrap();
     assert!(w.queue().config.diffbase.is_empty());
     assert!(diffbase_of(&w.state(), REPO).is_none());
+
+    let (p2, p3) = (w.outside_pr("p2", "p2.txt", "2\n"), w.outside_pr("p3", "p3.txt", "3\n"));
+    assert!(
+        diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{p2},{p3} ghost#1")).is_err(),
+        "one bad, none added"
+    );
+    assert!(w.queue().config.diffbase.is_empty());
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{p2},{p3}")).unwrap();
+    assert_eq!(w.queue().config.diffbase, [format!("{REPO}#{p2}"), format!("{REPO}#{p3}")]);
+    diffbase::remove(&w.env(), &w.queue(), &format!("{REPO}#{p2},{p3}")).unwrap();
+    assert!(w.queue().config.diffbase.is_empty());
 
     w.forge.merge(pr, MergeMethod::Merge);
     let merged = diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{pr}")).unwrap_err();

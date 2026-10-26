@@ -10,7 +10,7 @@ use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, P
 use choros_land::forge::Gh;
 use choros_land::land::{self, LandRequest};
 use choros_land::queue::{self, Queue};
-use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope};
+use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -321,9 +321,9 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             print_queues(&trunk, &names)
         }
         ["bind", repo, queue] => run_repo_bind(&env, repo, queue),
-        ["base", "add", name, pr] => {
+        ["base", "add", name, prs @ ..] if !prs.is_empty() => {
             let q = Queue::open(&trunk, name)?;
-            let report = diffbase::add(&env, &q, pr)?;
+            let report = diffbase::add(&env, &q, &prs.join(" "))?;
             print_report(name, &report);
             let status = status::queue_status(&trunk, name)?;
             print_diffbase(&status);
@@ -344,8 +344,8 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        ["base", "rm", name, pr] => {
-            let report = diffbase::remove(&env, &Queue::open(&trunk, name)?, pr)?;
+        ["base", "rm", name, prs @ ..] if !prs.is_empty() => {
+            let report = diffbase::remove(&env, &Queue::open(&trunk, name)?, &prs.join(" "))?;
             print_report(name, &report);
             print_diffbase(&status::queue_status(&trunk, name)?);
             Ok(())
@@ -402,7 +402,7 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
         _ => usage(
             "choros queue [NAME] | queue ls [--all] \
              | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
-             | queue base NAME | queue base add|rm NAME REPO#N",
+             | queue base NAME | queue base add|rm NAME REPO#N[,N…]…",
         ),
     }
 }
@@ -478,11 +478,9 @@ fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
         Some(&config.agent.rotate_after.to_string()),
         |a| a.parse().map_err(|_| eyre!("answer a number")),
     )?;
-    let prs = question("PRs to build on until they merge, as repo#N", Some("none"), |a| {
-        a.split([' ', ','])
-            .filter(|s| !s.is_empty() && *s != "none")
-            .map(|s| PrSpec::parse(s, None).map(|p| p.to_string()))
-            .collect::<Result<Vec<_>>>()
+    let prs = question("PRs to build on until they merge, as repo#N (app#40,41 for two)", Some("none"), |a| {
+        let a = if a == "none" { "" } else { a };
+        Ok(parse_pr_list(a, None)?.iter().map(PrSpec::to_string).collect::<Vec<_>>())
     })?;
 
     let q = Queue::create(trunk, &name, config)?;

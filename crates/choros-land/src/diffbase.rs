@@ -19,7 +19,7 @@ use crate::admin;
 use crate::engine::{Env, PassReport, Work};
 use crate::forge::{Forge, PrState};
 use crate::queue::Queue;
-use crate::state::{BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, SeenPr};
+use crate::state::{BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, SeenPr, parse_pr_list};
 
 impl Work<'_, '_> {
     /// Look up each listed PR on GitHub, fetching the heads of open ones. A
@@ -239,38 +239,45 @@ impl Work<'_, '_> {
     }
 }
 
-/// Add `pr` to the queue's diffbase, editing its queue.toml in place, and
-/// settle the queue on it. It must be open: a merged PR is already in main.
-pub fn add(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
-    let spec = PrSpec::parse(pr, q.config.repo.as_deref())?;
-    if q.config.diffbase()?.contains(&spec) {
-        return Err(eyre!("{spec} is already in {}'s diffbase", q.name));
+/// Add `prs` (one or a list, as [`parse_pr_list`] reads it) to the queue's
+/// diffbase, editing its queue.toml in place, and settle the queue on them.
+/// Each must be open, since a merged PR is already in main; if one isn't,
+/// none is added.
+pub fn add(env: &Env, q: &Queue, prs: &str) -> Result<PassReport> {
+    let specs = parse_pr_list(prs, q.config.repo.as_deref())?;
+    if specs.is_empty() {
+        return Err(eyre!("no PR given; write repo#N"));
     }
-    match env
-        .forge
-        .pr_state(&repo_dir(&q.trunk, &spec.repo)?, spec.number)?
-    {
-        PrState::Open => {}
-        PrState::Merged => return Err(eyre!("{spec} has already merged; main has it")),
-        PrState::Closed => return Err(eyre!("{spec} was closed without merging")),
+    let listed = q.config.diffbase()?;
+    for spec in &specs {
+        if listed.contains(spec) {
+            return Err(eyre!("{spec} is already in {}'s diffbase", q.name));
+        }
+        match env
+            .forge
+            .pr_state(&repo_dir(&q.trunk, &spec.repo)?, spec.number)?
+        {
+            PrState::Open => {}
+            PrState::Merged => return Err(eyre!("{spec} has already merged; main has it")),
+            PrState::Closed => return Err(eyre!("{spec} was closed without merging")),
+        }
     }
-    edit_config(q, |list| list.push(spec.to_string()))?;
+    edit_config(q, |list| list.extend(specs.iter().map(PrSpec::to_string)))?;
     admin::sync(env, &Queue::open(&q.trunk, &q.name)?, None)
 }
 
-/// Take `pr` out of the queue's diffbase; the queue moves off it on the pass
-/// that follows.
-pub fn remove(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
-    let spec = PrSpec::parse(pr, q.config.repo.as_deref())?;
-    let mut found = false;
-    edit_config(q, |list| {
-        let before = list.len();
-        list.retain(|s| PrSpec::parse(s, q.config.repo.as_deref()).ok().as_ref() != Some(&spec));
-        found = list.len() != before;
-    })?;
-    if !found {
-        return Err(eyre!("{spec} is not in {}'s diffbase", q.name));
+/// Take `prs` out of the queue's diffbase; the queue moves off them on the
+/// pass that follows. If one isn't listed, none is taken out.
+pub fn remove(env: &Env, q: &Queue, prs: &str) -> Result<PassReport> {
+    let own = q.config.repo.as_deref();
+    let specs = parse_pr_list(prs, own)?;
+    let listed = q.config.diffbase()?;
+    if let Some(missing) = specs.iter().find(|s| !listed.contains(s)) {
+        return Err(eyre!("{missing} is not in {}'s diffbase", q.name));
     }
+    edit_config(q, |list| {
+        list.retain(|s| PrSpec::parse(s, own).map_or(true, |p| !specs.contains(&p)));
+    })?;
     admin::sync(env, &Queue::open(&q.trunk, &q.name)?, None)
 }
 

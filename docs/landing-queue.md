@@ -187,7 +187,7 @@ folder.
 
 A queue normally builds on main. Its diffbase lists PRs it builds on before
 they reach main, as `repo#N`: any PRs, landed through Choros or not. (A queue
-made when queues held one repo also reads `#N` as its repo.) `choros queue base add|rm NAME REF` edits the list in
+made when queues held one repo also reads `#N` as its repo.) `choros queue base add|rm NAME REF…` (`app#40,41 lib#7`: a bare number is in the repo before it; all or none) edits the list in
 `queue.toml` (only that line, under the queue's lock) after checking the PR is
 open and its repo is in the registry; `choros queue base NAME` and `choros
 status` show it.

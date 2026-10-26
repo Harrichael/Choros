@@ -112,9 +112,10 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
     choros queue drop NAME N        remove a queued landing-set
     choros queue doctor NAME        compare the queue's state with origin, then sync
     choros queue base NAME          the PRs the queue builds on before they reach main
-    choros queue base add|rm NAME REPO#N
-                                    build on a PR in review in its repo, or stop. Nothing in the
-                                    queue opens a PR until every listed one merges
+    choros queue base add|rm NAME REPO#N[,N…]…
+                                    build on PRs in review in their repos, or stop (app#40,41
+                                    lib#7: a bare number is in the repo before it). Nothing in
+                                    the queue opens a PR until every listed one merges
 
 AGENTS
     choros agent ls                 resumable claude / cursor sessions under the current directory

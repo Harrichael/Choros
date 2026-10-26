@@ -56,6 +56,23 @@ impl PrSpec {
     }
 }
 
+/// PRs written as a list, by commas or spaces: `app#40,41 lib#7`. A bare
+/// number is in the repo named before it.
+pub fn parse_pr_list(s: &str, own: Option<&str>) -> Result<Vec<PrSpec>> {
+    let mut out: Vec<PrSpec> = Vec::new();
+    for item in s.split([' ', ',']).filter(|i| !i.is_empty()) {
+        let spec = match (item.parse::<u64>(), out.last()) {
+            (Ok(number), Some(last)) => PrSpec {
+                repo: last.repo.clone(),
+                number,
+            },
+            _ => PrSpec::parse(item, own)?,
+        };
+        out.push(spec);
+    }
+    Ok(out)
+}
+
 impl std::fmt::Display for PrSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}#{}", self.repo, self.number)
@@ -485,4 +502,20 @@ pub fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pr_list_carries_its_repo_to_bare_numbers() {
+        let prs: Vec<String> = parse_pr_list("app#40,41 lib#7, 8", None)
+            .unwrap()
+            .iter()
+            .map(PrSpec::to_string)
+            .collect();
+        assert_eq!(prs, ["app#40", "app#41", "lib#7", "lib#8"]);
+        assert!(parse_pr_list("41", None).is_err(), "no repo to carry");
+    }
 }
