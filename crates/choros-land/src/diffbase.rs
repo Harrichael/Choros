@@ -1,9 +1,8 @@
 //! A queue's diffbase: PRs it builds on before they reach main, landed
-//! through Choros or not. The queue's sets, its merge head and the workspaces
-//! synced onto it all start from main with this repo's listed PRs merged in,
-//! in list order; nothing in the queue opens a PR until every listed PR
-//! (other repos' included) has merged, and then its sets are replayed onto
-//! main.
+//! through Choros or not. In each repo, the queue's sets, its merge head and
+//! the workspaces synced onto it start from main with that repo's listed PRs
+//! merged in, in list order; nothing in the queue opens a PR until every
+//! listed PR has merged, and then its sets are replayed onto main.
 //!
 //! A conflict between the listed PRs parks the whole queue. Resolving it
 //! (`choros queue resolve`) is recorded and replayed by rerere on every
@@ -23,14 +22,14 @@ use crate::queue::Queue;
 use crate::state::{BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, SeenPr};
 
 impl Work<'_, '_> {
-    /// Look up each listed PR on GitHub, fetching the heads of this repo's
-    /// open ones. A merged PR is not asked about again. One PR failing
-    /// doesn't stop the others being looked at.
+    /// Look up each listed PR on GitHub, fetching the heads of open ones. A
+    /// merged PR is not asked about again. One PR failing doesn't stop the
+    /// others being looked at.
     pub fn observe_diffbase(&mut self, forge: &dyn Forge) -> Result<()> {
         let listed = self.q.config.diffbase()?;
         let keys: Vec<String> = listed.iter().map(PrSpec::to_string).collect();
         self.st.diffbase.prs.retain(|k, _| keys.contains(k));
-        let mut refetched = false;
+        let mut refetched = BTreeSet::new();
         let mut failed = Vec::new();
         for pr in &listed {
             let merged = self
@@ -53,22 +52,21 @@ impl Work<'_, '_> {
         }
     }
 
-    fn observe_pr(&mut self, forge: &dyn Forge, pr: &PrSpec, refetched: &mut bool) -> Result<()> {
-        let own = pr.repo == self.q.config.repo;
-        let dir = if own {
-            self.git.dir().to_path_buf()
-        } else {
-            repo_dir(&self.q.trunk, &pr.repo)?
-        };
-        let state = forge.pr_state(&dir, pr.number)?;
-        let head = match (&state, own) {
-            (PrState::Open, true) => Some(self.fetch_head(pr.number)?),
+    fn observe_pr(
+        &mut self,
+        forge: &dyn Forge,
+        pr: &PrSpec,
+        refetched: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        self.ensure_repo(&pr.repo)?;
+        let state = forge.pr_state(&self.q.sync_dir(&pr.repo), pr.number)?;
+        let head = match state {
+            PrState::Open => Some(self.fetch_head(&pr.repo, pr.number)?),
             _ => None,
         };
         // Bases built from here on must contain the merge.
-        if state == PrState::Merged && own && !*refetched {
-            self.q.fetch()?;
-            *refetched = true;
+        if state == PrState::Merged && refetched.insert(pr.repo.clone()) {
+            self.q.fetch(&pr.repo)?;
         }
         self.st
             .diffbase
@@ -78,71 +76,93 @@ impl Work<'_, '_> {
     }
 
     /// GitHub keeps every PR's head at `refs/pull/N/head`, forks' included.
-    fn fetch_head(&self, number: u64) -> Result<String> {
+    fn fetch_head(&self, repo: &str, number: u64) -> Result<String> {
+        let git = self.git(repo);
         let local = format!("refs/choros/diffbase/{number}");
-        self.git
-            .fetch("origin", &[&format!("+refs/pull/{number}/head:{local}")])?;
-        self.git.sha(&local)
+        git.fetch("origin", &[&format!("+refs/pull/{number}/head:{local}")])?;
+        git.sha(&local)
     }
 
-    /// Build the diffbase if its inputs changed: main and this repo's open
-    /// listed PRs. A listed PR closed without merging, or one that won't
-    /// merge onto those before it, parks the queue instead.
+    /// Build each repo's diffbase whose inputs changed. A listed PR closed
+    /// without merging, or one that won't merge onto those before it, parks
+    /// the queue instead.
     pub fn rebuild_diffbase(&mut self) -> Result<()> {
         let listed = self.q.config.diffbase()?;
-        let seen = |pr: &PrSpec| self.st.diffbase.prs.get(&pr.to_string());
-        if let Some(closed) = listed
-            .iter()
-            .find(|p| seen(p).is_some_and(|s| s.state == PrState::Closed))
-        {
-            self.st.diffbase.park = Some(DiffbasePark {
+        let db = &mut self.st.diffbase;
+        if let Some(closed) = listed.iter().find(|p| {
+            db.prs
+                .get(&p.to_string())
+                .is_some_and(|s| s.state == PrState::Closed)
+        }) {
+            db.park = Some(DiffbasePark {
                 pr: closed.to_string(),
                 conflict: None,
             });
             return Ok(());
         }
-        // Building without a PR not yet seen would move the queue off it
-        // and back again once it is.
-        let own = |p: &&PrSpec| p.repo == self.q.config.repo;
-        if listed.iter().filter(own).any(|p| seen(p).is_none()) {
+        if db.park.as_ref().is_some_and(|p| p.conflict.is_none()) {
+            db.park = None;
+        }
+        let repos: Vec<String> = self.st.repos.keys().cloned().collect();
+        for repo in repos {
+            self.rebuild_repo_diffbase(&repo, &listed)?;
+            if self.st.diffbase.park.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_repo_diffbase(&mut self, repo: &str, listed: &[PrSpec]) -> Result<()> {
+        let mine: Vec<&PrSpec> = listed.iter().filter(|p| p.repo == repo).collect();
+        let seen = |pr: &PrSpec| self.st.diffbase.prs.get(&pr.to_string());
+        // Building without a PR not yet seen would move the repo off it and
+        // back again once it is.
+        if mine.iter().any(|p| seen(p).is_none()) {
             return Ok(());
         }
-        let heads: Vec<(String, String)> = listed
+        let heads: Vec<(String, String)> = mine
             .iter()
-            .filter(own)
             .filter_map(|p| {
                 let s = seen(p)?;
                 let head = s.head.clone().filter(|_| s.state == PrState::Open)?;
                 Some((p.to_string(), head))
             })
             .collect();
-        let behind = match &self.st.diffbase.built {
-            Some(b) => !self.has_merged_sets(&b.main)?,
-            None => false,
-        };
-        let db = &mut self.st.diffbase;
-        if db.park.as_ref().is_some_and(|p| p.conflict.is_none()) {
-            db.park = None;
-        }
+        let parked_here = self
+            .st
+            .diffbase
+            .park
+            .as_ref()
+            .and_then(|p| p.conflict.as_ref().map(|c| (p, c)))
+            .filter(|(p, _)| PrSpec::parse(&p.pr, None).is_ok_and(|s| s.repo == repo))
+            .map(|(_, c)| c.on.clone());
+        let built = self.st.repos[repo].diffbase.clone();
+        let what = format!("{}/diffbase", self.q.name);
         if heads.is_empty() {
-            if db.built.take().is_some() {
-                let _ = self.git.run(&[
-                    "update-ref",
-                    "-d",
-                    &format!("refs/heads/{}/diffbase", self.q.name),
-                ]);
+            if built.is_some() {
+                self.st.repos.get_mut(repo).unwrap().diffbase = None;
+                let _ = self
+                    .git(repo)
+                    .run(&["update-ref", "-d", &format!("refs/heads/{what}")]);
             }
-            self.st.diffbase.park = None;
+            if parked_here.is_some() {
+                self.st.diffbase.park = None;
+            }
             return Ok(());
         }
+        let behind = match &built {
+            Some(b) => !self.has_merged_sets(repo, &b.main)?,
+            None => false,
+        };
         // The same PR heads keep the main they were built on, as a set keeps
         // its base: following main for its own sake would rewrite the whole
         // queue on every merge to main. A set of this queue merging is reason
         // enough, though; its dependents and the merge head need it.
-        let main = match &db.built {
-            Some(b) if b.heads == heads && !behind && db.park.is_none() => return Ok(()),
+        let main = match &built {
+            Some(b) if b.heads == heads && !behind && parked_here.is_none() => return Ok(()),
             Some(b) if b.heads == heads && !behind => b.main.clone(),
-            _ => self.main_sha()?,
+            _ => self.main_sha(repo)?,
         };
         let key = format!(
             "{main};{}",
@@ -152,24 +172,19 @@ impl Work<'_, '_> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let unchanged = self
-            .st
-            .diffbase
-            .park
-            .as_ref()
-            .and_then(|p| p.conflict.as_ref())
-            .is_some_and(|c| c.on == key);
-        if unchanged && self.handler.is_none() {
+        if parked_here.as_deref() == Some(key.as_str()) && self.handler.is_none() {
             return Ok(());
         }
         let tips: Vec<String> = heads.iter().map(|(_, h)| h.clone()).collect();
-        let what = format!("{}/diffbase", self.q.name);
-        match self.build(&main, &tips, &what)? {
+        match self.build(repo, &main, &tips, &what)? {
             Ok(sha) => {
-                self.git
+                self.git(repo)
                     .run(&["update-ref", &format!("refs/heads/{what}"), &sha])?;
-                self.st.diffbase.built = Some(BuiltDiffbase { main, heads, sha });
-                self.st.diffbase.park = None;
+                self.st.repos.get_mut(repo).unwrap().diffbase =
+                    Some(BuiltDiffbase { main, heads, sha });
+                if parked_here.is_some() {
+                    self.st.diffbase.park = None;
+                }
             }
             Err((i, files)) => {
                 self.st.diffbase.park = Some(DiffbasePark {
@@ -185,27 +200,29 @@ impl Work<'_, '_> {
         Ok(())
     }
 
-    /// Whether every set this queue has merged is in `main`.
-    fn has_merged_sets(&self, main: &str) -> Result<bool> {
+    /// Whether every set this queue has merged in `repo` is in `main`.
+    fn has_merged_sets(&self, repo: &str, main: &str) -> Result<bool> {
+        let git = self.git(repo);
         let points: BTreeSet<&String> = self
             .st
             .sets
             .values()
+            .filter(|s| s.repo() == repo)
             .filter_map(|s| s.merged_into.as_ref())
             .collect();
         for p in points {
-            if !self.git.is_ancestor(p, main)? {
+            if !git.is_ancestor(p, main)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    /// Where every set's base starts: the diffbase, or main.
-    pub fn root(&self) -> Result<String> {
-        match &self.st.diffbase.built {
+    /// Where the bases of `repo`'s sets start: its diffbase, or main.
+    pub fn root(&self, repo: &str) -> Result<String> {
+        match self.st.repos.get(repo).and_then(|r| r.diffbase.as_ref()) {
             Some(b) => Ok(b.sha.clone()),
-            None => self.main_sha(),
+            None => self.main_sha(repo),
         }
     }
 
@@ -225,16 +242,14 @@ impl Work<'_, '_> {
 /// Add `pr` to the queue's diffbase, editing its queue.toml in place, and
 /// settle the queue on it. It must be open: a merged PR is already in main.
 pub fn add(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
-    let spec = PrSpec::parse(pr, &q.config.repo)?;
+    let spec = PrSpec::parse(pr, q.config.repo.as_deref())?;
     if q.config.diffbase()?.contains(&spec) {
         return Err(eyre!("{spec} is already in {}'s diffbase", q.name));
     }
-    let dir = if spec.repo == q.config.repo {
-        q.sync_dir()
-    } else {
-        repo_dir(&q.trunk, &spec.repo)?
-    };
-    match env.forge.pr_state(&dir, spec.number)? {
+    match env
+        .forge
+        .pr_state(&repo_dir(&q.trunk, &spec.repo)?, spec.number)?
+    {
         PrState::Open => {}
         PrState::Merged => return Err(eyre!("{spec} has already merged; main has it")),
         PrState::Closed => return Err(eyre!("{spec} was closed without merging")),
@@ -246,11 +261,11 @@ pub fn add(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
 /// Take `pr` out of the queue's diffbase; the queue moves off it on the pass
 /// that follows.
 pub fn remove(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
-    let spec = PrSpec::parse(pr, &q.config.repo)?;
+    let spec = PrSpec::parse(pr, q.config.repo.as_deref())?;
     let mut found = false;
     edit_config(q, |list| {
         let before = list.len();
-        list.retain(|s| PrSpec::parse(s, &q.config.repo).ok().as_ref() != Some(&spec));
+        list.retain(|s| PrSpec::parse(s, q.config.repo.as_deref()).ok().as_ref() != Some(&spec));
         found = list.len() != before;
     })?;
     if !found {

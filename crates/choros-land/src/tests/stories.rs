@@ -152,9 +152,9 @@ fn conflicting_forks_side_by_side(w: &World) -> u32 {
     };
     w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), Some(&mut h)).unwrap();
     let st = w.state();
-    let mh = st.merge_head.as_ref().unwrap();
+    let mh = st.repos[REPO].merge_head.as_ref().unwrap();
     assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
-    assert_eq!(st.resolutions.len(), 1);
+    assert_eq!(st.repos[REPO].resolutions.len(), 1);
     *st.sets.keys().max().unwrap()
 }
 
@@ -180,7 +180,7 @@ fn a_merge_head_resolution_replays_when_the_clash_returns() {
 fn a_merge_head_resolution_is_shown_when_it_cannot_replay() {
     let w = World::new();
     let n2 = conflicting_forks_side_by_side(&w);
-    std::fs::remove_dir_all(w.queue().sync_dir().join(".git/rr-cache")).unwrap();
+    std::fs::remove_dir_all(w.queue().sync_dir(REPO).join(".git/rr-cache")).unwrap();
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Merge);
     assert_eq!(w.pass().parked, [n2]);
 
@@ -216,9 +216,9 @@ fn a_public_set_takes_main_in_only_when_it_conflicts() {
     let st = w.state();
     let new_tip = &st.sets[&1].tip;
     assert_ne!(new_tip, &tip);
-    let parents = git(&w.queue().sync_dir(), &["rev-list", "--parents", "-n", "1", new_tip]);
+    let parents = git(&w.queue().sync_dir(REPO), &["rev-list", "--parents", "-n", "1", new_tip]);
     assert_eq!(parents.split(' ').count(), 3, "a merge commit on top of the old tip");
-    assert!(git(&w.queue().sync_dir(), &["merge-base", "--is-ancestor", &tip, new_tip]).is_empty());
+    assert!(git(&w.queue().sync_dir(REPO), &["merge-base", "--is-ancestor", &tip, new_tip]).is_empty());
 }
 
 /// A PR closed without merging parks itself and everything behind it, out
@@ -236,7 +236,7 @@ fn a_closed_pr_parks_its_subtree_until_dropped() {
     w.pass();
     let st = w.state();
     assert_eq!(st.sets[&1].status, SetStatus::Closed);
-    assert_eq!(st.merge_head.as_ref().unwrap().sha, w.origin_main(), "neither is in the merge head");
+    assert_eq!(st.repos[REPO].merge_head.as_ref().unwrap().sha, w.origin_main(), "neither is in the merge head");
 
     crate::admin::drop_set(&w.env(), &w.queue(), 1).unwrap();
     let st = w.state();
@@ -264,7 +264,7 @@ fn a_pass_interrupted_midway_heals_on_the_next() {
         let mut work = crate::engine::Work::begin(&q, env.agent, None, true).unwrap().unwrap();
         work.observe_prs(env.forge, &mut Default::default()).unwrap();
         work.save().unwrap();
-        let sync = q.sync_dir();
+        let sync = q.sync_dir(REPO);
         git(&sync, &["checkout", "--quiet", "--detach", "HEAD"]);
         std::fs::write(sync.join("README"), "junk\n").unwrap();
         // The crash: a dirty tree mid-way through.
@@ -316,7 +316,7 @@ fn concurrent_lands_serialize() {
     let later = st.sets.values().find(|s| !s.deps.is_empty()).expect("one landed behind the other");
     let earlier = st.sets.values().find(|s| s.deps.is_empty()).unwrap();
     assert_eq!(later.deps, [Dep::Set(earlier.n)]);
-    let mh = st.merge_head.as_ref().unwrap();
+    let mh = st.repos[REPO].merge_head.as_ref().unwrap();
     assert!(w.file_at(&mh.sha, "a.txt").is_some() && w.file_at(&mh.sha, "b.txt").is_some());
 }
 

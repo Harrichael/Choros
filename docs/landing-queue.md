@@ -21,20 +21,22 @@ to main straight away.
 
 | Term | Meaning |
 | --- | --- |
-| Queue | A named landing pipeline for one repo. Owns a dependency graph, a merge head, a sync clone and a resync agent session. |
-| Landing-set | One landed batch of commits from one repo. Maps 1:1 to a PR. Branch `<queue>/landing-N`. |
-| Dependency | Within a queue: A's commits sit on top of B's (B is part of A's base). Across queues (always different repos): ordering only — A's PR does not open until B merges. |
+| Queue | A named landing pipeline for a trunk, branch-space or workspace, across every repo landed into it. Owns one dependency graph; per repo, a merge head, a sync clone and a resync agent session. |
+| Landing-set | One landed batch of commits from one repo. Maps 1:1 to a PR. Branch `<queue>/landing-N` on that repo's origin; N is unique across the queue. |
+| Dependency | Within a queue, in the same repo: A's commits sit on top of B's (B is part of A's base). In another repo, or in another queue: ordering only — A's PR does not open until B merges. |
 | Front | Every queued, unparked landing-set whose dependencies have all merged. Several at once is normal. |
-| Merge head | `main` merged with every queued, unparked landing-set: what new work starts from. Branch `<queue>/merge-head`. |
+| Merge head | Per repo: `main` merged with every queued, unparked landing-set in that repo: what new work starts from. Branch `<queue>/merge-head` on that repo's origin. |
 | Landing | The folder `<trunk>/landing/<queue>/landing-N/`: a small choros workspace on the landing branch, with a fork of the Claude session(s) that did the work. |
 | Sync clone | `<trunk>/landing/<queue>/_sync/<repo>/`: a clone owned by Choros where every engine-side rebase, merge-head build and agent run happens. User workspaces are never rewritten by the daemon. |
-| Resync agent | A headless Claude Code session per queue, run in the sync clone, that resolves conflicts when you ask it to. |
+| Resync agent | A headless Claude Code session per queue and repo, run in the sync clone, that resolves conflicts when you ask it to. |
 
 ## Configuration and scope
 
 A queue is defined at the **trunk** and scoped to the whole trunk (any
 workspace may join it), to **one branch-space** (workspaces in it and below
-it), or to **one workspace**. A workspace binds each repo to at most one queue.
+it), or to **one workspace**. It takes every repo: a repo's sync clone and
+merge head appear when something first lands in it (or a diffbase PR names
+it). A branch-space or workspace has at most one queue scoped to it.
 All definitions live in one place, at the trunk, so the daemon has one thing to
 scan and branch-spaces can come and go without moving queue state. A queue
 scoped to a workspace or branch-space is archived by the daemon once that
@@ -51,9 +53,8 @@ folder has been archived and no set is open (to
 `queue.toml`:
 
 ```toml
-repo = "Ordo"                       # registry name; one repo per queue
 scope = "trunk"                     # or { branch = "epic-x" } or { workspace = "epic-x/login" } (paths below the trunk; "root" is read as "trunk")
-diffbase = ["Ordo#41", "#43", "Lib#12"]  # PRs to build on before they merge (see Diffbase); #N is this repo
+diffbase = ["Ordo#41", "Lib#12"]    # PRs to build on before they merge (see Diffbase)
 [push]
 merge_head = true                   # force-push <queue>/merge-head; false keeps it in the sync clone only
 private_sets = true                 # push queued (not yet front) landing branches
@@ -63,32 +64,42 @@ draft = true                        # open front PRs as drafts
 rotate_after = 10                   # resync-agent runs before its session is rotated
 ```
 
+Each repo lands on its origin's default branch. Queues made when a queue held
+one repo still have `repo` and `main` lines; they say which repo the old sets
+are in.
+
 Pushing private branches runs any `on: push` CI on every re-sync; `choros
-queue new` warns when the repo has such workflows. Merge method, "delete head
-branch on merge" and "require branches to be up to date" are read from GitHub's
-repo settings, never configured here.
+queue new` warns when a registry repo has such workflows. Merge method,
+"delete head branch on merge" and "require branches to be up to date" are read
+from GitHub's repo settings, never configured here.
 
-Queue names must not equal an existing branch on origin (a branch `ordo` and
-refs `ordo/landing-1` cannot coexist) and must not be `landing`.
+Queue names must not equal an existing branch on a repo's origin (a branch
+`ordo` and refs `ordo/landing-1` cannot coexist; checked when the repo first
+lands) and must not be `landing` or `none`.
 
-A workspace binds each repo to at most one queue in its `.choros-meta.toml`,
+**Which queue a repo lands into.** In order: the queue the workspace bound it
+to (`choros repo bind REPO QUEUE|none`, or the `choros work` picker); else the
+queue scoped to the workspace, or to the nearest branch-space holding it; else
+none, which is instant mode. So a queue scoped to a branch-space takes its
+workspaces with no binding at all; binding is for trunk queues, and for
+opting a repo out. Bindings live in the workspace's `.choros-landing.toml`,
 alongside per-repo landing bookkeeping:
 
 ```toml
 [repo.Ordo]
-queue = "ordo"            # absent: instant mode
-base = "<sha>"            # commit the workspace branch currently builds on
+queue = "ordo"            # or "none"; absent: the scoped queue, if any
 landed_through = "<sha>"  # everything up to here has been landed
 ```
 
-Binding happens in the `choros work` picker (default: none) and can change
-from the queue TUI. A repo bound to a queue is cloned **from the queue's merge
-head** (fetched from the sync clone when the merge head is not pushed), and
-`base = landed_through = <merge head>`. `choros queue new NAME REPO
-[--workspace WS | --branch PATH]` creates a queue with the default settings;
-with `-i` it asks for each one instead (NAME and REPO become optional and,
-when given, the defaults). `choros queue ls [--all]` lists them. Existing workspaces have no `base`; it is
-taken as `merge-base HEAD origin/main` the first time.
+A new workspace binds each repo to the queue it would land into (its
+branch-space's default from `choros branch bind`, else the scoped queue), so
+it is cloned **from that queue's merge head** (fetched from the sync clone
+when the merge head is not pushed), with `landed_through = <merge head>`.
+`choros queue new NAME [--workspace WS | --branch PATH]` creates a queue with
+the default settings; with `-i` it asks for each one instead (NAME becomes
+optional and, when given, the default). `choros queue ls [--all]` lists them.
+Existing workspaces have no `landed_through`; it is taken as `merge-base HEAD
+origin/main` the first time.
 
 Instant mode settings: workspace meta, falling back to
 `<trunk>/.choros-config/instant.toml`:
@@ -106,9 +117,10 @@ choros land archive  [--fork [--deps SET,...|none]] [--title T] [--body-file F] 
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
-unlanded commits. Each repo lands into its own queue as its own landing-set;
-repos landed together are not linked (cross-queue edges are added by hand).
-Multiple queues are locked one at a time in name order.
+unlanded commits, each as its own landing-set with its own number. Repos
+landed together are not linked; a dependency across repos is added by hand
+(`--fork --deps`, or the queue TUI). A new set depends on what is queued in
+its own repo. Multiple queues are locked one at a time in name order.
 
 **What is landed.** `rev-list --reverse landed_through..HEAD`, after the sync
 below. Refused if `landed_through` is not an ancestor of `HEAD` (landed
@@ -174,20 +186,18 @@ folder.
 ## Diffbase
 
 A queue normally builds on main. Its diffbase lists PRs it builds on before
-they reach main, as `repo#N` (`#N` for the queue's own repo): any PRs, landed
-through Choros or not. `choros queue base add|rm NAME REF` edits the list in
+they reach main, as `repo#N`: any PRs, landed through Choros or not. (A queue
+made when queues held one repo also reads `#N` as its repo.) `choros queue base add|rm NAME REF` edits the list in
 `queue.toml` (only that line, under the queue's lock) after checking the PR is
 open and its repo is in the registry; `choros queue base NAME` and `choros
 status` show it.
 
-- **Built on.** The queue's own repo's open listed PRs are merged onto main, one
-  at a time in list order, into the *diffbase*. It replaces main as the start
-  of every set's base, of the merge head, and so of every workspace synced or
-  bound to the queue. It is rebuilt only when its inputs change (a PR's head
-  moves, one merges); otherwise it keeps the main it was built on, as a set's
-  base does.
-- **Waited for.** A PR in another repo can't be part of this repo's code, so it
-  only holds the queue back, like a cross-queue dependency.
+- **Built on.** In each repo, its open listed PRs are merged onto main, one at
+  a time in list order, into that repo's *diffbase*. It replaces main as the
+  start of every set's base in that repo, of its merge head, and so of every
+  workspace synced onto it. It is rebuilt only when its inputs change (a PR's
+  head moves, one merges, or a set of the queue merges); otherwise it keeps
+  the main it was built on, as a set's base does.
 - **Nothing opens early.** Front sets open their PRs only once every listed PR
   has merged (asked of GitHub, since a squash merge leaves no trace in git) and
   the set has been replayed onto plain main.
@@ -549,8 +559,14 @@ Review (Opus 5.5) adopted as defaults, user may veto:
 - The fork-or-dependency question is asked at land time, before a PR opens; public sets never move behind others.
 - A closed PR parks its subtree out of the merge head.
 - Raw-terminal session selection: sessions in scope modified since the previous land.
-- A workspace-scoped queue replaces the root queue for that repo; cross-queue edges are cross-repo ordering only.
+- A workspace-scoped queue replaces the root queue for that repo; cross-queue edges are cross-repo ordering only. (Superseded by round 4: one queue takes every repo.)
 - Lands into a queue with parked sets are accepted.
 - The daemon never runs Claude; the agent runs from `choros queue resolve`.
 - Landing folders from `land continue` are archived on merge too.
 - Sessions are forked eagerly at land time.
+
+Round 4 (multi-repo queues):
+- "the queue should be for my whole branch, it should handle repo segmentation by default internally by itself and not be scope per repo. By branch, I mean branch space"
+- "if I want to define a dependency across repos I should be able to. You don't need a lane to accomplish this, youjust need that by default the deps for a new landing set are the latest landing sets in the same repo"
+- "If they are different landing sets, then give them different numbers. for now, choros land at workspace level will just make a landing set in each repo as a convenience wrapper type thing"
+- [how workspaces find their queue] the scope decides: a queue scoped to a branch-space takes every workspace under it; binding is only needed for a trunk-wide queue ("I think C is the best no nonsense change for right now").

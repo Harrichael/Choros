@@ -3,7 +3,7 @@
 //! *should* look like from the graph, origin and GitHub, and fixes whatever
 //! differs — so a crash halfway simply heals on the next pass.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, eyre};
@@ -14,8 +14,8 @@ use crate::git::{Git, Step};
 use crate::graph;
 use crate::queue::{Queue, QueueLock};
 use crate::state::{
-    AgentSession, BaseSpec, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, Resolution,
-    SetStatus, branch,
+    AgentSession, BaseSpec, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
+    Resolution, SetStatus, branch,
 };
 
 pub struct Env<'a> {
@@ -41,6 +41,7 @@ pub type Handler<'h> = Option<&'h mut (dyn ConflictHandler + 'static)>;
 
 pub struct Conflict<'a> {
     pub queue: &'a str,
+    pub repo: &'a str,
     pub dir: &'a Path,
     pub operation: String,
     pub files: Vec<String>,
@@ -83,18 +84,18 @@ pub struct PassReport {
     pub errors: Vec<String>,
 }
 
-/// One locked session of work on a queue.
+/// One locked session of work on a queue. Git work happens in the sync clone
+/// of whichever repo the set or merge head at hand is in.
 pub struct Work<'q, 'h> {
     pub q: &'q Queue,
     pub st: QueueState,
-    pub git: Git,
     pub agent: &'q dyn Agent,
     pub handler: Handler<'h>,
     _lock: QueueLock,
 }
 
 impl<'q, 'h> Work<'q, 'h> {
-    /// Lock, recover the sync clone, fetch. `None` when `wait` is false and
+    /// Lock, recover the sync clones, fetch. `None` when `wait` is false and
     /// someone else holds the queue.
     pub fn begin(
         q: &'q Queue,
@@ -116,12 +117,14 @@ impl<'q, 'h> Work<'q, 'h> {
                 None => return Ok(None),
             }
         };
-        q.recover()?;
-        q.fetch()?;
+        let st = q.read_state()?;
+        for repo in st.repos.keys() {
+            q.recover(repo)?;
+            q.fetch(repo)?;
+        }
         let mut work = Work {
             q,
-            st: q.read_state()?,
-            git: q.git(),
+            st,
             agent,
             handler,
             _lock: lock,
@@ -137,7 +140,9 @@ impl<'q, 'h> Work<'q, 'h> {
         let ids: Vec<u32> = self.st.sets.keys().copied().collect();
         for n in ids {
             let Some(pending) = self.st.sets[&n].pending.clone() else { continue };
-            let remote = self.git.rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
+            let remote = self
+                .set_git(n)
+                .rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
             let set = self.st.sets.get_mut(&n).unwrap();
             if remote.as_deref() == Some(set.tip.as_str()) {
                 set.remote = remote;
@@ -155,31 +160,68 @@ impl<'q, 'h> Work<'q, 'h> {
         self.q.write_state(&self.st)
     }
 
-    pub fn main_sha(&self) -> Result<String> {
-        self.git.sha(&self.q.origin_main())
+    /// The sync clone of `repo`.
+    pub fn git(&self, repo: &str) -> Git {
+        self.q.git(repo)
     }
 
-    /// Bring a conflicting step to a conclusion: resolved and committed
-    /// (`None`), or aborted (`Some(files)`) for the caller to park.
-    fn settle(&mut self, step: Step, operation: &str) -> Result<Option<Vec<String>>> {
+    /// The sync clone of set `n`'s repo.
+    pub fn set_git(&self, n: u32) -> Git {
+        self.git(self.st.sets[&n].repo())
+    }
+
+    /// Ready the queue to take `repo`; see [`Queue::ensure_repo`].
+    pub fn ensure_repo(&mut self, repo: &str) -> Result<()> {
+        if !self.st.repos.contains_key(repo) {
+            self.q.ensure_repo(&mut self.st, repo)?;
+            self.q.fetch(repo)?;
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    fn repo_state(&self, repo: &str) -> Result<&RepoState> {
+        self.st
+            .repos
+            .get(repo)
+            .ok_or_else(|| eyre!("queue {} has nothing in {repo}", self.q.name))
+    }
+
+    /// The branch `repo`'s work lands on.
+    pub fn main_branch(&self, repo: &str) -> Result<String> {
+        Ok(self.repo_state(repo)?.main.clone())
+    }
+
+    pub fn main_sha(&self, repo: &str) -> Result<String> {
+        self.git(repo)
+            .sha(&format!("refs/remotes/origin/{}", self.main_branch(repo)?))
+    }
+
+    /// Bring a conflicting step in `repo`'s sync clone to a conclusion:
+    /// resolved and committed (`None`), or aborted (`Some(files)`) for the
+    /// caller to park.
+    fn settle(&mut self, repo: &str, step: Step, operation: &str) -> Result<Option<Vec<String>>> {
         let Step::Conflict(files) = step else {
             return Ok(None);
         };
+        let git = self.git(repo);
         // rerere replayed every hunk; it only needs checking.
-        if files.is_empty() && self.git.resolution_problems()?.is_none() {
-            self.git.conclude()?;
-            self.record_resolution(&files)?;
+        if files.is_empty() && git.resolution_problems()?.is_none() {
+            git.conclude()?;
+            self.record_resolution(repo, &files)?;
             return Ok(None);
         }
         let Some(handler) = self.handler.as_deref_mut() else {
-            self.git.abort_in_progress()?;
+            git.abort_in_progress()?;
             return Ok(Some(files));
         };
-        let slot = agent_slot(&self.st, self.q.config.agent.rotate_after);
-        let recorded = recorded_for(&self.git, &self.st, &files);
+        let rs = self.st.repos.get(repo).ok_or_else(|| eyre!("queue {} has nothing in {repo}", self.q.name))?;
+        let slot = agent_slot(rs, self.q.config.agent.rotate_after);
+        let recorded = recorded_for(&git, rs, &files);
         let handled = handler.resolve(&Conflict {
             queue: &self.q.name,
-            dir: self.git.dir(),
+            repo,
+            dir: git.dir(),
             operation: operation.to_string(),
             files: files.clone(),
             recorded,
@@ -188,28 +230,31 @@ impl<'q, 'h> Work<'q, 'h> {
         })?;
         if let Handled::Resolved { used_session } = handled {
             if used_session {
-                record_session(&mut self.st, &slot);
+                record_session(self.st.repos.get_mut(repo).unwrap(), &slot);
             }
-            if let Some(problem) = self.git.resolution_problems()? {
-                self.git.abort_in_progress()?;
+            if let Some(problem) = git.resolution_problems()? {
+                git.abort_in_progress()?;
                 return Err(eyre!("the resolution was not accepted: {problem}"));
             }
-            self.git.conclude()?;
-            self.record_resolution(&files)?;
+            git.conclude()?;
+            self.record_resolution(repo, &files)?;
             return Ok(None);
         }
-        self.git.abort_in_progress()?;
+        git.abort_in_progress()?;
         Ok(Some(files))
     }
 
-    fn record_resolution(&mut self, files: &[String]) -> Result<()> {
-        let commit = self.git.head()?;
+    fn record_resolution(&mut self, repo: &str, files: &[String]) -> Result<()> {
+        let git = self.git(repo);
+        let commit = git.head()?;
         let files = if files.is_empty() {
-            self.git.changed_files(&commit).unwrap_or_default()
+            git.changed_files(&commit).unwrap_or_default()
         } else {
             files.to_vec()
         };
-        self.st.resolutions.push(Resolution { commit, files });
+        if let Some(rs) = self.st.repos.get_mut(repo) {
+            rs.resolutions.push(Resolution { commit, files });
+        }
         Ok(())
     }
 
@@ -218,40 +263,56 @@ impl<'q, 'h> Work<'q, 'h> {
     /// so the same inputs always give the same commit when no merge is needed.
     /// On a conflict that was not resolved: the index of the tip that clashed,
     /// and the files.
-    pub fn build(&mut self, main: &str, tips: &[String], what: &str) -> Result<std::result::Result<String, (usize, Vec<String>)>> {
-        self.git.checkout_detached(main)?;
+    pub fn build(
+        &mut self,
+        repo: &str,
+        main: &str,
+        tips: &[String],
+        what: &str,
+    ) -> Result<std::result::Result<String, (usize, Vec<String>)>> {
+        let git = self.git(repo);
+        git.checkout_detached(main)?;
         for (i, tip) in tips.iter().enumerate() {
-            let head = self.git.head()?;
-            if self.git.is_ancestor(tip, &head)? {
+            let head = git.head()?;
+            if git.is_ancestor(tip, &head)? {
                 continue;
             }
-            if self.git.is_ancestor(&head, tip)? {
-                self.git.checkout_detached(tip)?;
+            if git.is_ancestor(&head, tip)? {
+                git.checkout_detached(tip)?;
                 continue;
             }
-            let step = self.git.merge(tip, &format!("Merge {tip:.12} into {what}"))?;
-            if let Some(files) = self.settle(step, &format!("building {what}"))? {
+            let step = git.merge(tip, &format!("Merge {tip:.12} into {what}"))?;
+            if let Some(files) = self.settle(repo, step, &format!("building {what}"))? {
                 return Ok(Err((i, files)));
             }
         }
-        Ok(Ok(self.git.head()?))
+        Ok(Ok(git.head()?))
     }
 
     /// Cherry-pick `commits` onto `base`, one at a time.
-    pub fn replay(&mut self, base: &str, commits: &[String], what: &str) -> Result<std::result::Result<String, Vec<String>>> {
-        self.git.checkout_detached(base)?;
+    pub fn replay(
+        &mut self,
+        repo: &str,
+        base: &str,
+        commits: &[String],
+        what: &str,
+    ) -> Result<std::result::Result<String, Vec<String>>> {
+        let git = self.git(repo);
+        git.checkout_detached(base)?;
         for c in commits {
-            let step = self.git.cherry_pick(c)?;
-            if let Some(files) = self.settle(step, &format!("replaying {what}"))? {
+            let step = git.cherry_pick(c)?;
+            if let Some(files) = self.settle(repo, step, &format!("replaying {what}"))? {
                 return Ok(Err(files));
             }
         }
-        Ok(Ok(self.git.head()?))
+        Ok(Ok(git.head()?))
     }
 
     /// The base set `n` should sit on now.
     pub fn desired_base(&self, n: u32) -> Result<BaseSpec> {
         let set = &self.st.sets[&n];
+        let repo = set.repo();
+        let git = self.git(repo);
         let unmerged = graph::unmerged_deps(&self.st, n);
         let tips = graph::leaves(&self.st, &unmerged)
             .into_iter()
@@ -267,13 +328,13 @@ impl<'q, 'h> Work<'q, 'h> {
             .collect();
         let main = match &set.base.main {
             Some(m)
-                if self.st.diffbase.built.is_none()
-                    && self.git.is_ancestor(m, &self.main_sha()?)?
-                    && merged_points.iter().all(|p| self.git.is_ancestor(p, m).unwrap_or(false)) =>
+                if self.repo_state(repo)?.diffbase.is_none()
+                    && git.is_ancestor(m, &self.main_sha(repo)?)?
+                    && merged_points.iter().all(|p| git.is_ancestor(p, m).unwrap_or(false)) =>
             {
                 m.clone()
             }
-            _ => self.root()?,
+            _ => self.root(repo)?,
         };
         Ok(BaseSpec {
             main: Some(main),
@@ -284,15 +345,16 @@ impl<'q, 'h> Work<'q, 'h> {
     /// Rebuild `n`'s base from `spec` and replay its own commits onto it.
     pub fn resync(&mut self, n: u32, spec: BaseSpec) -> Result<bool> {
         let set = self.st.sets[&n].clone();
-        let own = self.git.commits(&set.base_sha, &set.tip)?;
+        let repo = set.repo();
+        let own = self.git(repo).commits(&set.base_sha, &set.tip)?;
         let main = spec.main.clone().ok_or_else(|| eyre!("base without main"))?;
         let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
         let what = set.branch(&self.q.name);
-        let base = match self.build(&main, &tips, &format!("the base of {what}"))? {
+        let base = match self.build(repo, &main, &tips, &format!("the base of {what}"))? {
             Ok(b) => b,
             Err((_, files)) => return self.park(n, ParkOp::BaseMerge, files, spec.key()),
         };
-        let tip = match self.replay(&base, &own, &what)? {
+        let tip = match self.replay(repo, &base, &own, &what)? {
             Ok(t) => t,
             Err(files) => return self.park(n, ParkOp::Resync, files, spec.key()),
         };
@@ -323,7 +385,7 @@ impl<'q, 'h> Work<'q, 'h> {
             self.save()?;
             let set = &self.st.sets[&n];
             let pushed = self
-                .git
+                .set_git(n)
                 .push_lease("origin", &set.tip, &set.branch(&self.q.name), set.remote.as_deref());
             let set = self.st.sets.get_mut(&n).unwrap();
             match pushed {
@@ -346,15 +408,14 @@ impl<'q, 'h> Work<'q, 'h> {
 
     fn set_local_ref(&self, n: u32) -> Result<()> {
         let set = &self.st.sets[&n];
-        self.git
+        self.set_git(n)
             .run(&["update-ref", &format!("refs/heads/{}", set.branch(&self.q.name)), &set.tip])?;
         Ok(())
     }
 
     /// Note merges and closes on GitHub.
     pub fn observe_prs(&mut self, forge: &dyn Forge, report: &mut PassReport) -> Result<()> {
-        let mut main = self.main_sha()?;
-        let mut refetched = false;
+        let mut refetched = BTreeSet::new();
         let ids: Vec<u32> = self.st.sets.keys().copied().collect();
         for n in ids {
             let set = &self.st.sets[&n];
@@ -362,19 +423,19 @@ impl<'q, 'h> Work<'q, 'h> {
             if !matches!(set.status, SetStatus::Queued | SetStatus::Closed) {
                 continue;
             }
-            let state = forge.pr_state(self.git.dir(), pr.number)?;
+            let repo = set.repo().to_string();
+            let state = forge.pr_state(self.git(&repo).dir(), pr.number)?;
             // A merge that happened after this pass fetched would leave main
             // without it, and dependents would keep a base that lacks it.
-            if state == PrState::Merged && !refetched {
-                self.q.fetch()?;
-                main = self.main_sha()?;
-                refetched = true;
+            if state == PrState::Merged && refetched.insert(repo.clone()) {
+                self.q.fetch(&repo)?;
             }
+            let main = self.main_sha(&repo)?;
             let set = self.st.sets.get_mut(&n).unwrap();
             match (state, &set.status) {
                 (PrState::Merged, _) => {
                     set.status = SetStatus::Merged;
-                    set.merged_into = Some(main.clone());
+                    set.merged_into = Some(main);
                     set.park = None;
                     report.merged.push(n);
                 }
@@ -400,16 +461,15 @@ impl<'q, 'h> Work<'q, 'h> {
                 continue;
             }
             let Some(seen) = set.remote.clone() else { continue };
-            let remote = self
-                .git
-                .rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
+            let git = self.set_git(n);
+            let remote = git.rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
             let set = self.st.sets.get_mut(&n).unwrap();
             match remote {
                 None => set.remote = None,
                 Some(r) if r == seen => {}
                 // A merge commit cannot be replayed with its set; public sets
                 // are never replayed, so only a private one has to stop.
-                Some(r) if set.pr.is_none() && self.git.is_ancestor(&set.tip, &r)? && self.git.has_merges(&set.tip, &r)? => {
+                Some(r) if set.pr.is_none() && git.is_ancestor(&set.tip, &r)? && git.has_merges(&set.tip, &r)? => {
                     set.park = Some(Park {
                         op: ParkOp::PushedMerge,
                         files: Vec::new(),
@@ -417,7 +477,7 @@ impl<'q, 'h> Work<'q, 'h> {
                     });
                 }
                 Some(r) => {
-                    if self.git.is_ancestor(&set.tip, &r)? {
+                    if git.is_ancestor(&set.tip, &r)? {
                         set.tip = r.clone();
                         set.remote = Some(r);
                         if set.park.as_ref().is_some_and(|p| p.op == ParkOp::Diverged) {
@@ -441,23 +501,23 @@ impl<'q, 'h> Work<'q, 'h> {
     /// nothing was needed; otherwise whether it went through (a park or a
     /// refused push is `Some(false)`).
     pub fn update_public(&mut self, n: u32, settings: &RepoSettings) -> Result<Option<bool>> {
-        let main = self.main_sha()?;
+        let repo = self.st.sets[&n].repo().to_string();
+        let git = self.git(&repo);
+        let main = self.main_sha(&repo)?;
         let tip = self.st.sets[&n].tip.clone();
-        let behind = !self.git.is_ancestor(&main, &tip)?;
-        let needed = behind
-            && (settings.require_up_to_date || !self.git.merge_conflicts(&main, &tip)?.is_empty());
+        let behind = !git.is_ancestor(&main, &tip)?;
+        let needed = behind && (settings.require_up_to_date || !git.merge_conflicts(&main, &tip)?.is_empty());
         if !needed {
             return Ok(None);
         }
         let what = branch(&self.q.name, n);
-        self.git.checkout_detached(&tip)?;
-        let step = self
-            .git
-            .merge(&main, &format!("Merge {} into {what}", self.q.config.main))?;
-        if let Some(files) = self.settle(step, &format!("merging {} into {what}", self.q.config.main))? {
+        let main_branch = self.main_branch(&repo)?;
+        git.checkout_detached(&tip)?;
+        let step = git.merge(&main, &format!("Merge {main_branch} into {what}"))?;
+        if let Some(files) = self.settle(&repo, step, &format!("merging {main_branch} into {what}"))? {
             return self.park(n, ParkOp::MainIntoPublic, files, main).map(Some);
         }
-        let new_tip = self.git.head()?;
+        let new_tip = git.head()?;
         let set = self.st.sets.get_mut(&n).unwrap();
         set.pending = Some(PendingPush {
             old_tip: std::mem::replace(&mut set.tip, new_tip),
@@ -471,24 +531,34 @@ impl<'q, 'h> Work<'q, 'h> {
         self.publish(n).map(Some)
     }
 
-    /// Rebuild the merge head if what it should contain changed. A leaf that
-    /// clashes with the others and is not resolved here is parked out of it
-    /// (with what it built on), so one clash never stops the rest of the
-    /// queue — or anyone landing on it.
-    pub fn rebuild_merge_head(&mut self) -> Result<()> {
+    /// Rebuild every repo's merge head whose contents changed.
+    pub fn rebuild_merge_heads(&mut self) -> Result<()> {
+        let repos: Vec<String> = self.st.repos.keys().cloned().collect();
+        for repo in repos {
+            self.rebuild_merge_head(&repo)?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild `repo`'s merge head if what it should contain changed. A leaf
+    /// that clashes with the others and is not resolved here is parked out
+    /// of it (with what it built on), so one clash never stops the rest of
+    /// the queue — or anyone landing on it.
+    pub fn rebuild_merge_head(&mut self, repo: &str) -> Result<()> {
         // What the merge head would hold with every set in: a set parked out
         // of it is retried only once that has changed.
         let parked_out: Vec<(u32, Park)> = self
             .st
             .sets
             .iter()
+            .filter(|(_, s)| s.repo() == repo)
             .filter_map(|(n, s)| s.park.clone().filter(|p| p.op == ParkOp::MergeHead).map(|p| (*n, p)))
             .collect();
         for (n, _) in &parked_out {
             self.st.sets.get_mut(n).unwrap().park = None;
         }
-        let main = self.root()?;
-        let full = self.composition(&main).key();
+        let main = self.root(repo)?;
+        let full = self.composition(repo, &main).key();
         for (n, park) in parked_out {
             if park.on == full && self.handler.is_none() {
                 self.st.sets.get_mut(&n).unwrap().park = Some(park);
@@ -496,24 +566,24 @@ impl<'q, 'h> Work<'q, 'h> {
         }
 
         let what = format!("{}/merge-head", self.q.name);
+        let git = self.git(repo);
         loop {
-            let composition = self.composition(&main);
-            if self.st.merge_head.as_ref().is_some_and(|m| m.composition == composition) {
+            let composition = self.composition(repo, &main);
+            if self.repo_state(repo)?.merge_head.as_ref().is_some_and(|m| m.composition == composition) {
                 return Ok(());
             }
             let tips: Vec<String> = composition.sets.iter().map(|(_, t)| t.clone()).collect();
-            match self.build(&main, &tips, &what)? {
+            match self.build(repo, &main, &tips, &what)? {
                 Ok(sha) => {
-                    self.git
-                        .run(&["update-ref", &format!("refs/heads/{what}"), &sha])?;
+                    git.run(&["update-ref", &format!("refs/heads/{what}"), &sha])?;
                     if self.q.config.push.merge_head {
-                        self.git.push_force("origin", &sha, &what)?;
+                        git.push_force("origin", &sha, &what)?;
                     }
-                    self.st.merge_head = Some(MergeHead { sha, composition });
+                    self.st.repos.get_mut(repo).unwrap().merge_head = Some(MergeHead { sha, composition });
                     return Ok(());
                 }
                 Err((i, files)) => {
-                    let n = self.clash_culprit(&composition, i)?;
+                    let n = self.clash_culprit(repo, &composition, i)?;
                     self.st.sets.get_mut(&n).unwrap().park = Some(Park {
                         op: ParkOp::MergeHead,
                         files,
@@ -528,11 +598,12 @@ impl<'q, 'h> Work<'q, 'h> {
     /// clash, park the one that was knowingly landed beside the other's work
     /// (it lists it, or something under it, in `conflicts_with`); failing
     /// that, the newer one, since the older was there first.
-    fn clash_culprit(&self, composition: &Composition, i: usize) -> Result<u32> {
+    fn clash_culprit(&self, repo: &str, composition: &Composition, i: usize) -> Result<u32> {
+        let git = self.git(repo);
         let (n, tip) = &composition.sets[i];
         let Some((m, _)) = composition.sets[..i]
             .iter()
-            .find(|(_, t)| !self.git.merge_conflicts(t, tip).unwrap_or_default().is_empty())
+            .find(|(_, t)| !git.merge_conflicts(t, tip).unwrap_or_default().is_empty())
         else {
             return Ok(*n);
         };
@@ -550,9 +621,9 @@ impl<'q, 'h> Work<'q, 'h> {
         })
     }
 
-    /// The merge head's contents: main and the live leaves.
-    fn composition(&self, main: &str) -> Composition {
-        let live = graph::live(&self.st);
+    /// A merge head's contents: main and the repo's live leaves.
+    fn composition(&self, repo: &str, main: &str) -> Composition {
+        let live = graph::live_in(&self.st, repo);
         Composition {
             main: main.to_string(),
             sets: graph::leaves(&self.st, &live)
@@ -564,36 +635,37 @@ impl<'q, 'h> Work<'q, 'h> {
 
     pub fn open_pr(&mut self, n: u32, forge: &dyn Forge) -> Result<()> {
         let set = self.st.sets[&n].clone();
+        let git = self.git(set.repo());
         let branch = set.branch(&self.q.name);
         if set.remote.as_deref() != Some(set.tip.as_str()) {
             // A PR needs its branch on origin, whatever private_sets says.
             self.save()?;
-            self.git.push_lease("origin", &set.tip, &branch, set.remote.as_deref())?;
+            git.push_lease("origin", &set.tip, &branch, set.remote.as_deref())?;
             self.st.sets.get_mut(&n).unwrap().remote = Some(set.tip.clone());
         }
         let title = match &set.title {
             Some(t) => t.clone(),
             None => {
-                let first = self
-                    .git
+                let first = git
                     .commits(&set.base_sha, &set.tip)?
                     .into_iter()
                     .next()
                     .ok_or_else(|| eyre!("{branch} has no commits of its own"))?;
-                self.git.subject(&first)?
+                git.subject(&first)?
             }
         };
         // A PR opened by a pass that died before saving is still there; GitHub
         // would refuse a second one for the same branch.
-        if let Some(pr) = forge.find_open_pr(self.git.dir(), &branch)? {
+        if let Some(pr) = forge.find_open_pr(git.dir(), &branch)? {
             self.st.sets.get_mut(&n).unwrap().pr = Some(pr);
             return Ok(());
         }
+        let main = self.main_branch(set.repo())?;
         let pr = forge.create_pr(
-            self.git.dir(),
+            git.dir(),
             &PrRequest {
                 head: &branch,
-                base: &self.q.config.main,
+                base: &main,
                 title: &title,
                 body: set.body.as_deref().unwrap_or(""),
                 draft: self.q.config.pr.draft,
@@ -630,7 +702,7 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(report);
         }
 
-        let mut settings: Option<RepoSettings> = None;
+        let mut settings: BTreeMap<String, RepoSettings> = BTreeMap::new();
         for n in graph::topo(&self.st) {
             if graph::ancestors(&self.st, n)
                 .into_iter()
@@ -643,15 +715,17 @@ impl<'q, 'h> Work<'q, 'h> {
                 continue;
             }
             if set.is_public() {
+                let repo = set.repo().to_string();
                 if set.park.as_ref().is_some_and(|p| {
-                    p.op == ParkOp::MainIntoPublic && p.on == self.main_sha().unwrap_or_default()
+                    p.op == ParkOp::MainIntoPublic && p.on == self.main_sha(&repo).unwrap_or_default()
                 }) {
                     continue;
                 }
-                if settings.is_none() {
-                    settings = Some(forge.settings(self.git.dir(), &self.q.config.main)?);
+                if !settings.contains_key(&repo) {
+                    let got = forge.settings(self.git(&repo).dir(), &self.main_branch(&repo)?)?;
+                    settings.insert(repo.clone(), got);
                 }
-                match self.update_public(n, settings.as_ref().unwrap())? {
+                match self.update_public(n, &settings[&repo])? {
                     None => {}
                     Some(true) => report.updated_public.push(n),
                     Some(false) if self.st.sets[&n].park.is_some() => report.parked.push(n),
@@ -679,7 +753,7 @@ impl<'q, 'h> Work<'q, 'h> {
             }
         }
 
-        self.rebuild_merge_head()?;
+        self.rebuild_merge_heads()?;
         let parked_out: Vec<u32> = self
             .st
             .sets
@@ -695,15 +769,17 @@ impl<'q, 'h> Work<'q, 'h> {
             .filter(|n| self.st.sets[n].pr.is_none())
             .collect();
         let waiting = self.diffbase_waiting()?;
-        let main = self.main_sha()?;
         for n in front {
             // A set reaches the front on a base of main; one still built on
             // its merged dependencies, or on the diffbase, waits for the
             // re-sync above.
-            let base = &self.st.sets[&n].base;
+            let set = &self.st.sets[&n];
+            let main = self.main_sha(set.repo())?;
+            let git = self.set_git(n);
+            let base = &set.base;
             if waiting
                 || !base.deps.is_empty()
-                || !base.main.as_deref().is_some_and(|m| self.git.is_ancestor(m, &main).unwrap_or(false))
+                || !base.main.as_deref().is_some_and(|m| git.is_ancestor(m, &main).unwrap_or(false))
             {
                 continue;
             }
@@ -721,8 +797,8 @@ impl<'q, 'h> Work<'q, 'h> {
     /// folders are left alone (status flags them). Best-effort: a landing
     /// folder is a convenience, never a reason to fail a pass.
     fn tend_landings(&self, report: &PassReport) {
-        let repo = &self.q.config.repo;
         for n in report.resynced.iter().chain(&report.updated_public) {
+            let repo = self.st.sets[n].repo();
             let dir = self.q.landing_dir(*n).join(repo);
             if !dir.exists() {
                 continue;
@@ -736,7 +812,7 @@ impl<'q, 'h> Work<'q, 'h> {
                 continue;
             }
             let refspec = format!("+refs/heads/{branch}:refs/choros/latest");
-            if landing.fetch(self.git.dir().to_str().unwrap_or_default(), &[&refspec]).is_ok() {
+            if landing.fetch(self.q.sync_dir(repo).to_str().unwrap_or_default(), &[&refspec]).is_ok() {
                 let _ = landing.reset_hard("refs/choros/latest");
             }
         }
@@ -764,11 +840,12 @@ impl<'q, 'h> Work<'q, 'h> {
     /// Settle a set whose branch was rewritten on origin by taking origin's
     /// version, provided it still sits on the set's base.
     pub fn accept_diverged(&mut self, n: u32) -> Result<()> {
+        let git = self.set_git(n);
         let set = self.st.sets.get_mut(&n).unwrap();
         let Some(Park { op: ParkOp::Diverged, on, .. }) = set.park.clone() else {
             return Ok(());
         };
-        if !self.git.is_ancestor(&set.base_sha, &on)? {
+        if !git.is_ancestor(&set.base_sha, &on)? {
             return Err(eyre!(
                 "origin's {} no longer sits on its base; drop the set or fix the branch",
                 set.branch(&self.q.name)
@@ -780,12 +857,13 @@ impl<'q, 'h> Work<'q, 'h> {
         Ok(())
     }
 
-    pub fn next_dep_set(&self) -> Vec<Dep> {
-        graph::live(&self.st).into_iter().map(Dep::Set).collect()
+    /// What a new set in `repo` depends on: everything live there.
+    pub fn next_dep_set(&self, repo: &str) -> Vec<Dep> {
+        graph::live_in(&self.st, repo).into_iter().map(Dep::Set).collect()
     }
 }
 
-fn agent_slot(st: &QueueState, rotate_after: u32) -> AgentSlot {
+fn agent_slot(st: &RepoState, rotate_after: u32) -> AgentSlot {
     match &st.agent {
         Some(s) if s.runs < rotate_after => AgentSlot {
             id: s.id.clone(),
@@ -799,7 +877,7 @@ fn agent_slot(st: &QueueState, rotate_after: u32) -> AgentSlot {
 }
 
 /// Only a session that was actually started is worth resuming next time.
-fn record_session(st: &mut QueueState, slot: &AgentSlot) {
+fn record_session(st: &mut RepoState, slot: &AgentSlot) {
     if !slot.fresh {
         if let Some(s) = &mut st.agent {
             s.runs += 1;
@@ -819,7 +897,7 @@ fn record_session(st: &mut QueueState, slot: &AgentSlot) {
 }
 
 /// Earlier resolutions that touched any of `files`, newest first.
-fn recorded_for(git: &Git, st: &QueueState, files: &[String]) -> Vec<String> {
+fn recorded_for(git: &Git, st: &RepoState, files: &[String]) -> Vec<String> {
     let wanted: BTreeSet<&String> = files.iter().collect();
     st.resolutions
         .iter()

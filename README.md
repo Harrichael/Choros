@@ -210,24 +210,28 @@ inside it, `ls`, `status` and the queue TUI show only what's in it, and you
 can point a Claude Code session at it without exposing the rest of the trunk.
 
 ```bash
-choros branch checkout          # make it (the picker sets default queues)
+choros branch checkout          # make it (the picker can pick a queue from further up)
 cd checkout
-choros branch bind api appq     # new workspaces here land api into appq
-choros work PROJ-1240 api       # bound to appq automatically
+choros queue new checkoutq --branch checkout   # its own queue: every workspace here lands into it
+choros work PROJ-1240 api web   # api and web both land into checkoutq
+choros branch bind appq         # or, without a queue of its own: new workspaces land into appq
+choros branch bind web none     # ...except web, straight to main
 choros branch sso               # branch-spaces nest
 choros branch archive           # archive this branch-space and all inside
 ```
 
 Settings resolve from the nearest space up to the trunk, per setting:
 
-- **Default queue bindings** (`[bind]` in `.choros-branch-config/landing.toml`,
-  `repo = "queue"` or `"none"`), applied when a workspace is created; later
-  changes leave existing workspaces alone.
+- **Default queue bindings** (`queue = "…"` and `[bind]` per repo in
+  `.choros-branch-config/landing.toml`, a queue or `"none"`), applied when a
+  workspace is created; later changes leave existing workspaces alone. A
+  queue scoped to the branch-space needs none: its workspaces land into it.
 - **Instant mode's route** (`[instant] via` in the same file).
 - **Agent templates** (`.choros-branch-config/templates/`).
 
 There is one registry per trunk, and queues stay at the trunk; a queue can be
-limited to a branch-space with `choros queue new NAME REPO --branch PATH`.
+limited to a branch-space with `choros queue new NAME --branch PATH`, and
+then takes every repo of every workspace in it.
 `branch archive` refuses while a workspace inside has uncommitted changes or
 unlanded commits (`--force` overrides); landed sets carry on in their queue.
 Within one space, a workspace and a branch-space can't share a name, and at
@@ -250,9 +254,9 @@ the front — sets whose dependencies have merged — to GitHub as draft PRs.
 a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing-queue.md).
 
 ```bash
-choros queue new appq app          # a queue for the registry repo `app`
+choros queue new appq              # a queue for every repo of the trunk
 choros queue new -i                # the same, asking for each setting
-choros queue ls                    # the queues here: repo, scope, open sets, diffbase
+choros queue ls                    # the queues here: scope, repos, open sets, diffbase
 choros repo bind app appq          # inside a workspace (or press `b` in `choros work`)
 choros land continue               # land, keep working here
 choros repo sync                   # catch up when the prompt shows ⇣sync
@@ -261,7 +265,7 @@ choros land continue --fork        # land beside the queue (pick dependencies)
 choros status                      # queues, sets, PRs, parked conflicts
 choros queue resolve appq          # settle parked conflicts (a/b/c)
 choros landing open 3              # resume the session forked at landing-3
-choros queue base add appq '#41'   # build on PR #41 while it's in review
+choros queue base add appq app#41  # build on app's PR #41 while it's in review
 ```
 
 A queue's **diffbase** lets it start before the work it needs has merged: it

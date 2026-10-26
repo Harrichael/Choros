@@ -52,7 +52,7 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<PassReport> {
     }
     if set.remote.is_some() && set.pr.is_none() {
         let branch = set.branch(&q.name);
-        work.git.delete_remote_branch("origin", &branch)?;
+        work.set_git(n).delete_remote_branch("origin", &branch)?;
     }
     graph::splice_out(&mut work.st, n);
     let set = work.st.sets.get_mut(&n).unwrap();
@@ -73,7 +73,8 @@ pub fn doctor(env: &Env, q: &Queue) -> Result<Vec<String>> {
             continue;
         }
         let branch = set.branch(&q.name);
-        let remote = work.git.rev_parse(&format!("refs/remotes/origin/{branch}"))?;
+        let git = work.set_git(*n);
+        let remote = git.rev_parse(&format!("refs/remotes/origin/{branch}"))?;
         match (&set.remote, &remote) {
             (Some(_), None) => notes.push(format!("landing-{n}: gone from origin; it will be pushed again")),
             (None, Some(r)) => notes.push(format!(
@@ -84,7 +85,7 @@ pub fn doctor(env: &Env, q: &Queue) -> Result<Vec<String>> {
             )),
             _ => {}
         }
-        if work.git.rev_parse(&set.tip)?.is_none() {
+        if git.rev_parse(&set.tip)?.is_none() {
             notes.push(format!("landing-{n}: its tip {:.12} is missing from the sync clone", set.tip));
         }
     }
@@ -142,11 +143,6 @@ pub fn set_deps(env: &Env, q: &Queue, n: u32, deps: Vec<Dep>) -> Result<PassRepo
             }
             Dep::Cross { queue, n: m } => {
                 let other = Queue::open(&q.trunk, queue)?;
-                // Two queues on one repo would make the edge a real base
-                // spanning two merge heads; across repos it only orders PRs.
-                if other.config.repo == q.config.repo {
-                    return Err(eyre!("{queue} lands the same repo; depend on its sets within one queue"));
-                }
                 if !other.read_state()?.sets.contains_key(m) {
                     return Err(eyre!("{queue} has no landing-{m}"));
                 }

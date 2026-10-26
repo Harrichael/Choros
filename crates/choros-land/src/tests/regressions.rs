@@ -138,7 +138,7 @@ fn a_refused_push_holds_back_one_set_only() {
 
     let report = w.pass();
     assert_eq!(report.push_failed, [2]);
-    assert_eq!(w.state().merge_head.as_ref().unwrap().composition.main, w.origin_main());
+    assert_eq!(w.state().repos[REPO].merge_head.as_ref().unwrap().composition.main, w.origin_main());
 
     std::fs::remove_file(&hook).unwrap();
     w.pass();
@@ -189,7 +189,7 @@ fn declining_a_resolution_records_no_agent_session() {
     w.push_to_main("a.txt", "theirs\n");
     w.pass();
     crate::admin::sync(&w.env(), &w.queue(), Some(&mut Declines)).unwrap();
-    assert!(w.state().agent.is_none());
+    assert!(w.state().repos[REPO].agent.is_none());
 }
 
 /// From inside a session (no terminal), landing a fork behind a set it clashes
@@ -264,7 +264,7 @@ fn a_reopened_pr_brings_its_subtree_back() {
     w.pass();
     let st = w.state();
     assert_eq!(st.sets[&1].status, SetStatus::Queued);
-    assert!(w.file_at(&st.merge_head.as_ref().unwrap().sha, "b.txt").is_some());
+    assert!(w.file_at(&st.repos[REPO].merge_head.as_ref().unwrap().sha, "b.txt").is_some());
 }
 
 /// Three sets in a line, each squash-merged in turn, arrive on main intact.
@@ -288,7 +288,7 @@ fn a_chain_of_three_squash_merges_cleanly() {
     for f in ["a", "b", "c"] {
         assert_eq!(w.file_at(&main, &format!("{f}.txt")).as_deref(), Some(&*format!("{f}\n")));
     }
-    assert_eq!(w.state().merge_head.as_ref().unwrap().sha, main);
+    assert_eq!(w.state().repos[REPO].merge_head.as_ref().unwrap().sha, main);
 }
 
 /// A pass opens a PR and dies before saving. GitHub refuses a second PR for
@@ -367,7 +367,7 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     w.commit(&three, "c.txt", "c\n");
     w.land(&three).unwrap();
     let st = w.state();
-    let mh = &st.merge_head.as_ref().unwrap().sha;
+    let mh = &st.repos[REPO].merge_head.as_ref().unwrap().sha;
     assert_eq!(w.file_at(mh, "README").as_deref(), Some("one\n"));
     assert!(w.file_at(mh, "c.txt").is_some());
 
@@ -379,7 +379,7 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     let st = w.state();
     assert!(st.sets[&fork].park.is_none());
     assert_eq!(
-        w.file_at(&st.merge_head.as_ref().unwrap().sha, "README").as_deref(),
+        w.file_at(&st.repos[REPO].merge_head.as_ref().unwrap().sha, "README").as_deref(),
         Some("one and two\n")
     );
 }

@@ -8,7 +8,7 @@ use choros_core::{git as core_git, registry};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::git::Git;
-use crate::state::{self, QueueConfig, QueueState, Scope, SetStatus};
+use crate::state::{self, QueueConfig, QueueState, RepoState, Scope, SetStatus};
 
 pub struct Queue {
     pub trunk: PathBuf,
@@ -19,7 +19,7 @@ pub struct Queue {
 /// Held for the duration of one short step; dropping it unlocks.
 pub struct QueueLock(#[allow(dead_code)] File);
 
-const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "merge-head"];
+const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "merge-head", crate::workspace::NO_QUEUE];
 
 pub fn queues_dir(trunk: &Path) -> PathBuf {
     trunk.join(QUEUES_REL)
@@ -52,9 +52,9 @@ impl Queue {
         })
     }
 
-    /// Refuse a name `create` would: one taken here, or one that can't be a
-    /// branch prefix on `repo`'s origin.
-    pub fn check_name(trunk: &Path, name: &str, repo: &str) -> Result<()> {
+    /// Refuse a name `create` would: one taken here, or not a branch name.
+    /// Each repo's origin is checked when the repo first lands.
+    pub fn check_name(trunk: &Path, name: &str) -> Result<()> {
         if name.is_empty()
             || RESERVED.contains(&name)
             || name.contains(['/', '\\', ' ', '~', '^', ':', '?', '*', '['])
@@ -70,34 +70,26 @@ impl Queue {
         if trunk.join(name).exists() {
             return Err(eyre!("{name:?} is already a workspace or branch-space here"));
         }
-        // A branch named exactly like the queue would make `<queue>/landing-N`
-        // impossible to create on origin (a ref cannot also be a directory).
-        let reg = registry::ensure_repo_exists(trunk, repo)?;
-        let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{name}")])?;
-        if !clash.is_empty() {
-            return Err(eyre!("origin already has a branch named {name:?}; pick another queue name"));
+        Ok(())
+    }
+
+    /// Refuse a second queue for a workspace or branch-space: its workspaces
+    /// would not know which to land into.
+    pub fn check_scope(trunk: &Path, scope: &Scope) -> Result<()> {
+        if *scope == Scope::Trunk {
+            return Ok(());
+        }
+        for other in list(trunk)? {
+            if Queue::open(trunk, &other)?.config.scope == *scope {
+                return Err(eyre!("queue {other} already takes the landings from there"));
+            }
         }
         Ok(())
     }
 
-    /// Create a queue with `config` and its sync clone.
     pub fn create(trunk: &Path, name: &str, config: QueueConfig) -> Result<Queue> {
-        let repo = &config.repo;
-        Self::check_name(trunk, name, repo)?;
-        check_branch(trunk, repo, &config.main)?;
-        let reg = registry::repo_path(trunk, repo);
-        let url = core_git::remote_get_url(&reg, "origin")?;
-        let sync = sync_dir(trunk, name, repo);
-        if !sync.exists() {
-            std::fs::create_dir_all(sync.parent().unwrap())?;
-            core_git::clone_with_reference(&reg, &url, &sync)?;
-        }
-        let git = Git::owned(&sync);
-        for (k, v) in [("rerere.enabled", "true"), ("rerere.autoUpdate", "true")] {
-            git.run(&["config", k, v])?;
-        }
-        ensure_notes(&git)?;
-
+        Self::check_name(trunk, name)?;
+        Self::check_scope(trunk, &config.scope)?;
         let dir = queues_dir(trunk).join(name);
         std::fs::create_dir_all(&dir)?;
         state::write_config(&dir.join("queue.toml"), &config)?;
@@ -106,8 +98,45 @@ impl Queue {
             name: name.to_string(),
             config,
         };
-        queue.write_state(&state::read_state(&queue.state_path())?)?;
+        queue.write_state(&queue.read_state()?)?;
         Ok(queue)
+    }
+
+    /// Ready the queue to take `repo`: its sync clone, and the branch its
+    /// work lands on. The caller holds the lock and saves `st`.
+    pub fn ensure_repo(&self, st: &mut QueueState, repo: &str) -> Result<()> {
+        if st.repos.contains_key(repo) {
+            return Ok(());
+        }
+        let reg = registry::ensure_repo_exists(&self.trunk, repo)?;
+        // A branch named exactly like the queue would make `<queue>/landing-N`
+        // impossible to create on origin (a ref cannot also be a directory).
+        let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{}", self.name)])?;
+        if !clash.is_empty() {
+            return Err(eyre!(
+                "{repo}'s origin has a branch named {:?}, so it can't land into queue {0}",
+                self.name
+            ));
+        }
+        let main = default_branch(&self.trunk, repo)?;
+        let sync = self.sync_dir(repo);
+        if !sync.exists() {
+            std::fs::create_dir_all(sync.parent().unwrap())?;
+            core_git::clone_with_reference(&reg, &core_git::remote_get_url(&reg, "origin")?, &sync)?;
+        }
+        let git = Git::owned(&sync);
+        for (k, v) in [("rerere.enabled", "true"), ("rerere.autoUpdate", "true")] {
+            git.run(&["config", k, v])?;
+        }
+        ensure_notes(&git)?;
+        st.repos.insert(
+            repo.to_string(),
+            RepoState {
+                main,
+                ..RepoState::default()
+            },
+        );
+        Ok(())
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -119,7 +148,7 @@ impl Queue {
     }
 
     pub fn read_state(&self) -> Result<QueueState> {
-        state::read_state(&self.state_path())
+        state::read_state(&self.state_path(), &self.config)
     }
 
     pub fn write_state(&self, state: &QueueState) -> Result<()> {
@@ -149,16 +178,12 @@ impl Queue {
             .open(self.dir().join("lock"))?)
     }
 
-    pub fn sync_dir(&self) -> PathBuf {
-        sync_dir(&self.trunk, &self.name, &self.config.repo)
+    pub fn sync_dir(&self, repo: &str) -> PathBuf {
+        sync_dir(&self.trunk, &self.name, repo)
     }
 
-    pub fn git(&self) -> Git {
-        Git::owned(&self.sync_dir())
-    }
-
-    pub fn origin_main(&self) -> String {
-        format!("refs/remotes/origin/{}", self.config.main)
+    pub fn git(&self, repo: &str) -> Git {
+        Git::owned(&self.sync_dir(repo))
     }
 
     pub fn landing_dir(&self, n: u32) -> PathBuf {
@@ -179,10 +204,10 @@ impl Queue {
         dir.exists().then_some(dir)
     }
 
-    /// Put the sync clone back in a known state: whatever a crash left in
+    /// Put a sync clone back in a known state: whatever a crash left in
     /// progress is abandoned, because every pass recomputes from state.json.
-    pub fn recover(&self) -> Result<()> {
-        let git = self.git();
+    pub fn recover(&self, repo: &str) -> Result<()> {
+        let git = self.git(repo);
         git.abort_in_progress()?;
         git.run(&["reset", "--quiet", "--hard"])?;
         // Excluded files (the notes) survive: clean without -x keeps them.
@@ -190,8 +215,8 @@ impl Queue {
         ensure_notes(&git)
     }
 
-    pub fn fetch(&self) -> Result<()> {
-        self.git().fetch("origin", &[])
+    pub fn fetch(&self, repo: &str) -> Result<()> {
+        self.git(repo).fetch("origin", &[])
     }
 }
 
@@ -269,16 +294,18 @@ pub fn default_branch(trunk: &Path, repo: &str) -> Result<String> {
         .ok_or_else(|| eyre!("origin of {repo} names no default branch"))
 }
 
-/// Refuse a branch `repo`'s origin doesn't have.
-pub fn check_branch(trunk: &Path, repo: &str, branch: &str) -> Result<()> {
-    let reg = registry::ensure_repo_exists(trunk, repo)?;
-    if Git::new(&reg)
-        .run(&["ls-remote", "origin", &format!("refs/heads/{branch}")])?
-        .is_empty()
-    {
-        return Err(eyre!("origin of {repo} has no branch {branch:?}"));
-    }
-    Ok(())
+/// Whether `repo`'s default branch has workflows that run `on: push`, as
+/// pushing every queued branch would set them off on each re-sync.
+pub fn push_workflows(trunk: &Path, repo: &str) -> bool {
+    let Ok(reg) = registry::ensure_repo_exists(trunk, repo) else { return false };
+    let git = Git::new(&reg);
+    let Ok(files) = git.run(&["ls-tree", "--name-only", "origin/HEAD", ".github/workflows/"]) else {
+        return false;
+    };
+    files.lines().any(|f| {
+        git.run(&["show", &format!("origin/HEAD:{f}")])
+            .is_ok_and(|body| body.lines().any(|l| l.trim_start().starts_with("push")))
+    })
 }
 
 pub fn sync_dir(trunk: &Path, queue: &str, repo: &str) -> PathBuf {

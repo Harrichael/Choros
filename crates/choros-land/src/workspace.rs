@@ -1,16 +1,21 @@
 //! A workspace's landing bookkeeping, in `.choros-landing.toml` beside its
-//! `.choros-meta.toml`: which queue each repo lands into, what each repo's
+//! `.choros-meta.toml`: which queue each repo was bound to, what each repo's
 //! branch builds on, and how far it has been landed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use choros_core::space;
 use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::state::write_atomic;
+use crate::queue::{self, Queue};
+use crate::state::{Scope, write_atomic};
 
 pub const LANDING_FILE: &str = ".choros-landing.toml";
+
+/// A repo bound to this instead of a queue lands straight to main.
+pub const NO_QUEUE: &str = "none";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkspaceLanding {
@@ -26,7 +31,8 @@ pub struct WorkspaceLanding {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepoLanding {
-    /// Absent: instant mode.
+    /// The queue it was bound to, or [`NO_QUEUE`]. Absent: whichever queue
+    /// is scoped to the workspace (see [`queue_for`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
     /// Everything up to here has been landed.
@@ -74,4 +80,42 @@ pub fn write(workspace: &Path, landing: &WorkspaceLanding) -> Result<()> {
         &workspace.join(LANDING_FILE),
         toml::to_string_pretty(landing)?.as_bytes(),
     )
+}
+
+/// The queue `repo` of workspace `ws` lands into: the one it was bound to;
+/// else the queue scoped to the workspace or to the nearest branch-space
+/// holding it; else none, for straight to main.
+pub fn queue_for(trunk: &Path, ws: &Path, repo: &str) -> Result<Option<String>> {
+    if let Some(q) = read(ws)?.repo.get(repo).and_then(|r| r.queue.clone()) {
+        return Ok((q != NO_QUEUE).then_some(q));
+    }
+    scoped_queue(trunk, ws)
+}
+
+/// The queue that takes `ws`'s landings unasked: one scoped to it, or to the
+/// nearest branch-space above it.
+pub fn scoped_queue(trunk: &Path, ws: &Path) -> Result<Option<String>> {
+    let rel = space::rel(trunk, ws)?;
+    for name in queue::list(trunk)? {
+        if Queue::open(trunk, &name)?.config.scope == Scope::Workspace(rel.clone()) {
+            return Ok(Some(name));
+        }
+    }
+    let space = ws.parent().and_then(space::find_space).unwrap_or_else(|| trunk.to_path_buf());
+    space_queue(trunk, &space::rel(trunk, &space)?)
+}
+
+/// The queue scoped to the branch-space at `space_rel`, or to the nearest
+/// one above it, that its workspaces land into unasked.
+pub fn space_queue(trunk: &Path, space_rel: &str) -> Result<Option<String>> {
+    let mut best: Option<(usize, String)> = None;
+    for name in queue::list(trunk)? {
+        if let Scope::Branch(b) = Queue::open(trunk, &name)?.config.scope
+            && Scope::Branch(b.clone()).admits_space(space_rel)
+            && best.as_ref().is_none_or(|(n, _)| b.len() > *n)
+        {
+            best = Some((b.len(), name));
+        }
+    }
+    Ok(best.map(|(_, name)| name))
 }

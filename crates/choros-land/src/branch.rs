@@ -1,11 +1,14 @@
 //! A branch-space's landing defaults, in `.choros-branch-config/landing.toml`:
-//! the queue each repo of a new workspace lands into, and instant mode's
-//! route to main. The nearest branch-space that sets something wins.
+//! the queue a new workspace lands into, per repo if need be, and instant
+//! mode's route to main. The nearest branch-space that sets something wins.
+//! A queue scoped to a branch-space needs none of this: its workspaces land
+//! into it anyway. This is for queues shared from further up.
 //!
 //! ```toml
+//! queue = "web"     # new workspaces land into the web queue
+//!
 //! [bind]
-//! ergon = "web"     # new workspaces land ergon into the web queue
-//! docs = "none"     # and docs straight to main, whatever a space above says
+//! docs = "none"     # but docs straight to main, whatever a space above says
 //!
 //! [instant]
 //! via = "pr"
@@ -26,7 +29,10 @@ pub const LANDING_FILE: &str = "landing.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BranchLanding {
-    /// Repo → queue, or `none` for straight to main.
+    /// The queue every repo lands into, or `none` for straight to main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
+    /// Repo → queue, or `none`, overriding `queue`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bind: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,7 +72,8 @@ fn branches_up(space: &Path) -> Result<Vec<PathBuf>> {
 /// `Some(None)` for straight to main, `None` when no branch-space says.
 pub fn default_binding(space: &Path, repo: &str) -> Result<Option<Option<String>>> {
     for b in branches_up(space)? {
-        if let Some(q) = read(&b)?.bind.get(repo) {
+        let landing = read(&b)?;
+        if let Some(q) = landing.bind.get(repo).or(landing.queue.as_ref()) {
             return Ok(Some((q != "none").then(|| q.clone())));
         }
     }
@@ -82,24 +89,28 @@ pub fn default_instant(space: &Path) -> Result<Option<Via>> {
     Ok(None)
 }
 
-/// Make new workspaces in `branch` land `repo` into `queue` (`None`: straight
-/// to main). Existing workspaces keep their bindings.
-pub fn set_binding(branch: &Path, repo: &str, queue: Option<&str>) -> Result<()> {
+/// Make new workspaces in `branch` land `repo` (every repo, without one)
+/// into `queue` (`None`: straight to main). Existing workspaces keep their
+/// bindings.
+pub fn set_binding(branch: &Path, repo: Option<&str>, queue: Option<&str>) -> Result<()> {
     if !space::is_branch_space(branch) {
         return Err(eyre!("{branch:?} is not a branch-space"));
     }
     let trunk = space::find_trunk(branch).ok_or_else(|| eyre!("{branch:?} is not under a choros trunk"))?;
     if let Some(name) = queue {
         let q = Queue::open(&trunk, name)?;
-        if q.config.repo != repo {
-            return Err(eyre!("queue {name} lands {}, not {repo}", q.config.repo));
-        }
         if !q.config.scope.admits_space(&space::rel(&trunk, branch)?) {
             return Err(eyre!("queue {name} doesn't take landings from here ({:?})", q.config.scope));
         }
     }
     let mut landing = read(branch)?;
-    landing.bind.insert(repo.to_string(), queue.unwrap_or("none").to_string());
+    let queue = queue.unwrap_or("none").to_string();
+    match repo {
+        Some(repo) => {
+            landing.bind.insert(repo.to_string(), queue);
+        }
+        None => landing.queue = Some(queue),
+    }
     write(branch, &landing)
 }
 
@@ -119,7 +130,7 @@ mod tests {
         let auth = space::create_branch(&epic, "auth").unwrap();
         std::fs::write(
             epic.join(BRANCH_CONFIG_DIR).join(LANDING_FILE),
-            "[bind]\nergon = \"web\"\ndocs = \"web-docs\"\n[instant]\nvia = \"pr\"\n",
+            "queue = \"web\"\n[bind]\ndocs = \"web-docs\"\n[instant]\nvia = \"pr\"\n",
         )
         .unwrap();
         std::fs::write(auth.join(BRANCH_CONFIG_DIR).join(LANDING_FILE), "[bind]\ndocs = \"none\"\n").unwrap();

@@ -6,6 +6,7 @@
 mod branches;
 mod diffbase;
 mod regressions;
+mod repos;
 mod stories;
 
 use std::collections::BTreeMap;
@@ -55,6 +56,8 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 
 #[derive(Default)]
 struct FakePr {
+    /// The bare repo the PR was opened against.
+    origin: PathBuf,
     head: String,
     title: String,
     body: String,
@@ -63,9 +66,9 @@ struct FakePr {
 }
 
 /// GitHub, minus the network: PRs live in memory, and merging one really
-/// merges its branch into origin's main.
+/// merges its branch into its origin's main. PR numbers are shared by every
+/// repo, which keeps them apart in tests.
 pub struct FakeForge {
-    origin: PathBuf,
     prs: Mutex<BTreeMap<u64, FakePr>>,
     pub require_up_to_date: Mutex<bool>,
 }
@@ -88,10 +91,13 @@ impl FakeForge {
 
     /// Press the merge button.
     pub fn merge(&self, number: u64, method: MergeMethod) {
-        let head = self.prs.lock().unwrap()[&number].head.clone();
+        let (head, origin) = {
+            let prs = self.prs.lock().unwrap();
+            (prs[&number].head.clone(), prs[&number].origin.clone())
+        };
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path().join("w");
-        git(tmp.path(), &["clone", "--quiet", self.origin.to_str().unwrap(), "w"]);
+        git(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), "w"]);
         match method {
             MergeMethod::Squash => {
                 git(&work, &["merge", "--squash", &format!("origin/{head}")]);
@@ -143,6 +149,7 @@ impl Forge for FakeForge {
         prs.insert(
             number,
             FakePr {
+                origin: PathBuf::from(git(repo, &["remote", "get-url", "origin"])),
                 head: req.head.to_string(),
                 title: req.title.to_string(),
                 body: req.body.to_string(),
@@ -176,7 +183,7 @@ impl Forge for FakeForge {
         // As GitHub does: an open PR's head is kept at refs/pull/N/head.
         if state == PrState::Open {
             git(
-                &self.origin,
+                &pr.origin,
                 &["update-ref", &format!("refs/pull/{number}/head"), &format!("refs/heads/{}", pr.head)],
             );
         }
@@ -273,11 +280,10 @@ impl World {
         let registry = trunk.join(".choros-config/registry");
         std::fs::create_dir_all(&registry).unwrap();
         git(&registry, &["clone", "--quiet", origin.to_str().unwrap(), REPO]);
-        Queue::create(&trunk, QUEUE, QueueConfig::new(REPO, "main", Scope::Trunk)).unwrap();
+        Queue::create(&trunk, QUEUE, QueueConfig::new(Scope::Trunk)).unwrap();
         World {
             _tmp: tmp,
             forge: FakeForge {
-                origin: origin.clone(),
                 prs: Mutex::new(BTreeMap::new()),
                 require_up_to_date: Mutex::new(false),
             },
@@ -303,6 +309,25 @@ impl World {
         self.queue().read_state().unwrap()
     }
 
+    /// Another registry repo, with an origin of its own holding one commit.
+    pub fn add_repo(&self, name: &str) -> PathBuf {
+        let base = self.trunk.parent().unwrap();
+        let origin = base.join(format!("{name}.git"));
+        git(base, &["init", "--quiet", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        let seed = tempfile::tempdir().unwrap();
+        git(seed.path(), &["clone", "--quiet", origin.to_str().unwrap(), "s"]);
+        let s = seed.path().join("s");
+        std::fs::write(s.join("README"), format!("{name}\n")).unwrap();
+        git(&s, &["add", "."]);
+        git(&s, &["commit", "--quiet", "-m", "init"]);
+        git(&s, &["push", "--quiet", "origin", "main"]);
+        git(
+            &self.trunk.join(".choros-config/registry"),
+            &["clone", "--quiet", origin.to_str().unwrap(), name],
+        );
+        origin
+    }
+
     /// A workspace with `app` bound to the queue: its branch starts on the
     /// merge head.
     pub fn workspace(&self, name: &str) -> PathBuf {
@@ -313,7 +338,11 @@ impl World {
     }
 
     pub fn commit(&self, ws: &Path, file: &str, content: &str) -> String {
-        let repo = ws.join(REPO);
+        self.commit_in(ws, REPO, file, content)
+    }
+
+    pub fn commit_in(&self, ws: &Path, repo: &str, file: &str, content: &str) -> String {
+        let repo = ws.join(repo);
         std::fs::write(repo.join(file), content).unwrap();
         git(&repo, &["add", file]);
         git(&repo, &["commit", "--quiet", "-m", &format!("write {file}")]);
@@ -356,11 +385,15 @@ impl World {
         crate::admin::sync(&self.env(), &self.queue(), Some(handler)).unwrap()
     }
 
-    /// A file's content at a commit, read from the sync clone.
+    /// A file's content at a commit, read from `app`'s sync clone.
     pub fn file_at(&self, rev: &str, file: &str) -> Option<String> {
+        self.file_at_in(REPO, rev, file)
+    }
+
+    pub fn file_at_in(&self, repo: &str, rev: &str, file: &str) -> Option<String> {
         let out = Command::new("git")
             .arg("-C")
-            .arg(self.queue().sync_dir())
+            .arg(self.queue().sync_dir(repo))
             .args(["show", &format!("{rev}:{file}")])
             .output()
             .unwrap();
@@ -386,7 +419,7 @@ impl World {
     pub fn own_commits(&self, n: u32) -> usize {
         let st = self.state();
         let set = &st.sets[&n];
-        git(&self.queue().sync_dir(), &["rev-list", "--count", &format!("{}..{}", set.base_sha, set.tip)])
+        git(&self.queue().sync_dir(REPO), &["rev-list", "--count", &format!("{}..{}", set.base_sha, set.tip)])
             .parse()
             .unwrap()
     }

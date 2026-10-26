@@ -37,8 +37,9 @@ pub fn describe(q: &Queue, s: &LandingSet) -> String {
     let from = space::rel(&q.trunk, &s.source.workspace).unwrap_or_else(|_| "?".into());
     let title = s.title.clone().unwrap_or_default();
     format!(
-        "{:<18} {:<14} after [{}]  from {from}  {title}",
+        "{:<18} {:<10} {:<14} after [{}]  from {from}  {title}",
         s.branch(&q.name),
+        s.repo(),
         state,
         deps.join(",")
     )
@@ -186,7 +187,10 @@ fn browse(q: &Queue, st: &QueueState, open: &[u32], message: &str) -> Result<Act
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("choros queue ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{} ({})", q.name, q.config.repo), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{} ({})", q.name, st.repos.keys().cloned().collect::<Vec<_>>().join(", ")),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ])),
                 rows[0],
             );

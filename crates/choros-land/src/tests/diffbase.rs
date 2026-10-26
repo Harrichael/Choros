@@ -1,6 +1,12 @@
 use super::*;
 use crate::diffbase;
 use crate::forge::PrState;
+use crate::state::BuiltDiffbase;
+
+/// `repo`'s built diffbase in `st`, if it has one.
+fn diffbase_of(st: &QueueState, repo: &str) -> Option<BuiltDiffbase> {
+    st.repos.get(repo).and_then(|r| r.diffbase.clone())
+}
 
 impl World {
     /// A PR from outside the queue: a branch on origin writing `file`.
@@ -14,7 +20,7 @@ impl World {
             draft: false,
         };
         self.forge
-            .create_pr(&self.queue().sync_dir(), &req)
+            .create_pr(&self.trunk.join(".choros-config/registry").join(REPO), &req)
             .unwrap()
             .number
     }
@@ -68,7 +74,7 @@ impl World {
 fn work_built_on_a_pr_in_review_goes_to_main_after_it() {
     let w = World::new();
     let lib = w.outside_pr("lib", "lib.txt", "lib\n");
-    diffbase::add(&w.env(), &w.queue(), &format!("#{lib}")).unwrap();
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{lib}")).unwrap();
     let ws = w.workspace("ws");
     assert_eq!(
         std::fs::read_to_string(ws.join(REPO).join("lib.txt")).unwrap(),
@@ -90,7 +96,7 @@ fn work_built_on_a_pr_in_review_goes_to_main_after_it() {
     assert_eq!(report.opened, [1]);
     assert_eq!(st.sets[&1].base_sha, w.origin_main());
     assert_eq!(w.own_commits(1), 1, "only the set's commit, not the PR's");
-    assert!(st.diffbase.built.is_none(), "back on main");
+    assert!(diffbase_of(&st, REPO).is_none(), "back on main");
 }
 
 /// Two listed PRs that edit the same line park the whole queue, naming the
@@ -101,8 +107,8 @@ fn listed_prs_that_conflict_park_the_queue_until_resolved() {
     let w = World::new();
     let a = w.outside_pr("a", "x.txt", "a\n");
     let b = w.outside_pr("b", "x.txt", "b\n");
-    diffbase::add(&w.env(), &w.queue(), &format!("#{a}")).unwrap();
-    let report = diffbase::add(&w.env(), &w.queue(), &format!("#{b}")).unwrap();
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{a}")).unwrap();
+    let report = diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{b}")).unwrap();
     assert!(report.diffbase_parked);
     let park = w.state().diffbase.park.unwrap();
     assert_eq!(park.pr, format!("{REPO}#{b}"));
@@ -119,7 +125,7 @@ fn listed_prs_that_conflict_park_the_queue_until_resolved() {
     w.resolve(&mut handler);
     let st = w.state();
     assert!(st.diffbase.park.is_none());
-    let built = st.diffbase.built.unwrap();
+    let built = diffbase_of(&st, REPO).unwrap();
     assert_eq!(w.file_at(&built.sha, "x.txt").as_deref(), Some("a and b\n"));
 
     w.push_branch("b", "y.txt", "more b\n");
@@ -128,7 +134,7 @@ fn listed_prs_that_conflict_park_the_queue_until_resolved() {
         !report.diffbase_parked,
         "the recorded resolution is replayed"
     );
-    let rebuilt = w.state().diffbase.built.unwrap();
+    let rebuilt = diffbase_of(&w.state(), REPO).unwrap();
     assert_ne!(rebuilt.sha, built.sha);
     assert_eq!(
         w.file_at(&rebuilt.sha, "x.txt").as_deref(),
@@ -140,9 +146,9 @@ fn listed_prs_that_conflict_park_the_queue_until_resolved() {
     );
 }
 
-/// A PR in another repo can't be built on, only waited for: the queue's work
-/// stays on main but opens no PR until it merges. A listed PR closed without
-/// merging parks the queue until it is reopened.
+/// A PR in another repo is built on in that repo only: work in this one
+/// stays on main, but opens no PR until it merges. A listed PR closed
+/// without merging parks the queue until it is reopened.
 #[test]
 fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
     let w = World::new();
@@ -159,9 +165,11 @@ fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
     w.land(&ws).unwrap();
     let st = w.state();
     assert!(
-        st.diffbase.built.is_none(),
-        "nothing of another repo's goes in the base"
+        diffbase_of(&st, REPO).is_none(),
+        "nothing of another repo's goes in this one's base"
     );
+    let lib = diffbase_of(&st, "lib").unwrap();
+    assert_eq!(w.file_at_in("lib", &lib.sha, "theirs.txt").as_deref(), Some("theirs\n"));
     assert_eq!(st.sets[&1].base_sha, w.origin_main());
     assert!(st.sets[&1].pr.is_none(), "held until lib's PR merges");
 
@@ -190,7 +198,7 @@ fn the_diffbase_is_edited_in_place_and_checked() {
     std::fs::write(&path, format!("# mine, keep me\n{text}")).unwrap();
     let pr = w.outside_pr("p", "p.txt", "p\n");
 
-    diffbase::add(&w.env(), &w.queue(), &format!("#{pr}")).unwrap();
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{pr}")).unwrap();
     assert_eq!(w.queue().config.diffbase, [format!("{REPO}#{pr}")]);
     assert!(
         std::fs::read_to_string(&path)
@@ -205,12 +213,12 @@ fn the_diffbase_is_edited_in_place_and_checked() {
         "not in the registry"
     );
 
-    diffbase::remove(&w.env(), &w.queue(), &format!("#{pr}")).unwrap();
+    diffbase::remove(&w.env(), &w.queue(), &format!("{REPO}#{pr}")).unwrap();
     assert!(w.queue().config.diffbase.is_empty());
-    assert!(w.state().diffbase.built.is_none());
+    assert!(diffbase_of(&w.state(), REPO).is_none());
 
     w.forge.merge(pr, MergeMethod::Merge);
-    let merged = diffbase::add(&w.env(), &w.queue(), &format!("#{pr}")).unwrap_err();
+    let merged = diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{pr}")).unwrap_err();
     assert!(merged.to_string().contains("already merged"), "{merged}");
 }
 
@@ -226,14 +234,14 @@ fn a_set_merging_under_a_diffbase_moves_it_to_the_new_main() {
     w.commit(&ws, "b.txt", "b\n");
     w.land(&ws).unwrap();
     let lib = w.outside_pr("lib", "lib.txt", "lib\n");
-    diffbase::add(&w.env(), &w.queue(), &format!("#{lib}")).unwrap();
-    let before = w.state().diffbase.built.unwrap();
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{lib}")).unwrap();
+    let before = diffbase_of(&w.state(), REPO).unwrap();
 
     let one = w.state().sets[&1].pr.as_ref().unwrap().number;
     w.forge.merge(one, MergeMethod::Squash);
     w.pass();
     let st = w.state();
-    let built = st.diffbase.built.unwrap();
+    let built = diffbase_of(&st, REPO).unwrap();
     assert_ne!(built.main, before.main);
     assert_eq!(built.main, w.origin_main());
     let tip = &st.sets[&2].tip;

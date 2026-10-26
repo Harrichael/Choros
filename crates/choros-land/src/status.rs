@@ -16,7 +16,8 @@ use crate::workspace;
 pub struct QueueStatus {
     pub trunk: PathBuf,
     pub name: String,
-    pub repo: String,
+    /// The repos something has landed into.
+    pub repos: Vec<String>,
     pub sets: Vec<SetLine>,
     /// Workspaces (and repos) whose base the merge head has moved past.
     pub needs_sync: Vec<(PathBuf, String)>,
@@ -29,12 +30,11 @@ pub struct DiffbaseLine {
     pub pr: String,
     /// `open`, `merged`, `closed`, or `unseen` before a pass has asked.
     pub state: &'static str,
-    /// In another repo: waited for, not built on.
-    pub elsewhere: bool,
 }
 
 pub struct SetLine {
     pub n: u32,
+    pub repo: String,
     pub branch: String,
     pub state: &'static str,
     pub deps: Vec<String>,
@@ -46,7 +46,7 @@ pub struct SetLine {
 }
 
 /// The queues a command run at `cwd` is about. Inside a workspace: the ones
-/// it lands into. In a branch-space: those scoped to it or below it, and those
+/// its repos land into. In a branch-space: those scoped to it or below it, and those
 /// its workspaces land into. At the trunk, or with `all`: every queue there.
 /// Outside any trunk: every queue of every registered trunk.
 pub fn visible_queues(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<(PathBuf, String)>> {
@@ -63,9 +63,8 @@ pub fn visible_queues(cwd: &Path, config_home: Option<&Path>, all: bool) -> Resu
     let trunk = space::find_trunk(&space).unwrap_or_else(|| space.clone());
     match core::find_workspace(cwd) {
         Ok((_, ws)) if !all && ws.starts_with(&space) => {
-            let wl = workspace::read(&ws)?;
-            targets.extend(wl.repo.values().filter_map(|rl| rl.queue.clone()).map(|q| (trunk.clone(), q)));
-            if let Some(l) = wl.landing {
+            targets.extend(queues_of(&trunk, &ws)?.into_iter().map(|q| (trunk.clone(), q)));
+            if let Some(l) = workspace::read(&ws)?.landing {
                 targets.push((trunk.clone(), l.queue));
             }
         }
@@ -85,17 +84,22 @@ pub fn visible_queues(cwd: &Path, config_home: Option<&Path>, all: bool) -> Resu
                 }
             }
             for ws in space::tree(&space)?.all_workspaces() {
-                for rl in workspace::read(&ws.path)?.repo.values() {
-                    if let Some(q) = &rl.queue {
-                        targets.push((trunk.clone(), q.clone()));
-                    }
-                }
+                targets.extend(queues_of(&trunk, &ws.path)?.into_iter().map(|q| (trunk.clone(), q)));
             }
         }
     }
     targets.sort();
     targets.dedup();
     Ok(targets)
+}
+
+/// The queues `ws`'s repos land into.
+fn queues_of(trunk: &Path, ws: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for repo in core::read_meta(ws)?.repos {
+        out.extend(workspace::queue_for(trunk, ws, &repo)?);
+    }
+    Ok(out)
 }
 
 pub fn report(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<QueueStatus>> {
@@ -120,12 +124,13 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             SetStatus::Queued if set.pr.is_some() => "front",
             SetStatus::Queued => "queued",
         };
-        let landing = q.landing_dir(*n).join(&q.config.repo);
+        let landing = q.landing_dir(*n).join(set.repo());
         let landing_dirty = set.is_open()
             && landing.exists()
             && !Git::new(&landing).is_clean_tracked().unwrap_or(true);
         sets.push(SetLine {
             n: *n,
+            repo: set.repo().to_string(),
             branch: set.branch(name),
             state,
             deps: set
@@ -143,11 +148,15 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             landing_dirty,
         });
     }
-    let current = st.merge_head.as_ref().map(|m| m.composition.key());
     let mut needs_sync = Vec::new();
     for ws in space::tree(trunk)?.all_workspaces() {
-        for (repo, rl) in workspace::read(&ws.path)?.repo {
-            if rl.queue.as_deref() == Some(name) && rl.composition != current {
+        let wl = workspace::read(&ws.path)?;
+        for repo in core::read_meta(&ws.path)?.repos {
+            if workspace::queue_for(trunk, &ws.path, &repo)?.as_deref() != Some(name) {
+                continue;
+            }
+            let current = merge_head_key(&st, &repo);
+            if wl.repo.get(&repo).and_then(|rl| rl.composition.clone()) != current {
                 needs_sync.push((ws.path.clone(), repo));
             }
         }
@@ -163,14 +172,13 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
                 Some(PrState::Closed) => "closed",
                 None => "unseen",
             },
-            elsewhere: pr.repo != q.config.repo,
             pr: pr.to_string(),
         })
         .collect();
     Ok(QueueStatus {
         trunk: trunk.to_path_buf(),
         name: name.to_string(),
-        repo: q.config.repo.clone(),
+        repos: st.repos.keys().cloned().collect(),
         sets,
         needs_sync,
         diffbase,
@@ -185,13 +193,13 @@ pub fn prompt_token(cwd: &Path) -> String {
     let Ok((trunk, ws)) = core::find_workspace(cwd) else {
         return String::new();
     };
-    let Ok(wl) = workspace::read(&ws) else {
+    let (Ok(wl), Ok(meta)) = (workspace::read(&ws), core::read_meta(&ws)) else {
         return String::new();
     };
     let mut sync = false;
-    for rl in wl.repo.values() {
-        let Some(name) = &rl.queue else { continue };
-        let Ok(st) = crate::state::read_state(&queue::queues_dir(&trunk).join(name).join("state.json")) else {
+    for repo in &meta.repos {
+        let Ok(Some(name)) = workspace::queue_for(&trunk, &ws, repo) else { continue };
+        let Ok(st) = Queue::open(&trunk, &name).and_then(|q| q.read_state()) else {
             continue;
         };
         if st.diffbase.park.is_some()
@@ -202,9 +210,14 @@ pub fn prompt_token(cwd: &Path) -> String {
         {
             return "!resolve".into();
         }
-        if st.merge_head.as_ref().map(|m| m.composition.key()) != rl.composition {
+        if merge_head_key(&st, repo) != wl.repo.get(repo).and_then(|rl| rl.composition.clone()) {
             sync = true;
         }
     }
     if sync { "⇣sync".into() } else { String::new() }
+}
+
+/// What `repo`'s merge head holds, as workspaces record it.
+fn merge_head_key(st: &crate::state::QueueState, repo: &str) -> Option<String> {
+    st.repos.get(repo)?.merge_head.as_ref().map(|m| m.composition.key())
 }

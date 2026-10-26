@@ -2,17 +2,17 @@ use super::*;
 use crate::state::SetStatus;
 use choros_core::space;
 
-/// A queue scoped to a branch-space takes landings only from workspaces in
-/// it, is what new workspaces there bind to by default, is all `status` shows
-/// from inside it, and goes to the archive once its branch-space has been
-/// archived and its last set has merged.
+/// A queue scoped to a branch-space takes every workspace in it without
+/// being bound, and no other; it is the only queue a branch-space can have,
+/// all `status` shows from inside it, and it goes to the archive once its
+/// branch-space has been archived and its last set has merged.
 #[test]
 fn a_branch_space_queue_lives_and_retires_with_its_space() {
     let w = World::new();
     let epic = space::create_branch(&w.trunk, "epic-x").unwrap();
-    Queue::create(&w.trunk, "epicq", QueueConfig::new(REPO, "main", Scope::Branch("epic-x".into()))).unwrap();
-    crate::branch::set_binding(&epic, REPO, Some("epicq")).unwrap();
-    assert_eq!(crate::branch::default_binding(&epic, REPO).unwrap(), Some(Some("epicq".into())));
+    let scope = Scope::Branch("epic-x".into());
+    Queue::create(&w.trunk, "epicq", QueueConfig::new(scope.clone())).unwrap();
+    assert!(Queue::create(&w.trunk, "second", QueueConfig::new(scope)).is_err());
 
     let outside = w.workspace("outside");
     assert!(crate::land::bind(&w.env(), &outside, REPO, Some("epicq")).is_err());
@@ -20,7 +20,7 @@ fn a_branch_space_queue_lives_and_retires_with_its_space() {
     let info = choros_core::choros::create(&epic, "login", &[REPO.to_string()], &()).unwrap();
     assert_eq!(info.meta.branch(), "epic-x/login");
     let login = info.path;
-    crate::land::bind(&w.env(), &login, REPO, Some("epicq")).unwrap();
+    assert_eq!(crate::workspace::queue_for(&w.trunk, &login, REPO).unwrap().as_deref(), Some("epicq"));
 
     let seen = |cwd: &Path| -> Vec<String> {
         crate::status::visible_queues(cwd, None, false).unwrap().into_iter().map(|(_, q)| q).collect()

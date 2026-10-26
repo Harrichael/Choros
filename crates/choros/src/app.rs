@@ -23,11 +23,15 @@ pub struct App {
     pub name: String,
     pub focus: NewFocus,
     pub repo_selected: Vec<bool>,
-    /// Per registry repo: the landing queues for it that take workspaces from
-    /// this space, and which one the new workspace lands into (0 = none, i.e.
-    /// instant mode; preset from the branch-space's default).
+    /// Per registry repo: the landing queues that take workspaces from this
+    /// space, and which one the new workspace lands into (0 = none, i.e.
+    /// instant mode; preset from the branch-space's default, else the queue
+    /// scoped to it).
     pub queues: Vec<Vec<String>>,
     pub queue_choice: Vec<usize>,
+    /// The queue scoped to this space, which a repo lands into unless it is
+    /// bound otherwise.
+    scoped: Option<String>,
     pub repo_idx: usize,
     pub error: Option<String>,
     /// The latest progress line while a create runs; `None` when idle.
@@ -56,18 +60,22 @@ impl App {
             Err(e) => (Vec::new(), Some(format!("registry scan failed: {e}"))),
         };
         let rel = space::rel(&trunk, &space).unwrap_or_default();
-        let queues: Vec<Vec<String>> = registry.iter().map(|r| queues_for(&trunk, &rel, r)).collect();
+        let admitted = queues_for(&trunk, &rel);
+        let queues: Vec<Vec<String>> = registry.iter().map(|_| admitted.clone()).collect();
+        let scoped = choros_land::workspace::space_queue(&trunk, &rel).ok().flatten();
+        let position = |q: &str| admitted.iter().position(|x| x == q).map_or(0, |i| i + 1);
         let queue_choice = registry
             .iter()
-            .zip(&queues)
-            .map(|(repo, qs)| match choros_land::branch::default_binding(&space, repo) {
-                Ok(Some(Some(q))) => qs.iter().position(|x| *x == q).map_or(0, |i| i + 1),
-                _ => 0,
+            .map(|repo| match choros_land::branch::default_binding(&space, repo) {
+                Ok(Some(Some(q))) => position(&q),
+                Ok(Some(None)) => 0,
+                _ => scoped.as_deref().map_or(0, position),
             })
             .collect();
         Self {
             queue_choice,
             queues,
+            scoped,
             space,
             repo_selected: vec![false; registry.len()],
             registry,
@@ -83,13 +91,12 @@ impl App {
     }
 }
 
-fn queues_for(trunk: &std::path::Path, space_rel: &str, repo: &str) -> Vec<String> {
+fn queues_for(trunk: &std::path::Path, space_rel: &str) -> Vec<String> {
     choros_land::queue::list(trunk)
         .unwrap_or_default()
         .into_iter()
         .filter(|name| {
-            choros_land::queue::Queue::open(trunk, name)
-                .is_ok_and(|q| q.config.repo == repo && q.config.scope.admits_space(space_rel))
+            choros_land::queue::Queue::open(trunk, name).is_ok_and(|q| q.config.scope.admits_space(space_rel))
         })
         .collect()
 }
@@ -215,9 +222,13 @@ fn submit(app: &mut App) {
         .filter(|(s, _)| **s)
         .map(|(_, r)| r.clone())
         .collect();
-    let bindings: Vec<(String, String)> = (0..app.registry.len())
+    // Straight to main where a queue is scoped here has to be said outright.
+    let bindings: Vec<(String, Option<String>)> = (0..app.registry.len())
         .filter(|i| app.repo_selected[*i])
-        .filter_map(|i| app.queue_of(i).map(|q| (app.registry[i].clone(), q.to_string())))
+        .filter_map(|i| match app.queue_of(i) {
+            Some(q) => Some((app.registry[i].clone(), Some(q.to_string()))),
+            None => app.scoped.as_ref().map(|_| (app.registry[i].clone(), None)),
+        })
         .collect();
     if repos.is_empty() {
         app.error = Some("select at least one repo".into());
@@ -234,8 +245,10 @@ fn submit(app: &mut App) {
         let progress = ChannelProgress(tx.clone());
         let result = choros::create(&space, &name, &repos, &progress).and_then(|info| {
             for (repo, queue) in &bindings {
-                progress.status(format!("{repo} lands into {queue}; moving it onto the merge head…"));
-                crate::land_cli::bind_new(&info.path, repo, queue)?;
+                if let Some(queue) = queue {
+                    progress.status(format!("{repo} lands into {queue}; moving it onto the merge head…"));
+                }
+                crate::land_cli::bind_new(&info.path, repo, queue.as_deref())?;
             }
             Ok(info)
         });

@@ -1,16 +1,25 @@
 //! Questions about the dependency graph that need no git: what is live, what
 //! is a leaf, what is at the front.
+//!
+//! A set builds on its dependencies in the same repo: they are its base.
+//! One in another repo can't be built on, only waited for before its PR
+//! opens. "Ancestors" and "leaves" follow the first kind only.
 
 use std::collections::BTreeSet;
 
 use crate::state::{Dep, LandingSet, QueueState, SetStatus};
 
-/// Same-queue dependencies of a set.
+/// Every same-queue dependency of a set, whatever its repo.
 pub fn set_deps(set: &LandingSet) -> impl Iterator<Item = u32> + '_ {
     set.deps.iter().filter_map(|d| match d {
         Dep::Set(n) => Some(*n),
         Dep::Cross { .. } => None,
     })
+}
+
+/// The dependencies a set builds on: those in its own repo.
+pub fn base_deps<'a>(state: &'a QueueState, set: &'a LandingSet) -> impl Iterator<Item = u32> + 'a {
+    set_deps(set).filter(|d| state.sets.get(d).is_some_and(|s| s.repo() == set.repo()))
 }
 
 /// A queued set is blocked when it, or anything it builds on, is parked or
@@ -28,7 +37,7 @@ pub fn blocked(state: &QueueState, n: u32) -> bool {
         if set.status == SetStatus::Closed || set.park.is_some() {
             return true;
         }
-        stack.extend(set_deps(set).filter(|d| {
+        stack.extend(base_deps(state, set).filter(|d| {
             state
                 .sets
                 .get(d)
@@ -55,7 +64,7 @@ pub fn topo(state: &QueueState) -> Vec<u32> {
             return;
         }
         if let Some(set) = state.sets.get(&n) {
-            for d in set_deps(set) {
+            for d in base_deps(state, set) {
                 visit(state, d, done, out);
             }
             if set.is_open() {
@@ -84,15 +93,25 @@ pub fn leaves(state: &QueueState, members: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-/// Every same-queue set `n` builds on, transitively, excluding `n`.
+/// Every set `n` builds on, transitively, excluding `n`.
 pub fn ancestors(state: &QueueState, n: u32) -> BTreeSet<u32> {
+    reachable(state, n, |set| base_deps(state, set).collect())
+}
+
+/// Every set `n` waits for, built on or not, transitively, excluding `n`.
+fn ancestors_any_repo(state: &QueueState, n: u32) -> BTreeSet<u32> {
+    reachable(state, n, |set| set_deps(set).collect())
+}
+
+fn reachable(state: &QueueState, n: u32, next: impl Fn(&LandingSet) -> Vec<u32>) -> BTreeSet<u32> {
     let mut out = BTreeSet::new();
-    let mut stack: Vec<u32> = state.sets.get(&n).map(|s| set_deps(s).collect()).unwrap_or_default();
+    let mut stack: Vec<u32> = state.sets.get(&n).map(&next).unwrap_or_default();
     while let Some(m) = stack.pop() {
         if out.insert(m)
-            && let Some(set) = state.sets.get(&m) {
-                stack.extend(set_deps(set));
-            }
+            && let Some(set) = state.sets.get(&m)
+        {
+            stack.extend(next(set));
+        }
     }
     out
 }
@@ -116,9 +135,10 @@ pub fn dependents(state: &QueueState, n: u32) -> BTreeSet<u32> {
         .collect()
 }
 
-/// A dependency cycle would make the queue unbuildable; edits must keep it acyclic.
+/// A dependency cycle, across repos or not, would leave its sets waiting on
+/// each other forever; edits must keep the graph acyclic.
 pub fn has_cycle(state: &QueueState) -> bool {
-    state.sets.keys().any(|n| ancestors(state, *n).contains(n))
+    state.sets.keys().any(|n| ancestors_any_repo(state, *n).contains(n))
 }
 
 /// Queued, unblocked sets whose dependencies have all merged. `cross_merged`
@@ -135,15 +155,15 @@ pub fn front(state: &QueueState, cross_merged: &dyn Fn(&str, u32) -> bool) -> Ve
         .collect()
 }
 
-/// Unmerged same-queue dependencies of `n` that are still queued.
+/// Dependencies `n` builds on that are still queued.
 pub fn unmerged_deps(state: &QueueState, n: u32) -> Vec<u32> {
-    set_deps(&state.sets[&n])
+    base_deps(state, &state.sets[&n])
         .filter(|d| state.sets.get(d).is_some_and(|s| s.is_open()))
         .collect()
 }
 
 pub fn merged_deps(state: &QueueState, n: u32) -> Vec<u32> {
-    set_deps(&state.sets[&n])
+    base_deps(state, &state.sets[&n])
         .filter(|d| state.sets.get(d).is_some_and(|s| s.status == SetStatus::Merged))
         .collect()
 }
@@ -165,4 +185,9 @@ pub fn splice_out(state: &mut QueueState, n: u32) {
             set.deps.sort();
         }
     }
+}
+
+/// The live sets of one repo, in dependency order.
+pub fn live_in(state: &QueueState, repo: &str) -> Vec<u32> {
+    live(state).into_iter().filter(|n| state.sets[n].repo() == repo).collect()
 }
