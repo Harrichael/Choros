@@ -60,6 +60,7 @@ private_sets = true                 # push queued (not yet front) landing branch
 draft = true                        # open front PRs as drafts
 [agent]
 rotate_after = 10                   # resync-agent runs before its session is rotated
+diffbase = ["Ordo#41", "#43", "Lib#12"]  # PRs to build on before they merge (see Diffbase); #N is this repo
 ```
 
 Pushing private branches runs any `on: push` CI on every re-sync; `choros
@@ -168,11 +169,41 @@ the workspace (conflicts stop the land as in a normal land), then push to main
 or open a PR and merge it with the first method the repo allows. No landing
 folder.
 
+## Diffbase
+
+A queue normally builds on main. Its diffbase lists PRs it builds on before
+they reach main, as `repo#N` (`#N` for the queue's own repo): any PRs, landed
+through Choros or not. `choros queue base add|rm NAME REF` edits the list in
+`queue.toml` (only that line, under the queue's lock) after checking the PR is
+open and its repo is in the registry; `choros queue base NAME` and `choros
+status` show it.
+
+- **Built on.** The queue's own repo's open listed PRs are merged onto main, one
+  at a time in list order, into the *diffbase*. It replaces main as the start
+  of every set's base, of the merge head, and so of every workspace synced or
+  bound to the queue. It is rebuilt only when its inputs change (a PR's head
+  moves, one merges); otherwise it keeps the main it was built on, as a set's
+  base does.
+- **Waited for.** A PR in another repo can't be part of this repo's code, so it
+  only holds the queue back, like a cross-queue dependency.
+- **Nothing opens early.** Front sets open their PRs only once every listed PR
+  has merged (asked of GitHub, since a squash merge leaves no trace in git) and
+  the set has been replayed onto plain main.
+- **Parks.** A listed PR that won't merge onto main and those before it parks
+  the whole queue, naming the pair and the files; so does one closed without
+  merging, until it is reopened or taken out. Nothing else moves while the
+  diffbase is parked. `choros queue resolve` resolves the conflict like any
+  other: it is recorded, and rerere replays it on every rebuild. That
+  resolution exists only to hold the queue together and never ships: when the
+  PRs merge, main's own resolution is what the sets are replayed onto.
+- `queue base add` builds at once, so a conflict shows (and, at a terminal, can
+  be resolved) right away.
+
 ## Merge head
 
 Rebuilt from scratch on every land, re-sync and graph edit, in the sync clone:
 
-1. Start at `origin/main`.
+1. Start at `origin/main`, or the diffbase when there is one.
 2. Take the queue's queued, unparked sets that no other such set depends on
    (the leaves); each contains its own ancestors.
 3. One leaf: the merge head is that leaf's tip. Several: merge them in

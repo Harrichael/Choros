@@ -105,6 +105,11 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
                                     retry parked conflicts, asking how to resolve each
     choros queue drop NAME N        remove a queued landing-set
     choros queue doctor NAME        compare the queue's state with origin, then sync
+    choros queue base NAME          the PRs the queue builds on before they reach main
+    choros queue base add|rm NAME REPO#N
+                                    build on a PR in review (#N: the queue's repo), or stop;
+                                    another repo's PR is only waited for. Nothing in the queue
+                                    opens a PR until every listed one merges
 
 AGENTS
     choros agent ls                 resumable claude / cursor sessions under the current directory

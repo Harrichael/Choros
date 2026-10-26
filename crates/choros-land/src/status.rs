@@ -9,7 +9,8 @@ use color_eyre::eyre::Result;
 use crate::git::Git;
 use crate::graph;
 use crate::queue::{self, Queue};
-use crate::state::{Park, Scope, SetStatus};
+use crate::forge::PrState;
+use crate::state::{DiffbasePark, Park, Scope, SetStatus};
 use crate::workspace;
 
 pub struct QueueStatus {
@@ -19,6 +20,17 @@ pub struct QueueStatus {
     pub sets: Vec<SetLine>,
     /// Workspaces (and repos) whose base the merge head has moved past.
     pub needs_sync: Vec<(PathBuf, String)>,
+    /// Each PR in the diffbase, with what's known of it.
+    pub diffbase: Vec<DiffbaseLine>,
+    pub diffbase_park: Option<DiffbasePark>,
+}
+
+pub struct DiffbaseLine {
+    pub pr: String,
+    /// `open`, `merged`, `closed`, or `unseen` before a pass has asked.
+    pub state: &'static str,
+    /// In another repo: waited for, not built on.
+    pub elsewhere: bool,
 }
 
 pub struct SetLine {
@@ -93,7 +105,7 @@ pub fn report(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<Q
         .collect()
 }
 
-fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
+pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
     let q = Queue::open(trunk, name)?;
     let st = q.read_state()?;
     let mut sets = Vec::new();
@@ -140,12 +152,29 @@ fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             }
         }
     }
+    let diffbase = q
+        .config
+        .diffbase()?
+        .into_iter()
+        .map(|pr| DiffbaseLine {
+            state: match st.diffbase.prs.get(&pr.to_string()).map(|s| &s.state) {
+                Some(PrState::Open) => "open",
+                Some(PrState::Merged) => "merged",
+                Some(PrState::Closed) => "closed",
+                None => "unseen",
+            },
+            elsewhere: pr.repo != q.config.repo,
+            pr: pr.to_string(),
+        })
+        .collect();
     Ok(QueueStatus {
         trunk: trunk.to_path_buf(),
         name: name.to_string(),
         repo: q.config.repo.clone(),
         sets,
         needs_sync,
+        diffbase,
+        diffbase_park: st.diffbase.park.clone(),
     })
 }
 
@@ -165,7 +194,8 @@ pub fn prompt_token(cwd: &Path) -> String {
         let Ok(st) = crate::state::read_state(&queue::queues_dir(&trunk).join(name).join("state.json")) else {
             continue;
         };
-        if st
+        if st.diffbase.park.is_some()
+            || st
                 .sets
                 .values()
                 .any(|s| (s.is_open() && s.park.is_some()) || s.status == SetStatus::Closed)

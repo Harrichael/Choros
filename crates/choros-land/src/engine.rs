@@ -77,6 +77,8 @@ pub struct PassReport {
     pub parked: Vec<u32>,
     /// Pushes origin refused; the old tip was kept and the next pass retries.
     pub push_failed: Vec<u32>,
+    /// The diffbase is parked, so nothing else moved.
+    pub diffbase_parked: bool,
     /// Other trouble the pass worked around, to be retried next pass.
     pub errors: Vec<String>,
 }
@@ -257,16 +259,21 @@ impl<'q, 'h> Work<'q, 'h> {
             .collect();
         // Keep the main we already built on unless it lacks a dependency that
         // merged since; following main for its own sake would rewrite every
-        // private set on every merge to main.
+        // private set on every merge to main. With a diffbase there is nothing
+        // to keep: the diffbase only moves when it has to.
         let merged_points: Vec<String> = graph::merged_deps(&self.st, n)
             .into_iter()
             .filter_map(|d| self.st.sets[&d].merged_into.clone())
             .collect();
         let main = match &set.base.main {
-            Some(m) if merged_points.iter().all(|p| self.git.is_ancestor(p, m).unwrap_or(false)) => {
+            Some(m)
+                if self.st.diffbase.built.is_none()
+                    && self.git.is_ancestor(m, &self.main_sha()?)?
+                    && merged_points.iter().all(|p| self.git.is_ancestor(p, m).unwrap_or(false)) =>
+            {
                 m.clone()
             }
-            _ => self.main_sha()?,
+            _ => self.root()?,
         };
         Ok(BaseSpec {
             main: Some(main),
@@ -480,7 +487,7 @@ impl<'q, 'h> Work<'q, 'h> {
         for (n, _) in &parked_out {
             self.st.sets.get_mut(n).unwrap().park = None;
         }
-        let main = self.main_sha()?;
+        let main = self.root()?;
         let full = self.composition(&main).key();
         for (n, park) in parked_out {
             if park.on == full && self.handler.is_none() {
@@ -612,6 +619,15 @@ impl<'q, 'h> Work<'q, 'h> {
         let mut report = PassReport::default();
         self.observe_prs(forge, &mut report)?;
         self.observe_pushes()?;
+        // GitHub unreachable: build on what was last seen.
+        if let Err(e) = self.observe_diffbase(forge) {
+            report.errors.push(format!("checking the diffbase's PRs failed: {e}"));
+        }
+        self.rebuild_diffbase()?;
+        if self.st.diffbase.park.is_some() {
+            report.diffbase_parked = true;
+            return Ok(report);
+        }
 
         let mut settings: Option<RepoSettings> = None;
         for n in graph::topo(&self.st) {
@@ -677,10 +693,17 @@ impl<'q, 'h> Work<'q, 'h> {
             .into_iter()
             .filter(|n| self.st.sets[n].pr.is_none())
             .collect();
+        let waiting = self.diffbase_waiting()?;
+        let main = self.main_sha()?;
         for n in front {
             // A set reaches the front on a base of main; one still built on
-            // its merged dependencies waits for the re-sync above.
-            if !self.st.sets[&n].base.deps.is_empty() {
+            // its merged dependencies, or on the diffbase, waits for the
+            // re-sync above.
+            let base = &self.st.sets[&n].base;
+            if waiting
+                || !base.deps.is_empty()
+                || !base.main.as_deref().is_some_and(|m| self.git.is_ancestor(m, &main).unwrap_or(false))
+            {
                 continue;
             }
             match self.open_pr(n, forge) {

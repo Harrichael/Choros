@@ -259,7 +259,15 @@ choros land continue --fork        # land beside the queue (pick dependencies)
 choros status                      # queues, sets, PRs, parked conflicts
 choros queue resolve appq          # settle parked conflicts (a/b/c)
 choros landing open 3              # resume the session forked at landing-3
+choros queue base add appq '#41'   # build on PR #41 while it's in review
 ```
+
+A queue's **diffbase** lets it start before the work it needs has merged: it
+builds on main with the listed PRs merged in (any PRs, landed through Choros
+or not), and opens nothing until they merge, when its sets are replayed onto
+main. A PR in another repo (`lib#12`) is only waited for. If the listed PRs
+conflict, the queue parks until `choros queue resolve`; that resolution only
+holds the queue together and never ships.
 
 ## Development
 

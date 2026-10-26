@@ -428,7 +428,7 @@ fn land_fork(
             .filter_map(|d| if let Dep::Set(m) = d { Some(*m) } else { None })
             .collect();
         let leaves = graph::leaves(&work.st, &set_deps);
-        let main = work.main_sha()?;
+        let main = work.root()?;
         let spec = BaseSpec {
             main: Some(main.clone()),
             deps: leaves.iter().map(|d| (*d, work.st.sets[d].tip.clone())).collect(),

@@ -21,6 +21,49 @@ pub struct QueueConfig {
     pub pr: PrConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// PRs the queue builds on before they reach main, as `repo#N` (`#N` for
+    /// this repo). Empty: the queue builds on main.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffbase: Vec<String>,
+}
+
+/// A PR in a queue's diffbase.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PrSpec {
+    pub repo: String,
+    pub number: u64,
+}
+
+impl PrSpec {
+    /// `repo#N`, or `#N` for `own` (the queue's repo).
+    pub fn parse(s: &str, own: &str) -> Result<PrSpec> {
+        let (repo, n) = s.rsplit_once('#').ok_or_else(|| {
+            color_eyre::eyre::eyre!("{s:?} is not a PR; write repo#N, or #N for {own}")
+        })?;
+        let number = n.parse().map_err(|_| {
+            color_eyre::eyre::eyre!("{s:?} is not a PR; write repo#N, or #N for {own}")
+        })?;
+        let repo = if repo.is_empty() { own } else { repo };
+        Ok(PrSpec {
+            repo: repo.to_string(),
+            number,
+        })
+    }
+}
+
+impl std::fmt::Display for PrSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.repo, self.number)
+    }
+}
+
+impl QueueConfig {
+    pub fn diffbase(&self) -> Result<Vec<PrSpec>> {
+        self.diffbase
+            .iter()
+            .map(|s| PrSpec::parse(s, &self.repo))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +148,56 @@ pub struct QueueState {
     pub resolutions: Vec<Resolution>,
     #[serde(default)]
     pub agent: Option<AgentSession>,
+    #[serde(default)]
+    pub diffbase: DiffbaseState,
+}
+
+/// What the engine knows of the queue's diffbase.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiffbaseState {
+    /// Each listed PR as last seen, by `repo#N`.
+    #[serde(default)]
+    pub prs: BTreeMap<String, SeenPr>,
+    /// Main with this repo's still-open PRs merged in, in list order: where
+    /// every set's base starts. `None`: main itself.
+    #[serde(default)]
+    pub built: Option<BuiltDiffbase>,
+    /// Nothing in the queue moves while this is set.
+    #[serde(default)]
+    pub park: Option<DiffbasePark>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeenPr {
+    pub state: crate::forge::PrState,
+    /// The head fetched for a PR in this repo.
+    #[serde(default)]
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltDiffbase {
+    pub main: String,
+    /// `repo#N` and the head merged, in order.
+    pub heads: Vec<(String, String)>,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffbasePark {
+    /// The PR at fault.
+    pub pr: String,
+    /// `None`: it was closed without merging. Otherwise it conflicts with
+    /// main and the PRs listed before it (`onto`) in these files.
+    pub conflict: Option<DiffbaseConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffbaseConflict {
+    pub onto: Vec<String>,
+    pub files: Vec<String>,
+    /// The inputs that conflicted; when they change, the build is retried.
+    pub on: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,7 +11,7 @@ use choros_land::forge::Gh;
 use choros_land::land::{self, LandRequest};
 use choros_land::queue::{self, Queue};
 use choros_land::state::{Dep, LandMode, Scope};
-use choros_land::{admin, status};
+use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::choros;
@@ -277,6 +277,7 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         if merged > 0 {
             println!("  ({merged} merged)");
         }
+        print_diffbase(&q);
         for (ws, repo) in &q.needs_sync {
             println!("  ⇣ {} ({repo}) needs `choros repo sync`", ws.display());
         }
@@ -316,6 +317,46 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         ["bind", repo, queue] => run_repo_bind(&env, repo, queue),
+        ["base", "add", name, pr] => {
+            let q = Queue::open(&trunk, name)?;
+            let report = diffbase::add(&env, &q, pr)?;
+            print_report(name, &report);
+            let status = status::queue_status(&trunk, name)?;
+            print_diffbase(&status);
+            let conflict = status
+                .diffbase_park
+                .as_ref()
+                .is_some_and(|p| p.conflict.is_some());
+            if conflict
+                && interactive()
+                && !ask("resolve it now? [Y/n] ")?
+                    .trim()
+                    .eq_ignore_ascii_case("n")
+            {
+                let mut handler = Interactive { preset: None };
+                let report = admin::sync(&env, &Queue::open(&trunk, name)?, Some(&mut handler))?;
+                print_report(name, &report);
+                print_diffbase(&status::queue_status(&trunk, name)?);
+            }
+            Ok(())
+        }
+        ["base", "rm", name, pr] => {
+            let report = diffbase::remove(&env, &Queue::open(&trunk, name)?, pr)?;
+            print_report(name, &report);
+            print_diffbase(&status::queue_status(&trunk, name)?);
+            Ok(())
+        }
+        ["base", name] => {
+            let status = status::queue_status(&trunk, name)?;
+            if status.diffbase.is_empty() {
+                println!(
+                    "{name} builds on {}",
+                    Queue::open(&trunk, name)?.config.main
+                );
+            }
+            print_diffbase(&status);
+            Ok(())
+        }
         ["sync", rest @ ..] => {
             let names = match rest {
                 [] => queue::list(&trunk)?,
@@ -359,8 +400,48 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
         [name] => crate::queue_tui::run(&trunk, Some(name), &[], &env),
         _ => usage(
             "choros queue [NAME] | queue new NAME REPO [--workspace PATH | --branch PATH] \
-             | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME",
+             | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
+             | queue base NAME | queue base add|rm NAME REPO#N",
         ),
+    }
+}
+
+/// The PRs a queue builds on, and why it's parked on them if it is.
+fn print_diffbase(q: &status::QueueStatus) {
+    if q.diffbase.is_empty() {
+        return;
+    }
+    let prs: Vec<String> = q
+        .diffbase
+        .iter()
+        .map(|d| {
+            let elsewhere = if d.elsewhere { ", waited for" } else { "" };
+            format!("{} ({}{elsewhere})", d.pr, d.state)
+        })
+        .collect();
+    println!("  diffbase: {}", prs.join(", "));
+    match &q.diffbase_park {
+        Some(p) => match &p.conflict {
+            Some(c) => {
+                let mut onto = vec!["main".to_string()];
+                onto.extend(c.onto.iter().cloned());
+                println!(
+                    "  ! parked: {} conflicts with {} in {}; `choros queue resolve {}`",
+                    p.pr,
+                    onto.join(" + "),
+                    c.files.join(", "),
+                    q.name
+                );
+            }
+            None => println!(
+                "  ! parked: {} was closed without merging; reopen it, or `choros queue base rm {} {}`",
+                p.pr, q.name, p.pr
+            ),
+        },
+        None if q.diffbase.iter().any(|d| d.state != "merged") => {
+            println!("  (no PR opens here until these merge)");
+        }
+        None => {}
     }
 }
 
@@ -377,6 +458,9 @@ fn print_report(name: &str, r: &PassReport) {
         if !v.is_empty() {
             eprintln!("{name}: {what} {}", list(v));
         }
+    }
+    if r.diffbase_parked {
+        eprintln!("{name}: parked on its diffbase; nothing else moved");
     }
     for e in &r.errors {
         eprintln!("{name}: {e}");

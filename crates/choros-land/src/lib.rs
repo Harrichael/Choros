@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod agent;
 pub mod branch;
+pub mod diffbase;
 pub mod engine;
 pub mod forge;
 pub mod git;

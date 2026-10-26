@@ -102,6 +102,7 @@ impl Queue {
             push: Default::default(),
             pr: Default::default(),
             agent: Default::default(),
+            diffbase: Vec::new(),
         };
         state::write_config(&dir.join("queue.toml"), &config)?;
         let queue = Queue {

@@ -4,6 +4,7 @@
 //! conflicts go to a scripted handler.
 
 mod branches;
+mod diffbase;
 mod regressions;
 mod stories;
 
@@ -16,7 +17,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::agent::{Agent, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
-use crate::forge::{Forge, MergeMethod, PrRequest, PrState, RepoSettings};
+use crate::forge::{Forge, MergeMethod, PrInfo, PrRequest, PrState, RepoSettings};
 use crate::land::{LandOutcome, LandRequest};
 use crate::queue::Queue;
 use crate::state::{Dep, LandMode, PrRef, QueueState, Scope};
@@ -170,6 +171,15 @@ impl Forge for FakeForge {
 
     fn pr_state(&self, _repo: &Path, number: u64) -> Result<PrState> {
         Ok(self.prs.lock().unwrap()[&number].state.clone().unwrap())
+    }
+
+    fn pr_info(&self, _repo: &Path, number: u64) -> Result<PrInfo> {
+        let prs = self.prs.lock().unwrap();
+        let pr = prs.get(&number).ok_or_else(|| eyre!("no PR #{number}"))?;
+        Ok(PrInfo {
+            state: pr.state.clone().unwrap(),
+            head_ref: pr.head.clone(),
+        })
     }
 
     fn merge_pr(&self, _repo: &Path, number: u64, method: MergeMethod) -> Result<()> {
