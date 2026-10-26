@@ -31,14 +31,6 @@ pub enum PrState {
     Closed,
 }
 
-/// A PR as a queue's diffbase needs it: whether it is still open, and the
-/// branch to fetch its head from when `refs/pull/N/head` can't be.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrInfo {
-    pub state: PrState,
-    pub head_ref: String,
-}
-
 pub struct PrRequest<'a> {
     pub head: &'a str,
     pub base: &'a str,
@@ -53,7 +45,6 @@ pub trait Forge {
     fn create_pr(&self, repo: &Path, req: &PrRequest) -> Result<PrRef>;
     fn find_open_pr(&self, repo: &Path, head: &str) -> Result<Option<PrRef>>;
     fn pr_state(&self, repo: &Path, number: u64) -> Result<PrState>;
-    fn pr_info(&self, repo: &Path, number: u64) -> Result<PrInfo>;
     fn merge_pr(&self, repo: &Path, number: u64, method: MergeMethod) -> Result<()>;
 }
 
@@ -148,27 +139,6 @@ impl Forge for Gh {
             Some("MERGED") => PrState::Merged,
             Some("CLOSED") => PrState::Closed,
             _ => PrState::Open,
-        })
-    }
-
-    fn pr_info(&self, repo: &Path, number: u64) -> Result<PrInfo> {
-        let v: Value = serde_json::from_str(&self.run(
-            repo,
-            &[
-                "pr",
-                "view",
-                &number.to_string(),
-                "--json",
-                "state,headRefName",
-            ],
-        )?)?;
-        Ok(PrInfo {
-            state: match v["state"].as_str() {
-                Some("MERGED") => PrState::Merged,
-                Some("CLOSED") => PrState::Closed,
-                _ => PrState::Open,
-            },
-            head_ref: v["headRefName"].as_str().unwrap_or_default().to_string(),
         })
     }
 

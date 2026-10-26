@@ -10,7 +10,8 @@
 //! rebuild, but never ships: when the PRs merge, main's own resolution of
 //! them is what the sets are replayed onto.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use choros_core::registry;
 use color_eyre::eyre::{Result, eyre};
@@ -23,72 +24,64 @@ use crate::state::{BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, SeenPr
 
 impl Work<'_, '_> {
     /// Look up each listed PR on GitHub, fetching the heads of this repo's
-    /// open ones. A merged PR is not asked about again.
+    /// open ones. A merged PR is not asked about again. One PR failing
+    /// doesn't stop the others being looked at.
     pub fn observe_diffbase(&mut self, forge: &dyn Forge) -> Result<()> {
         let listed = self.q.config.diffbase()?;
         let keys: Vec<String> = listed.iter().map(PrSpec::to_string).collect();
         self.st.diffbase.prs.retain(|k, _| keys.contains(k));
         let mut refetched = false;
+        let mut failed = Vec::new();
         for pr in &listed {
-            let key = pr.to_string();
-            if self
+            let merged = self
                 .st
                 .diffbase
                 .prs
-                .get(&key)
-                .is_some_and(|s| s.state == PrState::Merged)
-            {
+                .get(&pr.to_string())
+                .is_some_and(|s| s.state == PrState::Merged);
+            if merged {
                 continue;
             }
-            let own = pr.repo == self.q.config.repo;
-            let dir = if own {
-                self.git.dir().to_path_buf()
-            } else {
-                self.other_repo(&pr.repo)?
-            };
-            let info = forge.pr_info(&dir, pr.number)?;
-            let head = match (&info.state, own) {
-                (PrState::Open, true) => Some(self.fetch_head(pr.number, &info.head_ref)?),
-                _ => None,
-            };
-            // Bases built from here on must contain the merge.
-            if info.state == PrState::Merged && own && !refetched {
-                self.q.fetch()?;
-                refetched = true;
+            if let Err(e) = self.observe_pr(forge, pr, &mut refetched) {
+                failed.push(format!("{pr}: {e}"));
             }
-            self.st.diffbase.prs.insert(
-                key,
-                SeenPr {
-                    state: info.state,
-                    head,
-                },
-            );
         }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(eyre!(failed.join("; ")))
+        }
+    }
+
+    fn observe_pr(&mut self, forge: &dyn Forge, pr: &PrSpec, refetched: &mut bool) -> Result<()> {
+        let own = pr.repo == self.q.config.repo;
+        let dir = if own {
+            self.git.dir().to_path_buf()
+        } else {
+            repo_dir(&self.q.trunk, &pr.repo)?
+        };
+        let state = forge.pr_state(&dir, pr.number)?;
+        let head = match (&state, own) {
+            (PrState::Open, true) => Some(self.fetch_head(pr.number)?),
+            _ => None,
+        };
+        // Bases built from here on must contain the merge.
+        if state == PrState::Merged && own && !*refetched {
+            self.q.fetch()?;
+            *refetched = true;
+        }
+        self.st
+            .diffbase
+            .prs
+            .insert(pr.to_string(), SeenPr { state, head });
         Ok(())
     }
 
-    fn other_repo(&self, repo: &str) -> Result<PathBuf> {
-        let dir = registry::repo_path(&self.q.trunk, repo);
-        if !dir.exists() {
-            return Err(eyre!(
-                "{repo} is not in this trunk's registry; add it with `choros add <ssh-url>`"
-            ));
-        }
-        Ok(dir)
-    }
-
-    /// GitHub keeps every PR's head at `refs/pull/N/head`, forks' included;
-    /// the branch itself is the fallback.
-    fn fetch_head(&self, number: u64, head_ref: &str) -> Result<String> {
+    /// GitHub keeps every PR's head at `refs/pull/N/head`, forks' included.
+    fn fetch_head(&self, number: u64) -> Result<String> {
         let local = format!("refs/choros/diffbase/{number}");
-        if self
-            .git
-            .fetch("origin", &[&format!("+refs/pull/{number}/head:{local}")])
-            .is_err()
-        {
-            self.git
-                .fetch("origin", &[&format!("+refs/heads/{head_ref}:{local}")])?;
-        }
+        self.git
+            .fetch("origin", &[&format!("+refs/pull/{number}/head:{local}")])?;
         self.git.sha(&local)
     }
 
@@ -108,30 +101,47 @@ impl Work<'_, '_> {
             });
             return Ok(());
         }
+        // Building without a PR not yet seen would move the queue off it
+        // and back again once it is.
+        let own = |p: &&PrSpec| p.repo == self.q.config.repo;
+        if listed.iter().filter(own).any(|p| seen(p).is_none()) {
+            return Ok(());
+        }
         let heads: Vec<(String, String)> = listed
             .iter()
-            .filter(|p| p.repo == self.q.config.repo)
+            .filter(own)
             .filter_map(|p| {
                 let s = seen(p)?;
                 let head = s.head.clone().filter(|_| s.state == PrState::Open)?;
                 Some((p.to_string(), head))
             })
             .collect();
+        let behind = match &self.st.diffbase.built {
+            Some(b) => !self.has_merged_sets(&b.main)?,
+            None => false,
+        };
         let db = &mut self.st.diffbase;
         if db.park.as_ref().is_some_and(|p| p.conflict.is_none()) {
             db.park = None;
         }
         if heads.is_empty() {
-            db.built = None;
-            db.park = None;
+            if db.built.take().is_some() {
+                let _ = self.git.run(&[
+                    "update-ref",
+                    "-d",
+                    &format!("refs/heads/{}/diffbase", self.q.name),
+                ]);
+            }
+            self.st.diffbase.park = None;
             return Ok(());
         }
         // The same PR heads keep the main they were built on, as a set keeps
         // its base: following main for its own sake would rewrite the whole
-        // queue on every merge to main.
+        // queue on every merge to main. A set of this queue merging is reason
+        // enough, though; its dependents and the merge head need it.
         let main = match &db.built {
-            Some(b) if b.heads == heads && db.park.is_none() => return Ok(()),
-            Some(b) if b.heads == heads => b.main.clone(),
+            Some(b) if b.heads == heads && !behind && db.park.is_none() => return Ok(()),
+            Some(b) if b.heads == heads && !behind => b.main.clone(),
             _ => self.main_sha()?,
         };
         let key = format!(
@@ -175,6 +185,22 @@ impl Work<'_, '_> {
         Ok(())
     }
 
+    /// Whether every set this queue has merged is in `main`.
+    fn has_merged_sets(&self, main: &str) -> Result<bool> {
+        let points: BTreeSet<&String> = self
+            .st
+            .sets
+            .values()
+            .filter_map(|s| s.merged_into.as_ref())
+            .collect();
+        for p in points {
+            if !self.git.is_ancestor(p, main)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Where every set's base starts: the diffbase, or main.
     pub fn root(&self) -> Result<String> {
         match &self.st.diffbase.built {
@@ -206,21 +232,14 @@ pub fn add(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
     let dir = if spec.repo == q.config.repo {
         q.sync_dir()
     } else {
-        let dir = registry::repo_path(&q.trunk, &spec.repo);
-        if !dir.exists() {
-            return Err(eyre!(
-                "{} is not in this trunk's registry; add it with `choros add <ssh-url>`",
-                spec.repo
-            ));
-        }
-        dir
+        repo_dir(&q.trunk, &spec.repo)?
     };
-    match env.forge.pr_info(&dir, spec.number)?.state {
+    match env.forge.pr_state(&dir, spec.number)? {
         PrState::Open => {}
         PrState::Merged => return Err(eyre!("{spec} has already merged; main has it")),
         PrState::Closed => return Err(eyre!("{spec} was closed without merging")),
     }
-    edit_config(env, q, |list| list.push(spec.to_string()))?;
+    edit_config(q, |list| list.push(spec.to_string()))?;
     admin::sync(env, &Queue::open(&q.trunk, &q.name)?, None)
 }
 
@@ -229,7 +248,7 @@ pub fn add(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
 pub fn remove(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
     let spec = PrSpec::parse(pr, &q.config.repo)?;
     let mut found = false;
-    edit_config(env, q, |list| {
+    edit_config(q, |list| {
         let before = list.len();
         list.retain(|s| PrSpec::parse(s, &q.config.repo).ok().as_ref() != Some(&spec));
         found = list.len() != before;
@@ -240,10 +259,20 @@ pub fn remove(env: &Env, q: &Queue, pr: &str) -> Result<PassReport> {
     admin::sync(env, &Queue::open(&q.trunk, &q.name)?, None)
 }
 
+fn repo_dir(trunk: &Path, repo: &str) -> Result<PathBuf> {
+    let dir = registry::repo_path(trunk, repo);
+    if !dir.exists() {
+        return Err(eyre!(
+            "{repo} is not in this trunk's registry; add it with `choros add <ssh-url>`"
+        ));
+    }
+    Ok(dir)
+}
+
 /// Rewrite queue.toml's `diffbase` and nothing else (comments stay), under
 /// the queue's lock so no pass reads it half-changed.
-fn edit_config(env: &Env, q: &Queue, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
-    let _work = Work::begin(q, env.agent, None, true)?.unwrap();
+fn edit_config(q: &Queue, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
+    let _lock = q.lock()?;
     let path = q.dir().join("queue.toml");
     let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)?.parse()?;
     let mut list: Vec<String> = doc

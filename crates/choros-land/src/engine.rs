@@ -626,6 +626,7 @@ impl<'q, 'h> Work<'q, 'h> {
         self.rebuild_diffbase()?;
         if self.st.diffbase.park.is_some() {
             report.diffbase_parked = true;
+            self.tend_landings(&report);
             return Ok(report);
         }
 

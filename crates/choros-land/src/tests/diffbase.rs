@@ -213,3 +213,31 @@ fn the_diffbase_is_edited_in_place_and_checked() {
     let merged = diffbase::add(&w.env(), &w.queue(), &format!("#{pr}")).unwrap_err();
     assert!(merged.to_string().contains("already merged"), "{merged}");
 }
+
+/// A set whose PR was open before the diffbase was listed can still merge.
+/// The set behind it then needs that work, so the diffbase moves to the main
+/// that has it, even though the listed PR hasn't changed.
+#[test]
+fn a_set_merging_under_a_diffbase_moves_it_to_the_new_main() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    let lib = w.outside_pr("lib", "lib.txt", "lib\n");
+    diffbase::add(&w.env(), &w.queue(), &format!("#{lib}")).unwrap();
+    let before = w.state().diffbase.built.unwrap();
+
+    let one = w.state().sets[&1].pr.as_ref().unwrap().number;
+    w.forge.merge(one, MergeMethod::Squash);
+    w.pass();
+    let st = w.state();
+    let built = st.diffbase.built.unwrap();
+    assert_ne!(built.main, before.main);
+    assert_eq!(built.main, w.origin_main());
+    let tip = &st.sets[&2].tip;
+    assert_eq!(w.file_at(tip, "a.txt").as_deref(), Some("a\n"));
+    assert_eq!(w.file_at(tip, "lib.txt").as_deref(), Some("lib\n"));
+    assert_eq!(w.own_commits(2), 1);
+}
