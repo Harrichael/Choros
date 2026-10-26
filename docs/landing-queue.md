@@ -53,6 +53,7 @@ folder has been archived and no set is open (to
 ```toml
 repo = "Ordo"                       # registry name; one repo per queue
 scope = "trunk"                     # or { branch = "epic-x" } or { workspace = "epic-x/login" } (paths below the trunk; "root" is read as "trunk")
+diffbase = ["Ordo#41", "#43", "Lib#12"]  # PRs to build on before they merge (see Diffbase); #N is this repo
 [push]
 merge_head = true                   # force-push <queue>/merge-head; false keeps it in the sync clone only
 private_sets = true                 # push queued (not yet front) landing branches
@@ -60,7 +61,6 @@ private_sets = true                 # push queued (not yet front) landing branch
 draft = true                        # open front PRs as drafts
 [agent]
 rotate_after = 10                   # resync-agent runs before its session is rotated
-diffbase = ["Ordo#41", "#43", "Lib#12"]  # PRs to build on before they merge (see Diffbase); #N is this repo
 ```
 
 Pushing private branches runs any `on: push` CI on every re-sync; `choros
@@ -85,7 +85,9 @@ Binding happens in the `choros work` picker (default: none) and can change
 from the queue TUI. A repo bound to a queue is cloned **from the queue's merge
 head** (fetched from the sync clone when the merge head is not pushed), and
 `base = landed_through = <merge head>`. `choros queue new NAME REPO
-[--workspace WS]` creates a queue. Existing workspaces have no `base`; it is
+[--workspace WS | --branch PATH]` creates a queue with the default settings;
+with `-i` it asks for each one instead (NAME and REPO become optional and,
+when given, the defaults). `choros queue ls [--all]` lists them. Existing workspaces have no `base`; it is
 taken as `merge-base HEAD origin/main` the first time.
 
 Instant mode settings: workspace meta, falling back to

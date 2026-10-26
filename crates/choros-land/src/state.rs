@@ -58,6 +58,19 @@ impl std::fmt::Display for PrSpec {
 }
 
 impl QueueConfig {
+    /// A queue for `repo` landing on `main`, with every setting at its default.
+    pub fn new(repo: &str, main: &str, scope: Scope) -> QueueConfig {
+        QueueConfig {
+            repo: repo.to_string(),
+            main: main.to_string(),
+            scope,
+            push: Default::default(),
+            pr: Default::default(),
+            agent: Default::default(),
+            diffbase: Vec::new(),
+        }
+    }
+
     pub fn diffbase(&self) -> Result<Vec<PrSpec>> {
         self.diffbase
             .iter()

@@ -97,9 +97,12 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
     choros status [--prompt|--all]  landing queues and their sets; --prompt prints one token
                                     (⇣sync / !resolve) for shell prompts
     choros queue [NAME]             TUI: a queue's landing-sets; edit dependencies, drop, sync
-    choros queue new NAME REPO [--workspace PATH | --branch PATH]
+    choros queue ls [--all]         each queue: its repo, scope, branch, open sets, diffbase
+    choros queue new [-i] NAME REPO [--workspace PATH | --branch PATH]
                                     create a landing queue for a registry repo, optionally only
-                                    for one workspace or branch-space (path below the trunk)
+                                    for one workspace or branch-space (path below the trunk);
+                                    -i asks for each setting, defaults in parens (NAME and REPO
+                                    optional then)
     choros queue sync [NAME]        run the daemon's pass now
     choros queue resolve NAME [--agent trust|review|manual]
                                     retry parked conflicts, asking how to resolve each

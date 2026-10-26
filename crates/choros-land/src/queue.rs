@@ -52,8 +52,9 @@ impl Queue {
         })
     }
 
-    /// Create a queue for `repo` (a registry name) and its sync clone.
-    pub fn create(trunk: &Path, name: &str, repo: &str, scope: Scope) -> Result<Queue> {
+    /// Refuse a name `create` would: one taken here, or one that can't be a
+    /// branch prefix on `repo`'s origin.
+    pub fn check_name(trunk: &Path, name: &str, repo: &str) -> Result<()> {
         if name.is_empty()
             || RESERVED.contains(&name)
             || name.contains(['/', '\\', ' ', '~', '^', ':', '?', '*', '['])
@@ -61,8 +62,7 @@ impl Queue {
         {
             return Err(eyre!("{name:?} cannot be a queue name"));
         }
-        let dir = queues_dir(trunk).join(name);
-        if dir.exists() {
+        if queues_dir(trunk).join(name).exists() {
             return Err(eyre!("queue {name:?} already exists"));
         }
         // `<name>/landing-N` on origin can't coexist with a workspace's
@@ -70,15 +70,23 @@ impl Queue {
         if trunk.join(name).exists() {
             return Err(eyre!("{name:?} is already a workspace or branch-space here"));
         }
-        let reg = registry::ensure_repo_exists(trunk, repo)?;
-        let url = core_git::remote_get_url(&reg, "origin")?;
         // A branch named exactly like the queue would make `<queue>/landing-N`
         // impossible to create on origin (a ref cannot also be a directory).
+        let reg = registry::ensure_repo_exists(trunk, repo)?;
         let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{name}")])?;
         if !clash.is_empty() {
             return Err(eyre!("origin already has a branch named {name:?}; pick another queue name"));
         }
+        Ok(())
+    }
 
+    /// Create a queue with `config` and its sync clone.
+    pub fn create(trunk: &Path, name: &str, config: QueueConfig) -> Result<Queue> {
+        let repo = &config.repo;
+        Self::check_name(trunk, name, repo)?;
+        check_branch(trunk, repo, &config.main)?;
+        let reg = registry::repo_path(trunk, repo);
+        let url = core_git::remote_get_url(&reg, "origin")?;
         let sync = sync_dir(trunk, name, repo);
         if !sync.exists() {
             std::fs::create_dir_all(sync.parent().unwrap())?;
@@ -89,21 +97,9 @@ impl Queue {
             git.run(&["config", k, v])?;
         }
         ensure_notes(&git)?;
-        let main = git
-            .run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])?
-            .trim_start_matches("origin/")
-            .to_string();
 
+        let dir = queues_dir(trunk).join(name);
         std::fs::create_dir_all(&dir)?;
-        let config = QueueConfig {
-            repo: repo.to_string(),
-            main,
-            scope,
-            push: Default::default(),
-            pr: Default::default(),
-            agent: Default::default(),
-            diffbase: Vec::new(),
-        };
         state::write_config(&dir.join("queue.toml"), &config)?;
         let queue = Queue {
             trunk: trunk.to_path_buf(),
@@ -261,6 +257,28 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
     std::fs::rename(q.dir(), dst.join("_queue"))?;
     let _ = std::fs::remove_dir(&landing);
     Ok(true)
+}
+
+/// The branch `repo`'s origin points HEAD at: where its work lands.
+pub fn default_branch(trunk: &Path, repo: &str) -> Result<String> {
+    let reg = registry::ensure_repo_exists(trunk, repo)?;
+    let out = Git::new(&reg).run(&["ls-remote", "--symref", "origin", "HEAD"])?;
+    out.lines()
+        .find_map(|l| l.strip_prefix("ref: refs/heads/")?.split_whitespace().next())
+        .map(str::to_string)
+        .ok_or_else(|| eyre!("origin of {repo} names no default branch"))
+}
+
+/// Refuse a branch `repo`'s origin doesn't have.
+pub fn check_branch(trunk: &Path, repo: &str, branch: &str) -> Result<()> {
+    let reg = registry::ensure_repo_exists(trunk, repo)?;
+    if Git::new(&reg)
+        .run(&["ls-remote", "origin", &format!("refs/heads/{branch}")])?
+        .is_empty()
+    {
+        return Err(eyre!("origin of {repo} has no branch {branch:?}"));
+    }
+    Ok(())
 }
 
 pub fn sync_dir(trunk: &Path, queue: &str, repo: &str) -> PathBuf {

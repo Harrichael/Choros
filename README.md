@@ -251,6 +251,8 @@ a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing
 
 ```bash
 choros queue new appq app          # a queue for the registry repo `app`
+choros queue new -i                # the same, asking for each setting
+choros queue ls                    # the queues here: repo, scope, open sets, diffbase
 choros repo bind app appq          # inside a workspace (or press `b` in `choros work`)
 choros land continue               # land, keep working here
 choros repo sync                   # catch up when the prompt shows ⇣sync

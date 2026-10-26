@@ -10,7 +10,7 @@ use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, P
 use choros_land::forge::Gh;
 use choros_land::land::{self, LandRequest};
 use choros_land::queue::{self, Queue};
-use choros_land::state::{Dep, LandMode, Scope};
+use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope};
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -292,29 +292,29 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
         [] => crate::queue_tui::run(&trunk, None, &visible_here(&trunk)?, &env),
+        ["new", rest @ ..] if rest.contains(&"-i") => {
+            let rest: Vec<&str> = rest.iter().copied().filter(|a| *a != "-i").collect();
+            new_interactive(&env, &trunk, &rest)
+        }
         ["new", name, repo, rest @ ..] => {
             let scope = match rest {
                 [] => Scope::Trunk,
-                ["--workspace", ws] => Scope::Workspace(ws.trim_end_matches('/').to_string()),
-                ["--branch", b] => Scope::Branch(b.trim_end_matches('/').to_string()),
-                _ => usage("choros queue new NAME REPO [--workspace PATH | --branch PATH]"),
+                [flag, path] => scope_arg(&trunk, flag, path)?,
+                _ => usage("choros queue new [-i] NAME REPO [--workspace PATH | --branch PATH]"),
             };
-            let below = |p: &str| {
-                Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
-            };
-            match &scope {
-                Scope::Workspace(p) if !below(p) || !trunk.join(p).join(choros::META_FILE).exists() => {
-                    return Err(eyre!("no workspace {p:?} in {}; give its path below the trunk", trunk.display()));
-                }
-                Scope::Branch(p) if !below(p) || !space::is_branch_space(&trunk.join(p)) => {
-                    return Err(eyre!("no branch-space {p:?} in {}; give its path below the trunk", trunk.display()));
-                }
-                _ => {}
-            }
-            let q = Queue::create(&trunk, name, repo, scope)?;
+            let main = queue::default_branch(&trunk, repo)?;
+            let q = Queue::create(&trunk, name, QueueConfig::new(repo, &main, scope))?;
             warn_push_workflows(&q);
             eprintln!("created queue {name} for {repo}; bind a workspace with `choros repo bind {repo} {name}`");
             Ok(())
+        }
+        ["ls", rest @ ..] => {
+            let names = match rest {
+                [] => visible_here(&trunk)?,
+                ["--all"] => queue::list(&trunk)?,
+                _ => usage("choros queue ls [--all]"),
+            };
+            print_queues(&trunk, &names)
         }
         ["bind", repo, queue] => run_repo_bind(&env, repo, queue),
         ["base", "add", name, pr] => {
@@ -399,11 +399,169 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
         }
         [name] => crate::queue_tui::run(&trunk, Some(name), &[], &env),
         _ => usage(
-            "choros queue [NAME] | queue new NAME REPO [--workspace PATH | --branch PATH] \
-             | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
+            "choros queue [NAME] | queue ls [--all] \
+             | queue new [-i] NAME REPO [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
              | queue base NAME | queue base add|rm NAME REPO#N",
         ),
     }
+}
+
+/// `--workspace PATH` or `--branch PATH`, checked against the trunk.
+fn scope_arg(trunk: &Path, flag: &str, path: &str) -> Result<Scope> {
+    let path = path.trim_end_matches('/');
+    let below = Path::new(path)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    match flag.trim_start_matches("--") {
+        "workspace" if below && trunk.join(path).join(choros::META_FILE).exists() => {
+            Ok(Scope::Workspace(path.to_string()))
+        }
+        "branch" if below && space::is_branch_space(&trunk.join(path)) => Ok(Scope::Branch(path.to_string())),
+        "workspace" => Err(eyre!("no workspace {path:?} in {}; give its path below the trunk", trunk.display())),
+        "branch" => Err(eyre!("no branch-space {path:?} in {}; give its path below the trunk", trunk.display())),
+        _ => usage("choros queue new [-i] NAME REPO [--workspace PATH | --branch PATH]"),
+    }
+}
+
+fn scope_text(scope: &Scope) -> String {
+    match scope {
+        Scope::Trunk => "trunk".into(),
+        Scope::Workspace(p) => format!("workspace {p}"),
+        Scope::Branch(p) => format!("branch {p}"),
+    }
+}
+
+/// `queue new -i`: a question per setting, its default in parens. What the
+/// command line gave is the default; otherwise the scope is the branch-space
+/// you're in.
+fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
+    if !interactive() {
+        return Err(eyre!("no terminal to ask in; drop -i"));
+    }
+    let (given, scope) = match args {
+        [rest @ .., flag, path] if flag.starts_with("--") => (rest, Some(scope_arg(trunk, flag, path)?)),
+        rest if rest.len() <= 2 => (rest, None),
+        _ => usage("choros queue new -i [NAME [REPO]] [--workspace PATH | --branch PATH]"),
+    };
+    let scope = match scope {
+        Some(s) => s,
+        None => match space::find_space(&std::env::current_dir()?) {
+            Some(here) if space::is_branch_space(&here) => Scope::Branch(space::rel(trunk, &here)?),
+            _ => Scope::Trunk,
+        },
+    };
+    let repos = choros_core::registry::scan(trunk)?;
+    let only = (repos.len() == 1).then(|| repos[0].as_str());
+    let repo = question(
+        &format!("repo, one of {}", repos.join(", ")),
+        given.get(1).copied().or(only),
+        |a| choros_core::registry::ensure_repo_exists(trunk, a).map(|_| a.to_string()),
+    )?;
+    let name = question("queue name", given.first().copied(), |a| {
+        Queue::check_name(trunk, a, &repo).map(|_| a.to_string())
+    })?;
+    let scope = question(
+        "scope: trunk, branch PATH or workspace PATH",
+        Some(&scope_text(&scope)),
+        |a| match a.split_once(' ') {
+            _ if a == "trunk" => Ok(Scope::Trunk),
+            Some((flag, path)) => scope_arg(trunk, flag, path.trim()),
+            None => Err(eyre!("answer trunk, branch PATH or workspace PATH")),
+        },
+    )?;
+    let main = question("branch it lands on", Some(&queue::default_branch(trunk, &repo)?), |a| {
+        queue::check_branch(trunk, &repo, a).map(|_| a.to_string())
+    })?;
+    let mut config = QueueConfig::new(&repo, &main, scope);
+    config.push.merge_head = yes_no("push the merge head to origin", config.push.merge_head)?;
+    config.push.private_sets = yes_no(
+        "push landing branches before they reach the front",
+        config.push.private_sets,
+    )?;
+    config.pr.draft = yes_no("open PRs as drafts", config.pr.draft)?;
+    config.agent.rotate_after = question(
+        "resync-agent runs before it starts a fresh session",
+        Some(&config.agent.rotate_after.to_string()),
+        |a| a.parse().map_err(|_| eyre!("answer a number")),
+    )?;
+    let prs = question("PRs to build on until they merge, as repo#N or #N", Some("none"), |a| {
+        a.split([' ', ','])
+            .filter(|s| !s.is_empty() && *s != "none")
+            .map(|s| PrSpec::parse(s, &repo).map(|p| p.to_string()))
+            .collect::<Result<Vec<_>>>()
+    })?;
+
+    let q = Queue::create(trunk, &name, config)?;
+    warn_push_workflows(&q);
+    eprintln!("created queue {name} for {repo}; bind a workspace with `choros repo bind {repo} {name}`");
+    for pr in prs {
+        match diffbase::add(env, &Queue::open(trunk, &name)?, &pr) {
+            Ok(report) => print_report(&name, &report),
+            Err(e) => eprintln!("not building on {pr}: {e}; add it later with `choros queue base add {name} {pr}`"),
+        }
+    }
+    print_diffbase(&status::queue_status(trunk, &name)?);
+    Ok(())
+}
+
+/// Ask until `parse` takes the answer; an empty one takes `default`.
+fn question<T>(prompt: &str, default: Option<&str>, parse: impl Fn(&str) -> Result<T>) -> Result<T> {
+    let shown = default.map(|d| format!(" ({d})")).unwrap_or_default();
+    loop {
+        let answer = read_answer(&format!("{prompt}{shown}: "))?
+            .ok_or_else(|| eyre!("no answer to {prompt:?}"))?;
+        let answer = match (answer.as_str(), default) {
+            ("", Some(d)) => d,
+            ("", None) => continue,
+            (a, _) => a,
+        };
+        match parse(answer) {
+            Ok(v) => return Ok(v),
+            Err(e) => eprintln!("  {e}"),
+        }
+    }
+}
+
+fn yes_no(prompt: &str, default: bool) -> Result<bool> {
+    question(&format!("{prompt}?"), Some(if default { "yes" } else { "no" }), |a| {
+        match a.to_lowercase().as_str() {
+            "y" | "yes" => Ok(true),
+            "n" | "no" => Ok(false),
+            _ => Err(eyre!("answer yes or no")),
+        }
+    })
+}
+
+/// One line per queue: its repo, scope, branch, open sets and diffbase.
+fn print_queues(trunk: &Path, names: &[String]) -> Result<()> {
+    if names.is_empty() {
+        println!("no landing queues here");
+        return Ok(());
+    }
+    let mut rows = vec![["QUEUE", "REPO", "SCOPE", "LANDS ON", "OPEN", "BUILDS ON"].map(String::from)];
+    for name in names {
+        let q = Queue::open(trunk, name)?;
+        let open = q.read_state()?.sets.values().filter(|s| s.is_open()).count();
+        let base = if q.config.diffbase.is_empty() {
+            "-".to_string()
+        } else {
+            q.config.diffbase.join(", ")
+        };
+        rows.push([
+            name.clone(),
+            q.config.repo.clone(),
+            scope_text(&q.config.scope),
+            q.config.main.clone(),
+            open.to_string(),
+            base,
+        ]);
+    }
+    let widths: Vec<usize> = (0..6).map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0)).collect();
+    for row in &rows {
+        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, w)| format!("{cell:<w$}")).collect();
+        println!("{}", cells.join("  ").trim_end());
+    }
+    Ok(())
 }
 
 /// The PRs a queue builds on, and why it's parked on them if it is.
@@ -532,11 +690,18 @@ struct Interactive {
 }
 
 fn ask(prompt: &str) -> Result<String> {
+    Ok(read_answer(prompt)?.unwrap_or_default().to_lowercase())
+}
+
+/// The trimmed line typed after `prompt`; `None` once stdin has closed.
+fn read_answer(prompt: &str) -> Result<Option<String>> {
     eprint!("{prompt}");
     std::io::stderr().flush()?;
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim().to_lowercase())
+    if std::io::stdin().lock().read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim().to_string()))
 }
 
 impl ConflictHandler for Interactive {

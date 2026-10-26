@@ -20,7 +20,7 @@ use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassRep
 use crate::forge::{Forge, MergeMethod, PrRequest, PrState, RepoSettings};
 use crate::land::{LandOutcome, LandRequest};
 use crate::queue::Queue;
-use crate::state::{Dep, LandMode, PrRef, QueueState, Scope};
+use crate::state::{Dep, LandMode, PrRef, QueueConfig, QueueState, Scope};
 
 static GIT_ENV: Once = Once::new();
 
@@ -273,7 +273,7 @@ impl World {
         let registry = trunk.join(".choros-config/registry");
         std::fs::create_dir_all(&registry).unwrap();
         git(&registry, &["clone", "--quiet", origin.to_str().unwrap(), REPO]);
-        Queue::create(&trunk, QUEUE, REPO, Scope::Trunk).unwrap();
+        Queue::create(&trunk, QUEUE, QueueConfig::new(REPO, "main", Scope::Trunk)).unwrap();
         World {
             _tmp: tmp,
             forge: FakeForge {

@@ -10,7 +10,7 @@ use choros_core::space;
 fn a_branch_space_queue_lives_and_retires_with_its_space() {
     let w = World::new();
     let epic = space::create_branch(&w.trunk, "epic-x").unwrap();
-    Queue::create(&w.trunk, "epicq", REPO, Scope::Branch("epic-x".into())).unwrap();
+    Queue::create(&w.trunk, "epicq", QueueConfig::new(REPO, "main", Scope::Branch("epic-x".into()))).unwrap();
     crate::branch::set_binding(&epic, REPO, Some("epicq")).unwrap();
     assert_eq!(crate::branch::default_binding(&epic, REPO).unwrap(), Some(Some("epicq".into())));
 
