@@ -13,7 +13,7 @@ use choros_core::space;
 use crate::registry;
 use crate::ui;
 
-/// The `choros work` picker: a name, a set of registry repos, and — once
+/// The `choros work -i` picker: a name, a set of registry repos, and — once
 /// Enter is pressed — a progress popup over the same picker until the
 /// workspace exists.
 pub struct App {

@@ -39,7 +39,7 @@ from the URL. Only SSH remotes are supported — the registry copy is later
 used as a `--reference-if-able` source for every workspace clone, which needs
 a stable local git repo, not an HTTP(S) endpoint.
 
-`choros work` scans `.choros-config/registry/` and lets you pick repos from there.
+`choros work -i` scans `.choros-config/registry/` and lets you pick repos from there.
 
 ## Install
 
@@ -59,9 +59,9 @@ cargo install --path .
 Run from the trunk or a branch-space; new workspaces go where you are.
 
 ```bash
-choros work                     # fast-create: just name + repos, then exit
-choros work PROJ-1              # name pre-filled, jumps to repo selection
-choros work PROJ-1 api web      # fully non-interactive (no TUI)
+choros work PROJ-1 api web      # make workspace PROJ-1 with the api and web repos
+choros work -i                  # the same, from a name + repo picker
+choros work -i PROJ-1           # name pre-filled, jumps to repo selection
 choros branch checkout          # make a branch-space here
 choros ls                       # workspaces here and below, as a tree
 choros archive                  # archive the workspace your shell is in
@@ -75,7 +75,7 @@ choros repo add REPO [REPO…]    # inside a workspace: clone registry repos int
 choros -h                       # every command
 ```
 
-`choros work` is the way to make a fresh choros: it opens the name + repo picker, shows progress over it while cloning, and exits once the workspace exists. With the shell integration below, your shell is `cd`'d into the new choros on success.
+`choros work` is the way to make a fresh choros. Given a name and repos it just makes it; with `-i` it opens the name + repo picker, shows progress over it while cloning, and exits once the workspace exists. Without either it prints its usage, so a picker only opens when asked for, as with `ergon work -i`. With the shell integration below, your shell is `cd`'d into the new choros on success.
 
 ### Shell integration
 
@@ -210,7 +210,7 @@ inside it, `ls`, `status` and the queue TUI show only what's in it, and you
 can point a Claude Code session at it without exposing the rest of the trunk.
 
 ```bash
-choros branch checkout          # make it (the picker can pick a queue from further up)
+choros branch checkout          # make it (`choros branch -i checkout` picks a queue from further up)
 cd checkout
 choros queue new checkoutq --branch checkout   # its own queue: every workspace here lands into it
 choros work PROJ-1240 api web   # api and web both land into checkoutq
@@ -257,7 +257,7 @@ a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing
 choros queue new appq              # a queue for every repo of the trunk
 choros queue new -i                # the same, asking for each setting
 choros queue ls                    # the queues here: scope, repos, open sets, diffbase
-choros repo bind app appq          # inside a workspace (or press `b` in `choros work`)
+choros repo bind app appq          # inside a workspace (or press `b` in `choros work -i`)
 choros land continue               # land, keep working here
 choros repo sync                   # catch up when the prompt shows ⇣sync
 choros land archive                # land, then archive the workspace

@@ -66,10 +66,11 @@ SETUP (once per machine or trunk)
                                     branch and archive can move your shell
 
 SPACES (in the trunk or a branch-space; acts where you are)
-    choros work [NAME [REPO…]]      create a workspace here: name + repo picker (b picks a repo's
-                                    queue, defaulting to the branch-space's); with REPOs, no picker
-    choros branch NAME [--no-pick]  create a branch-space here; the picker sets which queue from
-                                    further up its new workspaces land into
+    choros work NAME REPO…          create a workspace here with those registry repos
+    choros work -i [NAME]           the same, from a name + repo picker (b picks a repo's queue,
+                                    defaulting to the branch-space's)
+    choros branch [-i] NAME         create a branch-space here; with -i, a picker sets which queue
+                                    from further up its new workspaces land into
     choros branch bind [REPO] QUEUE|none
                                     in a branch-space: change that default for every repo, or one
                                     (new workspaces only). A queue scoped to a branch-space needs
@@ -266,14 +267,46 @@ fn space_here() -> Result<PathBuf> {
         .ok_or_else(|| eyre!("not in a choros trunk (no .choros-config above here); run `choros init` first"))
 }
 
-pub fn run_work(args: Vec<String>) -> Result<()> {
-    let space = space_here()?;
-    let mut iter = args.into_iter();
-    let name = iter.next();
-    let repos: Vec<String> = iter.collect();
-    if let (Some(name), false) = (&name, repos.is_empty()) {
-        return run_work_noninteractive(space, name.clone(), repos);
+/// How `choros work` was asked to make a workspace: named with its repos,
+/// or picked in the TUI (`-i`), maybe with the name filled in.
+#[derive(Debug, PartialEq, Eq)]
+enum WorkArgs {
+    Given { name: String, repos: Vec<String> },
+    Pick { name: Option<String> },
+}
+
+const USAGE_WORK: &str = "usage: choros work NAME REPO… | choros work -i [NAME]";
+
+fn parse_work_args(args: Vec<String>) -> Option<WorkArgs> {
+    let interactive = args.iter().any(|a| a == "-i" || a == "--interactive");
+    let mut rest: Vec<String> = args
+        .into_iter()
+        .filter(|a| a != "-i" && a != "--interactive")
+        .collect();
+    if rest.iter().any(|a| a.starts_with('-')) {
+        return None;
     }
+    match (interactive, rest.len()) {
+        (true, 0) => Some(WorkArgs::Pick { name: None }),
+        (true, 1) => Some(WorkArgs::Pick { name: rest.pop() }),
+        (false, 2..) => {
+            let name = rest.remove(0);
+            Some(WorkArgs::Given { name, repos: rest })
+        }
+        _ => None,
+    }
+}
+
+pub fn run_work(args: Vec<String>) -> Result<()> {
+    let Some(args) = parse_work_args(args) else {
+        eprintln!("{USAGE_WORK}");
+        std::process::exit(2);
+    };
+    let space = space_here()?;
+    let name = match args {
+        WorkArgs::Given { name, repos } => return run_work_noninteractive(space, name, repos),
+        WorkArgs::Pick { name } => name,
+    };
     let focus = if name.is_some() {
         NewFocus::Repos
     } else {
@@ -361,10 +394,16 @@ pub fn run_branch(args: Vec<String>) -> Result<()> {
             println!("{}", dst.display());
             Ok(())
         }
-        [name] | [name, "--no-pick"] => {
+        [name] | ["-i" | "--interactive", name] | [name, "-i" | "--interactive"]
+            if !name.starts_with('-') =>
+        {
+            let pick = a.len() == 2;
+            if pick && !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+                return Err(eyre!("no terminal to pick in; drop -i"));
+            }
             let parent = space_here()?;
             let dir = space::create_branch(&parent, name)?;
-            if a.len() == 1 && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            if pick {
                 pick_branch_defaults(&dir)?;
             }
             eprintln!("created branch-space {}", dir.display());
@@ -376,7 +415,7 @@ pub fn run_branch(args: Vec<String>) -> Result<()> {
 }
 
 fn usage_branch() -> ! {
-    eprintln!("usage: choros branch NAME [--no-pick] | branch bind [REPO] QUEUE|none | branch archive [NAME] [--force]");
+    eprintln!("usage: choros branch [-i] NAME | branch bind [REPO] QUEUE|none | branch archive [NAME] [--force]");
     std::process::exit(2);
 }
 
@@ -446,4 +485,32 @@ impl ProgressSink for StderrProgress {
 
 fn run_tui(app: &mut app::App) -> Result<()> {
     crate::tui::with_tui(|terminal| app::run(terminal, app))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Option<WorkArgs> {
+        parse_work_args(args.iter().map(|a| a.to_string()).collect())
+    }
+
+    /// `choros work` makes a workspace from what it's given, and opens the
+    /// picker only when asked to with -i, as `ergon work -i` does.
+    #[test]
+    fn work_needs_repos_or_the_picker() {
+        let given = |name: &str, repos: &[&str]| WorkArgs::Given {
+            name: name.into(),
+            repos: repos.iter().map(|r| r.to_string()).collect(),
+        };
+        assert_eq!(parse(&["PROJ-1", "api", "web"]), Some(given("PROJ-1", &["api", "web"])));
+        assert_eq!(parse(&["-i"]), Some(WorkArgs::Pick { name: None }));
+        assert_eq!(
+            parse(&["--interactive", "PROJ-1"]),
+            Some(WorkArgs::Pick { name: Some("PROJ-1".into()) })
+        );
+        for bad in [&[][..], &["PROJ-1"], &["-i", "PROJ-1", "api"], &["PROJ-1", "--nope", "api"]] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
 }

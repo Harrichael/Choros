@@ -78,7 +78,7 @@ Queue names must not equal an existing branch on a repo's origin (a branch
 lands) and must not be `landing` or `none`.
 
 **Which queue a repo lands into.** In order: the queue the workspace bound it
-to (`choros repo bind REPO QUEUE|none`, or the `choros work` picker); else the
+to (`choros repo bind REPO QUEUE|none`, or the `choros work -i` picker); else the
 queue scoped to the workspace, or to the nearest branch-space holding it; else
 none, which is instant mode. So a queue scoped to a branch-space takes its
 workspaces with no binding at all; binding is for trunk queues, and for
