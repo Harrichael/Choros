@@ -15,7 +15,10 @@ place in the graph is settled before its PR opens; a public set is never moved
 behind another one.
 
 Without a queue, a repo in a workspace is in **instant mode**: landing merges
-to main straight away.
+to main straight away. With `via = "pr"`, a PR that can't merge at once
+(a review due, checks running) waits; when it merges, `chorosd` logs it to
+`instant.jsonl` without another land, even from an archived workspace, and
+the workspace's next land settles its own record.
 
 ## Vocabulary
 

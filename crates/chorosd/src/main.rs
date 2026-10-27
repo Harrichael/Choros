@@ -1,10 +1,12 @@
 //! chorosd: runs every landing queue's pass on a timer — notices merged and
 //! closed PRs, re-syncs what is behind them, rebuilds merge heads, opens the
-//! next PRs. Conflicts park; it never runs Claude and never asks anything.
+//! next PRs — and logs instant PRs that merged after their land. Conflicts
+//! park; it never runs Claude and never asks anything.
 
 use std::path::Path;
 use std::time::Duration;
 
+use choros_core::choros::CONFIG_DIR;
 use choros_core::trunks;
 use choros_land::agent::Claude;
 use choros_land::engine::{Env, PassReport, Work};
@@ -46,8 +48,26 @@ fn tick() -> Result<()> {
             if let Err(e) = pass(&trunk, &name) {
                 log(&format!("{name} @ {}: {e:#}", trunk.display()));
             }
-
         }
+        if let Err(e) = log_instant_merges(&trunk) {
+            log(&format!("instant PRs @ {}: {e:#}", trunk.display()));
+        }
+    }
+    Ok(())
+}
+
+fn log_instant_merges(trunk: &Path) -> Result<()> {
+    let gh_dir = trunk.join(CONFIG_DIR).join("gh");
+    let gh = Gh {
+        config_dir: gh_dir.exists().then_some(gh_dir),
+    };
+    let report = choros_land::instant::log_merged(trunk, &gh)?;
+    for l in &report.logged {
+        let pr = l.pr.map(|n| format!("PR #{n}")).unwrap_or_default();
+        log(&format!("{}: {pr} merged; logged its instant land from {}", l.repo, l.workspace.display()));
+    }
+    for e in &report.errors {
+        log(&format!("instant PRs: {e}"));
     }
     Ok(())
 }

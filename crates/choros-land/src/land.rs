@@ -1084,17 +1084,7 @@ fn merge_instant_pr(env: &Env, git: &Git, trunk: &Path, ws: &Path, repo: &str, p
 
 /// Logged first, as on the push path.
 fn finish_instant_pr(trunk: &Path, ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
-    crate::instant::record(
-        trunk,
-        &crate::instant::Landed {
-            repo: repo.to_string(),
-            workspace: ws.to_path_buf(),
-            commit: pr.head.clone(),
-            pr: Some(pr.number),
-            labels: pr.labels.clone(),
-            sessions: pr.sessions.clone(),
-        },
-    )?;
+    crate::instant::record_pr(trunk, ws, repo, pr)?;
     update_repo(ws, repo, |rl| {
         rl.landed_through = Some(pr.head.clone());
         rl.instant_pr = None;

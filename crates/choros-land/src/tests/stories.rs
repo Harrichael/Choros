@@ -437,6 +437,66 @@ fn an_instant_pr_that_cannot_merge_yet_is_finished_later() {
     assert_eq!(w.forge.pr_count(), 4);
 }
 
+/// An instant PR that merges on GitHub after its land is logged by the
+/// daemon, with the land's labels, though no one lands from that workspace
+/// again, even once it is archived, and though another PR can't be checked
+/// at all. A land that does come later finishes the workspace's own record
+/// without logging the PR twice.
+#[test]
+fn an_instant_pr_merged_after_its_land_is_logged_without_another_land() {
+    let w = World::new();
+    let instant_ws = |name: &str| {
+        choros_core::choros::create(&w.trunk, name, &[REPO.to_string()], &()).unwrap();
+        let ws = w.trunk.join(name);
+        let mut wl = crate::workspace::read(&ws).unwrap();
+        wl.instant = Some(crate::instant::Via::Pr);
+        crate::workspace::write(&ws, &wl).unwrap();
+        ws
+    };
+    let kept = instant_ws("kept");
+    let shelved = instant_ws("shelved");
+
+    *w.forge.refuse_merges.lock().unwrap() = true;
+    for (ws, file, task) in [(&kept, "a.txt", "tasks/a"), (&shelved, "b.txt", "tasks/b")] {
+        w.commit(ws, file, "x\n");
+        let mut req = w.request(ws, None, None);
+        req.labels = vec![task.into()];
+        assert!(w.land_req(&req, None).is_err());
+    }
+    choros_core::choros::archive_at(&shelved).unwrap();
+    let gone = instant_ws("gone");
+    let mut wl = crate::workspace::read(&gone).unwrap();
+    wl.repo.entry(REPO.to_string()).or_default().instant_pr = Some(crate::workspace::InstantPr {
+        number: 99,
+        head: String::new(),
+        labels: Vec::new(),
+        sessions: Vec::new(),
+    });
+    crate::workspace::write(&gone, &wl).unwrap();
+    let report = crate::instant::log_merged(&w.trunk, &w.forge).unwrap();
+    assert!(report.logged.is_empty(), "still open");
+    assert_eq!(report.errors.len(), 1, "#99 is unknown to GitHub");
+
+    w.forge.merge(1, MergeMethod::Merge);
+    w.forge.merge(2, MergeMethod::Merge);
+    let report = crate::instant::log_merged(&w.trunk, &w.forge).unwrap();
+    assert_eq!(report.errors.len(), 1);
+    let mut logged: Vec<_> = report.logged.iter().map(|l| (l.pr, l.labels.clone(), l.workspace.clone())).collect();
+    logged.sort();
+    assert_eq!(
+        logged,
+        [
+            (Some(1), vec!["tasks/a".to_string()], kept.clone()),
+            (Some(2), vec!["tasks/b".to_string()], shelved.clone()),
+        ]
+    );
+    assert!(crate::instant::log_merged(&w.trunk, &w.forge).unwrap().logged.is_empty(), "logged once");
+
+    w.land(&kept).unwrap();
+    assert_eq!(crate::instant::read(&w.trunk).unwrap().len(), 2, "the land doesn't log #1 again");
+    assert!(w.land(&kept).is_err(), "nothing left to land");
+}
+
 /// A set's commits whose change reached main some other way are dropped
 /// when it is re-synced, so its PR lists only what it still changes; a set
 /// left with nothing is merged without a PR at all.
