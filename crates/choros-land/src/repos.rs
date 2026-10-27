@@ -11,7 +11,7 @@
 //! show they still build without it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use choros_core::choros::CONFIG_DIR;
 use color_eyre::eyre::{eyre, Result};
@@ -36,8 +36,12 @@ pub enum DepsDefault {
     Auto,
 }
 
+pub fn path(trunk: &Path) -> PathBuf {
+    trunk.join(CONFIG_DIR).join("repos.toml")
+}
+
 pub fn read(trunk: &Path, repo: &str) -> Result<RepoConfig> {
-    let path = trunk.join(CONFIG_DIR).join("repos.toml");
+    let path = path(trunk);
     if !path.exists() {
         return Ok(RepoConfig::default());
     }

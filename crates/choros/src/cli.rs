@@ -52,6 +52,9 @@ __choros_leave() {
 }
 "#;
 
+/// How to work in a choros space, for an agent; `choros help agent`.
+pub const AGENT_DOC: &str = include_str!("../../../docs/agent.md");
+
 const USAGE: &str = "\
 choros — multi-repo work-environment manager
 
@@ -126,6 +129,10 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
                                     with `choros repo sync`
 
 AGENTS
+    choros here                     what this folder is, where a land from it goes, whether each
+                                    repo has a check, and where queue state lives
+    choros help agent               how to work in a choros space: workspaces, land flags,
+                                    --deps auto, repos.toml
     choros agent ls                 resumable claude / cursor sessions under the current directory
     choros agent save settings      TUI: promote this workspace's claude settings to the template
 
@@ -337,10 +344,7 @@ fn run_work_noninteractive(space: PathBuf, name: String, repos: Vec<String>) -> 
     let info = choros::create(&space, &name, &repos, &progress)?;
     let scoped = choros_land::workspace::space_queue(&trunk, &space::rel(&trunk, &space)?)?;
     for repo in &repos {
-        let queue = match choros_land::branch::default_binding(&space, repo)? {
-            Some(queue) => queue,
-            None => scoped.clone(),
-        };
+        let queue = choros_land::workspace::queue_for_new(&trunk, &space, repo)?;
         match &queue {
             Some(q) => progress.status(format!("{repo} lands into {q}; moving it onto the merge head…")),
             // Straight to main where a queue is scoped here has to be said outright.

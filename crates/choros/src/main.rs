@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod here;
 mod land_cli;
 mod ls;
 mod queue_tui;
@@ -53,6 +54,28 @@ fn run() -> Result<()> {
         Some("status") => land_cli::run_status(rest),
         Some("queue") => land_cli::run_queue(rest),
         Some("landing") => land_cli::run_landing(rest),
+        Some("here") => {
+            reject_extra_args("here", &rest);
+            here::run()
+        }
+        Some("help") => match rest.as_slice() {
+            [] => {
+                cli::print_usage();
+                Ok(())
+            }
+            [t] if t == "agent" => {
+                print!("{}", cli::AGENT_DOC);
+                Ok(())
+            }
+            [t] => {
+                eprintln!("choros: no help topic `{t}`; `choros help` lists them");
+                std::process::exit(2);
+            }
+            _ => {
+                eprintln!("choros: `choros help` takes at most one topic, got: {}", rest.join(" "));
+                std::process::exit(2);
+            }
+        },
         Some("shell-init") => {
             reject_extra_args("shell-init", &rest);
             cli::emit_shell_init();

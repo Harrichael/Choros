@@ -146,6 +146,16 @@ pub fn scoped_queue(trunk: &Path, ws: &Path) -> Result<Option<String>> {
     space_queue(trunk, &space::rel(trunk, &space)?)
 }
 
+/// The queue a new workspace in `space` lands `repo` into: what the nearest
+/// branch-space binds it to, else the queue scoped to the space; `None` for
+/// straight to main.
+pub fn queue_for_new(trunk: &Path, space: &Path, repo: &str) -> Result<Option<String>> {
+    match crate::branch::default_binding(space, repo)? {
+        Some(queue) => Ok(queue),
+        None => space_queue(trunk, &space::rel(trunk, space)?),
+    }
+}
+
 /// The queue scoped to the branch-space at `space_rel`, or to the nearest
 /// one above it, that its workspaces land into unasked.
 pub fn space_queue(trunk: &Path, space_rel: &str) -> Result<Option<String>> {

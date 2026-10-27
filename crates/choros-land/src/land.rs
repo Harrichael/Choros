@@ -394,7 +394,7 @@ fn land_queued(
                 n
             }
             Auto::Fallback(why) => {
-                warnings.push(format!("landed on everything queued: {why}"));
+                warnings.push(why);
                 land_normal(env, q, ws, repo, req)?
             }
         },
@@ -649,7 +649,7 @@ fn land_fork(
 enum Auto {
     /// The set, and what it depends on and why.
     Landed(u32, Vec<String>),
-    /// Why it should land on everything queued after all.
+    /// It lands on everything queued after all; the line saying why.
     Fallback(String),
 }
 
@@ -687,7 +687,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
         if live.iter().all(|m| mine.contains(m)) {
-            return Ok(Auto::Fallback("its commits need every queued set".into()));
+            return Ok(Auto::Fallback("landed on everything queued: its commits need every queued set".into()));
         }
         let main = work.root(repo)?;
         let spec = BaseSpec {
@@ -699,7 +699,9 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         };
         let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
         let Ok(base) = work.build(repo, &main, &tips, &what)? else {
-            return Ok(Auto::Fallback("the sets its commits need conflict with each other".into()));
+            return Ok(Auto::Fallback(
+                "landed on everything queued: the sets its commits need conflict with each other".into(),
+            ));
         };
         let tip = match work.replay(repo, &base, &own, &what)? {
             Ok(tip) => tip,
@@ -707,7 +709,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
                 let owners = owners(&work.st, &sync, &live, &mine, &mut touched, &files)?;
                 if owners.is_empty() {
                     return Ok(Auto::Fallback(format!(
-                        "its commits conflict with main itself in {}",
+                        "landed on everything queued: its commits conflict with main itself in {}",
                         files.join(", ")
                     )));
                 }
@@ -743,7 +745,19 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
             continue;
         }
         if let Err(output) = run_check(&sync, &tip, check)? {
-            return Ok(Auto::Fallback(format!("`{check}` failed without the rest of the queue:\n{output}")));
+            let left_out: Vec<String> = live
+                .iter()
+                .filter(|m| !mine.contains(m))
+                .map(|m| crate::state::branch(&q.name, *m))
+                .collect();
+            let log = q.dir().join(format!("check-{repo}.log"));
+            std::fs::write(&log, output)?;
+            return Ok(Auto::Fallback(format!(
+                "`{check}` failed without {}; landed after {}; full output: {}",
+                left_out.join(", "),
+                if left_out.len() == 1 { "it" } else { "them" },
+                log.display()
+            )));
         }
 
         let n = work.st.next_n.max(1);
@@ -830,8 +844,8 @@ pub(crate) fn changed_lines(git: &Git, (from, to): (&str, &str)) -> Result<BTree
     Ok(out)
 }
 
-/// Run `check` in the sync clone at `tip`: `Err` with the end of its output
-/// when it fails. Tracked files are put back after, so the next step starts
+/// Run `check` in the sync clone at `tip`: `Err` with its output when it
+/// fails. Tracked files are put back after, so the next step starts
 /// clean; build output is left for the next run to reuse.
 fn run_check(sync: &Git, tip: &str, check: &str) -> Result<std::result::Result<(), String>> {
     sync.checkout_detached(tip)?;
@@ -844,13 +858,11 @@ fn run_check(sync: &Git, tip: &str, check: &str) -> Result<std::result::Result<(
     if out.status.success() {
         return Ok(Ok(()));
     }
-    let text = format!(
+    Ok(Err(format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
-    let lines: Vec<&str> = text.lines().collect();
-    Ok(Err(lines[lines.len().saturating_sub(20)..].join("\n")))
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]

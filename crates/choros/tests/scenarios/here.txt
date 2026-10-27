@@ -1,0 +1,65 @@
+# `choros here` tells someone dropped into a folder what it is to choros:
+# the trunk, a workspace or a landing folder, where a land from it goes,
+# whether each repo has a check, and where the queue's state lives.
+
+$ choros here
+here: the trunk, no workspace (`choros work NAME REPO…` makes one here)
+trunk: $ROOT/trunk
+a new workspace here lands:
+  app: straight to main; no check, so no --deps auto
+repo settings: none yet; they go in $ROOT/trunk/.choros-config/repos.toml (`choros help agent` shows how)
+$ choros work one app
+$ROOT/trunk/one/app
+mkdir $ROOT/trunk/one
+cloning app…
+copying agent templates…
+$ cd trunk/one
+$ choros repo bind app appq
+app now lands into appq
+$ choros here
+here: workspace one
+trunk: $ROOT/trunk
+a land from here lands each repo as its own set:
+  app: into appq; no check, so no --deps auto
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+repo settings: none yet; they go in $ROOT/trunk/.choros-config/repos.toml (`choros help agent` shows how)
+$ cd trunk
+$ printf '[app]\ncheck = "cargo check"\n' > .choros-config/repos.toml
+$ cd trunk/one/app
+$ choros here
+here: workspace one
+trunk: $ROOT/trunk
+a land from here lands app:
+  app: into appq; check `cargo check`, so --deps auto works; a plain land goes on everything queued
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+repo settings: $ROOT/trunk/.choros-config/repos.toml
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/landing/appq/landing-1
+$ cd trunk/landing/appq/landing-1
+$ choros here
+here: landing folder of appq/landing-1, landed from $ROOT/trunk/one
+commits pushed to appq/landing-1 from here join the set; `choros land` refuses here
+trunk: $ROOT/trunk
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+
+# A branch-space with a queue scoped to it: its new workspaces land there.
+$ cd trunk
+$ choros branch epic
+$ROOT/trunk/epic
+created branch-space $ROOT/trunk/epic
+$ choros queue new epq --branch epic
+created queue epq; workspaces in branch epic land into it
+$ cd trunk/epic
+$ choros here
+here: branch-space epic, no workspace (`choros work NAME REPO…` makes one here)
+trunk: $ROOT/trunk
+a new workspace here lands:
+  app: into epq; check `cargo check`, so --deps auto works; a plain land goes on everything queued
+queue epq: state in $ROOT/trunk/.choros-config/queues/epq/state.json (`choros queue epq` reads it)
+repo settings: $ROOT/trunk/.choros-config/repos.toml
+
+# `choros help agent` is the long form, for an agent that has to drive choros.
+$ choros help agent | head -1
+# Working in a choros space

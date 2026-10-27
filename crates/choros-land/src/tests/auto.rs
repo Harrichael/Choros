@@ -92,11 +92,12 @@ fn work_that_undoes_a_set_lands_behind_it() {
 
 /// No conflict doesn't mean no need: these commits use a file a queued set
 /// adds without touching it. The check catches it, and the land goes on top
-/// of everything queued instead.
+/// of everything queued instead, saying in one line which sets the check
+/// failed without and where its whole output is.
 #[test]
 fn a_failing_check_lands_on_everything_queued() {
     let w = World::new();
-    w.repos_toml("[app]\ncheck = \"test -f a.txt\"\n");
+    w.repos_toml("[app]\ncheck = \"echo no a.txt >&2; test -f a.txt\"\n");
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "a.txt", "a\n");
@@ -109,11 +110,15 @@ fn a_failing_check_lands_on_everything_queued() {
     let st = w.state();
     assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);
     assert_eq!(w.file_at(&st.sets[&2].tip, "a.txt").as_deref(), Some("a\n"));
-    let warnings = &out.landed[0].warnings;
-    assert!(
-        warnings[0].starts_with("landed on everything queued: `test -f a.txt` failed without the rest of the queue"),
-        "{warnings:?}"
+    let log = w.trunk.join(".choros-config/queues/appq/check-app.log");
+    assert_eq!(
+        out.landed[0].warnings,
+        [format!(
+            "`echo no a.txt >&2; test -f a.txt` failed without appq/landing-1; landed after it; full output: {}",
+            log.display()
+        )]
     );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "no a.txt\n");
 }
 
 /// Auto without a check is refused, before anything lands; and a repo set to
