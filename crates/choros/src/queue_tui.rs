@@ -1,4 +1,4 @@
-//! The queue TUI (`choros queue [NAME]`) and the multi-select picker it shares
+//! The queue TUI (`choros queue -i [NAME]`) and the multi-select picker it shares
 //! with `land --fork`.
 
 use std::path::Path;

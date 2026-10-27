@@ -92,15 +92,17 @@ INSIDE A WORKSPACE
                                     is scoped to the workspace
     choros land continue|archive    land this repo (or, at the workspace root, each repo as its own
                                     set) into its queue, or straight to main when it has none; `archive` then
-                                    archives the workspace. --fork [--deps SET,…|none] lands beside
-                                    the queue instead of on top; --title/--body-file set the PR text
+                                    archives the workspace. --fork --deps SET,…|none (or -i to pick
+                                    them) lands beside the queue instead of on top; --title/--body-file
+                                    set the PR text
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
 
 QUEUES (anywhere in a trunk; narrowed to where you are)
     choros status [--prompt|--all]  landing queues and their sets; --prompt prints one token
                                     (⇣sync / !resolve) for shell prompts
-    choros queue [NAME]             TUI: a queue's landing-sets; edit dependencies, drop, sync
+    choros queue NAME               a queue's landing-sets, as `choros status` shows them
+    choros queue -i [NAME]          TUI: a queue's landing-sets; edit dependencies, drop, sync
     choros queue ls [--all]         each queue: its scope, repos, open sets, diffbase
     choros queue new [-i] NAME [--workspace PATH | --branch PATH]
                                     create a landing queue for every repo, optionally only for one

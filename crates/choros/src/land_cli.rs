@@ -48,7 +48,7 @@ fn trunk_here() -> Result<PathBuf> {
     space::find_trunk(&cwd).ok_or_else(|| eyre!("not under a choros trunk (no .choros-config above here)"))
 }
 
-/// The queues `choros queue` and `landing open` offer from here, narrowed
+/// The queues `choros queue -i` and `landing open` offer from here, narrowed
 /// like `choros status`.
 fn visible_here(trunk: &Path) -> Result<Vec<String>> {
     let cwd = std::env::current_dir()?;
@@ -73,9 +73,10 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--fork [--deps SET,…|none]] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…"),
+        _ => usage("choros land continue|archive [--fork --deps SET,…|none | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…"),
     };
     let mut fork = false;
+    let mut pick = false;
     let mut deps: Option<Vec<Dep>> = None;
     let mut on_conflict = None;
     let mut title = None;
@@ -84,6 +85,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--fork" => fork = true,
+            "-i" | "--interactive" => pick = true,
             "--deps" => deps = Some(parse_deps(&it.next().unwrap_or_default())?),
             "--on-conflict" => {
                 on_conflict = Some(match it.next().as_deref() {
@@ -103,14 +105,16 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     }
     let cwd = std::env::current_dir()?;
     let (trunk, ws) = choros::find_workspace(&cwd)?;
-    let fork = if fork {
-        Some(match deps {
-            Some(d) => d,
-            None if interactive() => pick_fork_deps(&trunk, &ws, &cwd)?,
-            None => return Err(eyre!("--fork without a terminal needs --deps (SET,… or none)")),
-        })
-    } else {
-        None
+    let fork = match (fork, deps, pick) {
+        (false, None, false) => None,
+        (false, ..) => return Err(eyre!("--deps and -i choose what a fork depends on; add --fork")),
+        (true, Some(_), true) => return Err(eyre!("pass --deps or -i, not both")),
+        (true, Some(d), false) => Some(d),
+        (true, None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none")),
+        (true, None, true) => Some(pick_fork_deps(&trunk, &ws, &cwd)?),
+        (true, None, false) => {
+            return Err(eyre!("--fork needs --deps SET,…|none (none: on main), or -i to pick them"));
+        }
     };
 
     let tools = Tools::for_trunk(&trunk);
@@ -252,43 +256,49 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         return Ok(());
     }
     for q in report {
-        let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
-        println!("{} ({repos}) @ {}", q.name, q.trunk.display());
-        for s in &q.sets {
-            if s.state == "merged" {
-                continue;
-            }
-            let mut line = format!("  {:<8} {} ({})", s.state, s.branch, s.repo);
-            if !s.deps.is_empty() {
-                line.push_str(&format!("  after {}", s.deps.join(", ")));
-            }
-            if let Some(pr) = &s.pr {
-                line.push_str(&format!("  {pr}"));
-            }
-            if let Some(p) = &s.park {
-                line.push_str(&format!("  ! parked ({:?}) {}", p.op, p.files.join(", ")));
-            } else if s.blocked {
-                line.push_str("  (waiting on a parked or closed set)");
-            }
-            if !s.conflicts_with.is_empty() {
-                let with: Vec<String> = s.conflicts_with.iter().map(|n| format!("landing-{n}")).collect();
-                line.push_str(&format!("  clashes with {}", with.join(", ")));
-            }
-            if s.landing_dirty {
-                line.push_str("  (landing folder has uncommitted changes)");
-            }
-            println!("{line}");
-        }
-        let merged = q.sets.iter().filter(|s| s.state == "merged").count();
-        if merged > 0 {
-            println!("  ({merged} merged)");
-        }
-        print_diffbase(&q);
-        for (ws, repo) in &q.needs_sync {
-            println!("  ⇣ {} ({repo}) needs `choros repo sync`", ws.display());
-        }
+        print_queue_status(&q);
     }
     Ok(())
+}
+
+/// A queue, its open sets and what needs doing about them, for `status` and
+/// `queue NAME`.
+fn print_queue_status(q: &status::QueueStatus) {
+    let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
+    println!("{} ({repos}) @ {}", q.name, q.trunk.display());
+    for s in &q.sets {
+        if s.state == "merged" {
+            continue;
+        }
+        let mut line = format!("  {:<8} {} ({})", s.state, s.branch, s.repo);
+        if !s.deps.is_empty() {
+            line.push_str(&format!("  after {}", s.deps.join(", ")));
+        }
+        if let Some(pr) = &s.pr {
+            line.push_str(&format!("  {pr}"));
+        }
+        if let Some(p) = &s.park {
+            line.push_str(&format!("  ! parked ({:?}) {}", p.op, p.files.join(", ")));
+        } else if s.blocked {
+            line.push_str("  (waiting on a parked or closed set)");
+        }
+        if !s.conflicts_with.is_empty() {
+            let with: Vec<String> = s.conflicts_with.iter().map(|n| format!("landing-{n}")).collect();
+            line.push_str(&format!("  clashes with {}", with.join(", ")));
+        }
+        if s.landing_dirty {
+            line.push_str("  (landing folder has uncommitted changes)");
+        }
+        println!("{line}");
+    }
+    let merged = q.sets.iter().filter(|s| s.state == "merged").count();
+    if merged > 0 {
+        println!("  ({merged} merged)");
+    }
+    print_diffbase(q);
+    for (ws, repo) in &q.needs_sync {
+        println!("  ⇣ {} ({repo}) needs `choros repo sync`", ws.display());
+    }
 }
 
 pub fn run_queue(args: Vec<String>) -> Result<()> {
@@ -297,7 +307,10 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
     let env = tools.env();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
-        [] => crate::queue_tui::run(&trunk, None, &visible_here(&trunk)?, &env),
+        ["-i" | "--interactive"] => crate::queue_tui::run(&trunk, None, &visible_here(&trunk)?, &env),
+        ["-i" | "--interactive", name] | [name, "-i" | "--interactive"] => {
+            crate::queue_tui::run(&trunk, Some(name), &[], &env)
+        }
         ["new", rest @ ..] if rest.contains(&"-i") => {
             let rest: Vec<&str> = rest.iter().copied().filter(|a| *a != "-i").collect();
             new_interactive(&env, &trunk, &rest)
@@ -398,9 +411,12 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        [name] => crate::queue_tui::run(&trunk, Some(name), &[], &env),
+        [name] if !name.starts_with('-') => {
+            print_queue_status(&status::queue_status(&trunk, name)?);
+            Ok(())
+        }
         _ => usage(
-            "choros queue [NAME] | queue ls [--all] \
+            "choros queue NAME | queue -i [NAME] | queue ls [--all] \
              | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
              | queue base NAME | queue base add|rm NAME REPO#N[,N…]…",
         ),

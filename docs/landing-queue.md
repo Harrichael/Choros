@@ -112,14 +112,14 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--fork [--deps SET,...|none]] [--title T] [--body-file F] [--session UUID]...
-choros land archive  [--fork [--deps SET,...|none]] [--title T] [--body-file F] [--session UUID]...
+choros land continue [--fork --deps SET,...|none | --fork -i] [--title T] [--body-file F] [--session UUID]...
+choros land archive  [--fork --deps SET,...|none | --fork -i] [--title T] [--body-file F] [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
 unlanded commits, each as its own landing-set with its own number. Repos
 landed together are not linked; a dependency across repos is added by hand
-(`--fork --deps`, or the queue TUI). A new set depends on what is queued in
+(`--fork --deps` or `--fork -i`, or the queue TUI). A new set depends on what is queued in
 its own repo. Multiple queues are locked one at a time in name order.
 
 **What is landed.** `rev-list --reverse landed_through..HEAD`, after the sync
@@ -145,9 +145,8 @@ commits.
 
 ### Fork land
 
-`--fork` with a TTY opens a picker of queued sets (and other queues' sets, as
-ordering-only edges); without a TTY, `--deps` is required (`none` = based on
-main). The workspace's own unmerged earlier sets are always added as deps, so
+`--fork` takes `--deps` (`none` = based on main), or `-i` for a picker of
+queued sets (and other queues' sets, as ordering-only edges). The workspace's own unmerged earlier sets are always added as deps, so
 a fork never loses commits it builds on.
 
 1. Base: no deps → `origin/main`; one dep → its tip; several → a private base
@@ -399,7 +398,7 @@ current merge head, in place, and update `base`. Explicit only.
 
 ## The queue TUI and recovery
 
-`choros queue [NAME]`: the graph as a list of landing-sets with deps, state and
+`choros queue -i [NAME]`: the graph as a list of landing-sets with deps, state and
 PR. Edit deps of *private* sets (add, remove, cross-queue ordering edges),
 change a workspace's binding, drop a set. Edits are validated (acyclic; no
 same-repo cross-queue edges; public sets cannot gain deps) and trigger a

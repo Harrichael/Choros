@@ -261,7 +261,7 @@ choros repo bind app appq          # inside a workspace (or press `b` in `choros
 choros land continue               # land, keep working here
 choros repo sync                   # catch up when the prompt shows ⇣sync
 choros land archive                # land, then archive the workspace
-choros land continue --fork        # land beside the queue (pick dependencies)
+choros land continue --fork -i     # land beside the queue (pick dependencies)
 choros status                      # queues, sets, PRs, parked conflicts
 choros queue resolve appq          # settle parked conflicts (a/b/c)
 choros landing open 3              # resume the session forked at landing-3
