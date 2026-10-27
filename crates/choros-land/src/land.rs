@@ -363,6 +363,19 @@ fn land_queued(
         work.save()?;
     }
 
+    // Landing again makes a new set; changes to an open one go through its
+    // landing folder, and the obvious move doesn't say so.
+    for set in q.read_state()?.sets.values() {
+        if set.n != n && set.is_open() && set.source.workspace == ws && set.source.repo == repo {
+            notes.push(format!(
+                "{} is still open; to change it, work in its landing folder (`choros landing open {} --queue {}`)",
+                set.branch(&q.name),
+                set.n,
+                q.name
+            ));
+        }
+    }
+
     let landing = make_landing(q, n, ws)?;
     let forked = fork_sessions(env, q, n, ws, repo, &landing, req, &mut warnings)?;
     Ok(Landed {
@@ -425,7 +438,7 @@ fn land_normal(
         work.save()?;
         let key = work.st.repos[repo].merge_head.as_ref().map(|m| m.composition.key());
         update_repo(ws, repo, |rl| {
-            rl.landed_through = Some(head.clone());
+            rl.landed(&q.name, n, &head);
             rl.composition = key;
         })?;
         return Ok(n);
@@ -561,7 +574,7 @@ fn land_fork(
         work.rebuild_merge_head(repo)?;
         work.save()?;
         update_repo(ws, repo, |rl| {
-            rl.landed_through = Some(head.clone());
+            rl.landed(&q.name, n, &head);
             rl.fork_deps.clear();
         })?;
         return Ok(n);
@@ -676,7 +689,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         work.rebuild_merge_head(repo)?;
         work.save()?;
         update_repo(ws, repo, |rl| {
-            rl.landed_through = Some(head.clone());
+            rl.landed(&q.name, n, &head);
             rl.fork_deps.clear();
         })?;
 

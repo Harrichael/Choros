@@ -146,7 +146,10 @@ pub fn run(trunk: &Path, name: Option<&str>, offered: &[String], env: &Env) -> R
                 Err(e) => format!("error: {e}"),
             },
             Action::Drop(n) => match admin::drop_set(env, &q, n) {
-                Ok(_) => format!("dropped landing-{n}"),
+                Ok(d) => match crate::land_cli::dropped_note(&d) {
+                    Some(note) => format!("dropped landing-{n}; {note}"),
+                    None => format!("dropped landing-{n}"),
+                },
                 Err(e) => format!("error: {e}"),
             },
             Action::Edit(n) => {

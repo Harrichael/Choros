@@ -11,6 +11,7 @@ use choros_land::forge::Gh;
 use choros_land::land::{self, ForkDeps, LandRequest};
 use choros_land::queue::{self, Queue};
 use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
+use choros_land::workspace::Unland;
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -411,8 +412,11 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
         }
         ["drop", name, n] => {
             let n: u32 = n.trim_start_matches("landing-").parse()?;
-            let report = admin::drop_set(&env, &Queue::open(&trunk, name)?, n)?;
-            print_report(name, &report);
+            let dropped = admin::drop_set(&env, &Queue::open(&trunk, name)?, n)?;
+            print_report(name, &dropped.report);
+            if let Some(note) = dropped_note(&dropped) {
+                println!("{note}");
+            }
             Ok(())
         }
         ["doctor", name] => {
@@ -634,6 +638,19 @@ fn print_diffbase(q: &status::QueueStatus) {
             println!("  (no PR opens here until the open ones merge)");
         }
         None => {}
+    }
+}
+
+/// What became of a dropped set's commits in the workspace they came from.
+pub fn dropped_note(d: &admin::Dropped) -> Option<String> {
+    let at = d.source.workspace.join(&d.source.repo);
+    match d.workspace {
+        Unland::Unlanded => Some(format!("its commits in {} count as unlanded again", at.display())),
+        Unland::Kept => Some(format!(
+            "its commits in {} stay landed: that workspace landed again on top of them",
+            at.display()
+        )),
+        Unland::Unknown => None,
     }
 }
 

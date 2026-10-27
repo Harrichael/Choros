@@ -500,3 +500,50 @@ fn landing_folders_follow_their_sets_and_retire_on_merge() {
     let tip = w.state().sets[&2].tip.clone();
     assert_eq!(git(&second.join(REPO), &["rev-parse", "HEAD"]), tip);
 }
+
+/// A dropped set's commits go back to its workspace: they count as unlanded,
+/// and the next land queues them again rather than finding nothing to land.
+#[test]
+fn a_dropped_set_lands_again_from_its_workspace() {
+    let w = World::new();
+    let first = w.workspace("first");
+    w.commit(&first, "a.txt", "a\n");
+    w.land(&first).unwrap();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+
+    let dropped = crate::admin::drop_set(&w.env(), &w.queue(), 2).unwrap();
+    assert_eq!(dropped.workspace, crate::workspace::Unland::Unlanded);
+
+    w.land(&ws).unwrap();
+    let st = w.state();
+    assert_eq!(st.sets[&2].status, SetStatus::Dropped);
+    assert_eq!(w.file_at(&st.sets[&3].tip, "b.txt").as_deref(), Some("b\n"));
+}
+
+/// Landing again from a workspace makes a new set, so the land says where
+/// changes to its still-open one go; and dropping that earlier set leaves
+/// its commits landed, since the new set builds on them.
+#[test]
+fn landing_again_points_at_the_open_set() {
+    let w = World::new();
+    let first = w.workspace("first");
+    w.commit(&first, "a.txt", "a\n");
+    w.land(&first).unwrap();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b, reviewed\n");
+
+    let out = w.land(&ws).unwrap();
+
+    assert_eq!(
+        out.landed[0].notes,
+        ["appq/landing-2 is still open; to change it, work in its landing folder \
+          (`choros landing open 2 --queue appq`)"
+            .to_string()]
+    );
+    let dropped = crate::admin::drop_set(&w.env(), &w.queue(), 2).unwrap();
+    assert_eq!(dropped.workspace, crate::workspace::Unland::Kept);
+}

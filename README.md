@@ -265,7 +265,7 @@ choros land continue --fork -i     # land beside the queue (pick dependencies)
 choros land continue --fork --deps auto   # on only what the commits need; needs a check in repos.toml
 choros status                      # queues, sets, PRs, parked conflicts
 choros queue resolve appq          # settle parked conflicts (a/b/c)
-choros landing open 3              # resume the session forked at landing-3
+choros landing open 3              # resume the session forked at landing-3; review fixes go here
 choros queue base add appq app#41  # build on app's PR #41 while it's in review
 ```
 

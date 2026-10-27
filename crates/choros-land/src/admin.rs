@@ -8,7 +8,8 @@ use color_eyre::eyre::{Result, eyre};
 use crate::engine::{Handler, Env, PassReport, Work};
 use crate::graph;
 use crate::queue::Queue;
-use crate::state::{Dep, ParkOp, SetStatus};
+use crate::state::{Dep, ParkOp, SetStatus, Source};
+use crate::workspace::{self, Unland};
 
 /// One pass now, in the foreground. With a handler, parked conflicts are
 /// retried and handed to it.
@@ -35,8 +36,10 @@ pub fn sync(env: &Env, q: &Queue, handler: Handler<'_>) -> Result<PassReport> {
 }
 
 /// Remove a queued set. Its dependents inherit its dependencies and re-sync
-/// without it on the pass that follows.
-pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<PassReport> {
+/// without it on the pass that follows. If it was its workspace's last land,
+/// its commits there count as unlanded again; otherwise the next sync would
+/// take them out of the workspace, as no longer in the queue.
+pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
     let set = work
         .st
@@ -58,9 +61,21 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<PassReport> {
     let set = work.st.sets.get_mut(&n).unwrap();
     set.status = SetStatus::Dropped;
     set.park = None;
+    let source = set.source.clone();
     let report = work.pass(env.forge);
     work.save()?;
-    report
+    let workspace = workspace::unland(&source.workspace, &source.repo, &q.name, n)?;
+    Ok(Dropped {
+        report: report?,
+        workspace,
+        source,
+    })
+}
+
+pub struct Dropped {
+    pub report: PassReport,
+    pub workspace: Unland,
+    pub source: Source,
 }
 
 /// Differences between state.json and origin that a pass would not fix on

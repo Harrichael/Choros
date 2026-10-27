@@ -452,7 +452,14 @@ same-repo cross-queue edges; public sets cannot gain deps) and trigger a
 re-sync and merge-head rebuild, conflicts parked as usual.
 
 `choros queue drop <set>` removes a queued set (its dependents re-sync without
-it). `choros queue doctor` reconciles `state.json` with origin and GitHub.
+it). If the set was its workspace's last land, its commits there count as
+unlanded again, so they can be landed anew; otherwise the next sync would take
+them out of the workspace, as no longer in the queue. A workspace that landed
+again on top of the set keeps them landed.
+
+Landing again from a workspace always makes a new set. Changes to a set still
+in the queue go through its landing folder, and the land says so when the
+workspace has one open. `choros queue doctor` reconciles `state.json` with origin and GitHub.
 
 ## Code layout
 

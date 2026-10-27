@@ -95,7 +95,8 @@ INSIDE A WORKSPACE
                                     archives the workspace. --fork --deps SET,…|none (or -i to pick
                                     them) lands beside the queue instead of on top; --deps auto on only
                                     what the commits need, if repos.toml gives the repo a check;
-                                    --title/--body-file set the PR text
+                                    --title/--body-file set the PR text. Each land is a new set;
+                                    change an open one from its landing folder
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
 
@@ -113,7 +114,8 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
     choros queue sync [NAME]        run the daemon's pass now
     choros queue resolve NAME [--agent trust|review|manual]
                                     retry parked conflicts, asking how to resolve each
-    choros queue drop NAME N        remove a queued landing-set
+    choros queue drop NAME N        remove a queued landing-set; if it was its workspace's last
+                                    land, its commits there count as unlanded again
     choros queue doctor NAME        compare the queue's state with origin, then sync
     choros queue base NAME          the PRs the queue builds on before they reach main
     choros queue base add|rm NAME REPO#N[,N…]…
