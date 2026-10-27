@@ -47,7 +47,7 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
         .get(&n)
         .ok_or_else(|| eyre!("no landing-{n} in {}", q.name))?;
     if !matches!(set.status, SetStatus::Queued | SetStatus::Closed) {
-        return Err(eyre!("landing-{n} is already {:?}", set.status));
+        return Err(eyre!("landing-{n} is already {}", set.status));
     }
     // Choros stops watching a dropped set; an open PR would be orphaned.
     if set.status == SetStatus::Queued && set.pr.is_some() {

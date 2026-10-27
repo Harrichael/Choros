@@ -86,9 +86,9 @@ fn run_pnpm(cwd: &Path, args: &[&str]) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!(
-            "pnpm {} failed in {:?}\n{}",
+            "pnpm {} failed in {}:\n{}",
             args.join(" "),
-            cwd,
+            cwd.display(),
             stderr.trim()
         ));
     }

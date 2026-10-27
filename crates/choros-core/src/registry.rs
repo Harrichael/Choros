@@ -47,11 +47,11 @@ pub fn ensure_repo_exists(trunk: &Path, name: &str) -> Result<PathBuf> {
     // Repo args double as clone destinations inside the workspace; a path-ish
     // name (`../x`, `/abs`) would escape both the registry and the workspace.
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
-        return Err(eyre!("invalid repo name {:?}", name));
+        return Err(eyre!("`{name}` is not a valid repo name"));
     }
     let path = repo_path(trunk, name);
     if !path.exists() {
-        return Err(eyre!("registry repo {:?} does not exist", path));
+        return Err(eyre!("{} is not in the registry; add it with `choros add <ssh-url>`", path.display()));
     }
     Ok(path)
 }
@@ -67,14 +67,14 @@ fn repo_name_from_ssh_url(url: &str) -> Result<String> {
     // instead of a positional url; reject outright rather than relying only
     // on git.rs's `--` separator.
     if url.starts_with('-') {
-        return Err(eyre!("url cannot start with '-', got {:?}", url));
+        return Err(eyre!("a URL cannot start with '-', got `{url}`"));
     }
     let path = if let Some(rest) = url.strip_prefix("ssh://") {
         rest.split_once('/')
             .map(|(_, path)| path)
-            .ok_or_else(|| eyre!("not a valid ssh:// URL: {:?}", url))?
+            .ok_or_else(|| eyre!("`{url}` is not a valid ssh:// URL"))?
     } else if url.contains("://") {
-        return Err(eyre!("only ssh URLs are supported, got {:?}", url));
+        return Err(eyre!("only ssh URLs are supported, got `{url}`"));
     } else {
         // scp-like shorthand (`git@host:org/repo.git`) only counts if the
         // colon comes before any slash — otherwise this is a local path that
@@ -96,7 +96,7 @@ fn repo_name_from_ssh_url(url: &str) -> Result<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let name = name.strip_suffix(".git").unwrap_or(name);
     if name.is_empty() || name == "." || name == ".." || name.starts_with('.') {
-        return Err(eyre!("could not derive a usable repo name from {:?}", url));
+        return Err(eyre!("could not derive a usable repo name from `{url}`"));
     }
     Ok(name.to_string())
 }

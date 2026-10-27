@@ -8,8 +8,12 @@ fn run(cmd: &mut Command) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!(
-            "git command failed: {:?}\n{}",
-            cmd,
+            "{} failed:\n{}",
+            std::iter::once(cmd.get_program())
+                .chain(cmd.get_args())
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
             stderr.trim()
         ));
     }

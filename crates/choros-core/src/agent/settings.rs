@@ -50,11 +50,11 @@ fn read_json_or_empty(path: &Path) -> Result<Value> {
         return Ok(Value::Object(serde_json::Map::new()));
     }
     let body = std::fs::read_to_string(path)
-        .wrap_err_with(|| format!("reading {path:?}"))?;
+        .wrap_err_with(|| format!("reading {}", path.display()))?;
     if body.trim().is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
     }
-    serde_json::from_str(&body).wrap_err_with(|| format!("parsing {path:?} as JSON"))
+    serde_json::from_str(&body).wrap_err_with(|| format!("parsing {} as JSON", path.display()))
 }
 
 pub fn load_template(trunk: &Path) -> Result<Value> {
@@ -82,7 +82,7 @@ pub fn save_template(trunk: &Path, value: &Value) -> Result<()> {
     let mut body = serde_json::to_string_pretty(value)
         .wrap_err("serializing template settings")?;
     body.push('\n');
-    std::fs::write(&path, body).wrap_err_with(|| format!("writing {path:?}"))?;
+    std::fs::write(&path, body).wrap_err_with(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

@@ -58,9 +58,9 @@ impl Git {
         let out = self.output(args)?;
         if !out.status.success() {
             return Err(eyre!(
-                "git {} failed in {:?}:\n{}",
+                "git {} failed in {}:\n{}",
                 args.join(" "),
-                self.dir,
+                self.dir.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
@@ -81,7 +81,7 @@ impl Git {
 
     pub fn sha(&self, rev: &str) -> Result<String> {
         self.rev_parse(rev)?
-            .ok_or_else(|| eyre!("no commit {rev:?} in {:?}", self.dir))
+            .ok_or_else(|| eyre!("no commit {rev} in {}", self.dir.display()))
     }
 
     pub fn is_ancestor(&self, ancestor: &str, of: &str) -> Result<bool> {
@@ -194,9 +194,9 @@ impl Git {
                 return Ok(Step::Conflict(Vec::new()));
             }
             return Err(eyre!(
-                "git {} failed in {:?}:\n{}",
+                "git {} failed in {}:\n{}",
                 args.join(" "),
-                self.dir,
+                self.dir.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
@@ -238,7 +238,7 @@ impl Git {
             Some(InProgress::Rebase) => {
                 self.run(&["rebase", "--continue"])?;
             }
-            None => return Err(eyre!("nothing in progress to conclude in {:?}", self.dir)),
+            None => return Err(eyre!("nothing in progress to conclude in {}", self.dir.display())),
         }
         Ok(())
     }

@@ -94,13 +94,13 @@ pub fn default_instant(space: &Path) -> Result<Option<Via>> {
 /// bindings.
 pub fn set_binding(branch: &Path, repo: Option<&str>, queue: Option<&str>) -> Result<()> {
     if !space::is_branch_space(branch) {
-        return Err(eyre!("{branch:?} is not a branch-space"));
+        return Err(eyre!("{} is not a branch-space", branch.display()));
     }
-    let trunk = space::find_trunk(branch).ok_or_else(|| eyre!("{branch:?} is not under a choros trunk"))?;
+    let trunk = space::find_trunk(branch).ok_or_else(|| eyre!("{} is not under a choros trunk", branch.display()))?;
     if let Some(name) = queue {
         let q = Queue::open(&trunk, name)?;
         if !q.config.scope.admits_space(&space::rel(&trunk, branch)?) {
-            return Err(eyre!("queue {name} doesn't take landings from here ({:?})", q.config.scope));
+            return Err(eyre!("queue {name} doesn't take landings from here, only from {}", q.config.scope));
         }
     }
     let mut landing = read(branch)?;

@@ -190,7 +190,7 @@ fn validate_branch_name(name: &str) -> Result<()> {
             || c == '\x7f';
         if bad {
             return Err(eyre!(
-                "name cannot contain spaces or any of: ~ ^ : ? * [ \\ (got {:?})",
+                "name cannot contain spaces or any of: ~ ^ : ? * [ \\ (got `{}`)",
                 c
             ));
         }
@@ -206,7 +206,7 @@ pub fn create<P: ProgressSink>(
     progress: &P,
 ) -> Result<ChorosInfo> {
     validate_name(space, name)?;
-    let trunk = space::find_trunk(space).ok_or_else(|| eyre!("{space:?} is not under a choros trunk"))?;
+    let trunk = space::find_trunk(space).ok_or_else(|| eyre!("{} is not under a choros trunk", space.display()))?;
     let prefix = space::rel(&trunk, space)?;
     let branch = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
     let target = space.join(name);
@@ -267,7 +267,7 @@ pub fn add_repos<P: ProgressSink>(
     progress: &P,
 ) -> Result<ChorosMeta> {
     let target = space.join(name);
-    let trunk = &space::find_trunk(space).ok_or_else(|| eyre!("{space:?} is not under a choros trunk"))?;
+    let trunk = &space::find_trunk(space).ok_or_else(|| eyre!("{} is not under a choros trunk", space.display()))?;
     let mut meta = read_meta(&target)?;
     for (i, repo) in repos.iter().enumerate() {
         registry::ensure_repo_exists(trunk, repo)?;
@@ -277,7 +277,7 @@ pub fn add_repos<P: ProgressSink>(
         // Not in the meta but on disk: a hand-made clone or stray dir that a
         // rollback must never delete, so refuse before cloning anything.
         if target.join(repo).exists() {
-            return Err(eyre!("{:?} already exists", target.join(repo)));
+            return Err(eyre!("{} already exists", target.join(repo).display()));
         }
     }
 
@@ -348,11 +348,11 @@ pub fn resolve_target(cwd: &Path, name: Option<&str>) -> Result<(PathBuf, String
             let workspace_name = cur
                 .file_name()
                 .and_then(|n| n.to_str())
-                .ok_or_else(|| eyre!("workspace dir has no usable name: {:?}", cur))?
+                .ok_or_else(|| eyre!("workspace folder {} has no usable name", cur.display()))?
                 .to_string();
             let trunk = cur
                 .parent()
-                .ok_or_else(|| eyre!("workspace has no parent dir: {:?}", cur))?
+                .ok_or_else(|| eyre!("workspace {} has no parent folder", cur.display()))?
                 .to_path_buf();
             return Ok((trunk, workspace_name));
         }
@@ -360,9 +360,9 @@ pub fn resolve_target(cwd: &Path, name: Option<&str>) -> Result<(PathBuf, String
             Some(p) => cur = p,
             None => {
                 return Err(eyre!(
-                    "not inside a choros workspace (no {} found walking up from {:?}); pass a name explicitly",
+                    "not inside a choros workspace (no {} found walking up from {}); pass a name explicitly",
                     META_FILE,
-                    cwd
+                    cwd.display()
                 ));
             }
         }
@@ -375,16 +375,16 @@ pub fn find_workspace(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
     let dir = cwd
         .ancestors()
         .find(|d| d.join(META_FILE).exists())
-        .ok_or_else(|| eyre!("not inside a choros workspace (no {META_FILE} above {cwd:?})"))?;
+        .ok_or_else(|| eyre!("not inside a choros workspace (no {META_FILE} above {})", cwd.display()))?;
     let trunk = space::find_trunk(dir)
-        .ok_or_else(|| eyre!("workspace {dir:?} is not under a choros trunk ({CONFIG_DIR})"))?;
+        .ok_or_else(|| eyre!("workspace {} is not under a choros trunk ({CONFIG_DIR})", dir.display()))?;
     Ok((trunk, dir.to_path_buf()))
 }
 
 /// Archive the workspace at `ws`, wherever it sits.
 pub fn archive_at(ws: &Path) -> Result<PathBuf> {
     let (Some(space), Some(name)) = (ws.parent(), ws.file_name().and_then(|n| n.to_str())) else {
-        return Err(eyre!("{ws:?} is not a workspace folder"));
+        return Err(eyre!("{} is not a workspace folder", ws.display()));
     };
     archive(space, name)
 }
@@ -395,21 +395,20 @@ pub fn archive(space: &Path, name: &str) -> Result<PathBuf> {
     let src = space.join(name);
     if !src.join(META_FILE).exists() {
         return Err(eyre!(
-            "refusing to archive: {:?} is not a choros workspace (no {})",
-            src,
+            "refusing to archive: {} is not a choros workspace (no {})",
+            src.display(),
             META_FILE
         ));
     }
-    let trunk = space::find_trunk(space).ok_or_else(|| eyre!("{space:?} is not under a choros trunk"))?;
+    let trunk = space::find_trunk(space).ok_or_else(|| eyre!("{} is not under a choros trunk", space.display()))?;
     let dst = space::archive_path(&trunk, &src)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if dst.exists() {
         return Err(eyre!(
-            "archive already contains '{}': {:?}",
-            name,
-            dst
+            "the archive already holds a {name}: {}",
+            dst.display()
         ));
     }
     std::fs::rename(&src, &dst)?;
@@ -692,7 +691,7 @@ mod tests {
         std::fs::create_dir_all(trunk.join(".choros-config/archive/PROJ-1")).unwrap();
 
         let err = archive(trunk, "PROJ-1").unwrap_err();
-        assert!(err.to_string().contains("archive already contains"));
+        assert!(err.to_string().contains("the archive already holds a"));
         // Source must not have been moved.
         assert!(trunk.join("PROJ-1").exists());
     }

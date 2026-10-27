@@ -1,7 +1,7 @@
 # Mistakes print one line saying what is wrong, and exit non-zero.
 
 $ choros land continue
-choros: not inside a choros workspace (no .choros-meta.toml above "$ROOT/trunk")
+choros: not inside a choros workspace (no .choros-meta.toml above $ROOT/trunk)
 [exit 1]
 $ choros queue drop appq 7
 choros: no landing-7 in appq
@@ -15,3 +15,12 @@ usage: choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i
 $ choros init now
 choros: `choros init` takes no arguments, got: now
 [exit 2]
+$ choros queue nope
+choros: no queue named nope in $ROOT/trunk; `choros queue ls` lists them
+[exit 1]
+$ choros queue drop appq one
+choros: `one` is not a landing-set; write N or landing-N
+[exit 1]
+$ choros work ws app >/dev/null 2>&1 && cd ws/app && choros land continue --fork --deps landing-x
+choros: `landing-x` is not a landing-set; write N, landing-N or QUEUE/N
+[exit 1]

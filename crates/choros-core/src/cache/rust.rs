@@ -32,7 +32,7 @@ where
     let config_path = config_dir.join("config.toml");
 
     std::fs::write(&config_path, render_config()?)
-        .wrap_err_with(|| format!("writing {config_path:?}"))?;
+        .wrap_err_with(|| format!("writing {}", config_path.display()))?;
 
     progress.status(format!("rust cache → {} (sccache)", config_path.display()));
     Ok(())

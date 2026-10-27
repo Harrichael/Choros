@@ -113,7 +113,7 @@ impl Forge for Gh {
             .rsplit('/')
             .next()
             .and_then(|n| n.parse().ok())
-            .ok_or_else(|| eyre!("could not read a PR number from {url:?}"))?;
+            .ok_or_else(|| eyre!("could not read a PR number from `{url}`"))?;
         Ok(PrRef { number, url })
     }
 

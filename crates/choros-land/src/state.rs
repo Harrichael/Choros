@@ -41,7 +41,7 @@ pub struct PrSpec {
 impl PrSpec {
     /// `repo#N`, or `#N` for `own` (a one-repo queue's repo).
     pub fn parse(s: &str, own: Option<&str>) -> Result<PrSpec> {
-        let bad = || color_eyre::eyre::eyre!("{s:?} is not a PR; write repo#N");
+        let bad = || color_eyre::eyre::eyre!("`{s}` is not a PR; write repo#N");
         let (repo, n) = s.rsplit_once('#').ok_or_else(bad)?;
         let number = n.parse().map_err(|_| bad())?;
         let repo = match (repo, own) {
@@ -112,6 +112,16 @@ pub enum Scope {
     /// Every workspace in a branch-space and below it, by the branch-space's
     /// path below the trunk.
     Branch(String),
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Scope::Trunk => write!(f, "trunk"),
+            Scope::Workspace(p) => write!(f, "workspace {p}"),
+            Scope::Branch(p) => write!(f, "branch {p}"),
+        }
+    }
 }
 
 impl Scope {
@@ -337,6 +347,17 @@ pub enum SetStatus {
     Dropped,
 }
 
+impl std::fmt::Display for SetStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SetStatus::Queued => "queued",
+            SetStatus::Merged => "merged",
+            SetStatus::Closed => "closed",
+            SetStatus::Dropped => "dropped",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Park {
     pub op: ParkOp,
@@ -456,8 +477,8 @@ pub fn branch(queue: &str, n: u32) -> String {
 }
 
 pub fn read_config(path: &Path) -> Result<QueueConfig> {
-    let body = std::fs::read_to_string(path).wrap_err_with(|| format!("reading {path:?}"))?;
-    toml::from_str(&body).wrap_err_with(|| format!("parsing {path:?}"))
+    let body = std::fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
+    toml::from_str(&body).wrap_err_with(|| format!("parsing {}", path.display()))
 }
 
 pub fn write_config(path: &Path, config: &QueueConfig) -> Result<()> {
@@ -474,7 +495,7 @@ pub fn read_state(path: &Path, config: &QueueConfig) -> Result<QueueState> {
         });
     }
     let body = std::fs::read_to_string(path)?;
-    let mut st: QueueState = serde_json::from_str(&body).wrap_err_with(|| format!("parsing {path:?}"))?;
+    let mut st: QueueState = serde_json::from_str(&body).wrap_err_with(|| format!("parsing {}", path.display()))?;
     if let (Some(repo), Some(main)) = (&config.repo, &config.main)
         && !st.repos.contains_key(repo)
     {

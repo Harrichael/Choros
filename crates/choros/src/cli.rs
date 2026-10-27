@@ -328,7 +328,7 @@ pub fn run_work(args: Vec<String>) -> Result<()> {
 }
 
 fn run_work_noninteractive(space: PathBuf, name: String, repos: Vec<String>) -> Result<()> {
-    let trunk = space::find_trunk(&space).ok_or_else(|| eyre!("{space:?} is not under a trunk"))?;
+    let trunk = space::find_trunk(&space).ok_or_else(|| eyre!("{} is not under a trunk", space.display()))?;
     choros::validate_name(&space, &name)?;
     for r in &repos {
         registry::ensure_repo_exists(&trunk, r)?;
@@ -456,7 +456,7 @@ fn unfinished_work(dir: &std::path::Path) -> Result<Vec<String>> {
 /// Let the new branch-space choose a queue from further up for its
 /// workspaces to land into. A queue scoped to it later needs no choosing.
 fn pick_branch_defaults(dir: &std::path::Path) -> Result<()> {
-    let trunk = space::find_trunk(dir).ok_or_else(|| eyre!("{dir:?} is not under a trunk"))?;
+    let trunk = space::find_trunk(dir).ok_or_else(|| eyre!("{} is not under a trunk", dir.display()))?;
     let rel = space::rel(&trunk, dir)?;
     let mut options: Vec<String> = Vec::new();
     for name in choros_land::queue::list(&trunk)? {

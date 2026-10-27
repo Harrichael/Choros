@@ -43,7 +43,7 @@ impl Queue {
     pub fn open(trunk: &Path, name: &str) -> Result<Queue> {
         let dir = queues_dir(trunk).join(name);
         if !dir.join("queue.toml").exists() {
-            return Err(eyre!("no queue named {name:?} under {trunk:?}"));
+            return Err(eyre!("no queue named {name} in {}; `choros queue ls` lists them", trunk.display()));
         }
         Ok(Queue {
             trunk: trunk.to_path_buf(),
@@ -60,15 +60,15 @@ impl Queue {
             || name.contains(['/', '\\', ' ', '~', '^', ':', '?', '*', '['])
             || name.starts_with(['.', '-'])
         {
-            return Err(eyre!("{name:?} cannot be a queue name"));
+            return Err(eyre!("`{name}` cannot be a queue name"));
         }
         if queues_dir(trunk).join(name).exists() {
-            return Err(eyre!("queue {name:?} already exists"));
+            return Err(eyre!("queue {name} already exists"));
         }
         // `<name>/landing-N` on origin can't coexist with a workspace's
         // branch `<name>` or a branch-space's `<name>/…`.
         if trunk.join(name).exists() {
-            return Err(eyre!("{name:?} is already a workspace or branch-space here"));
+            return Err(eyre!("{name} is already a workspace or branch-space here"));
         }
         Ok(())
     }
@@ -114,7 +114,7 @@ impl Queue {
         let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{}", self.name)])?;
         if !clash.is_empty() {
             return Err(eyre!(
-                "{repo}'s origin has a branch named {:?}, so it can't land into queue {0}",
+                "{repo}'s origin has a branch named {0}, so it can't land into queue {0}",
                 self.name
             ));
         }
@@ -273,7 +273,7 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
     let dst = trunk.join(ARCHIVE_REL).join(LANDING_DIR).join(name);
     std::fs::create_dir_all(&dst)?;
     if dst.join("_queue").exists() || dst.join("_sync").exists() {
-        return Err(eyre!("{dst:?} already holds an archived queue named {name}"));
+        return Err(eyre!("{} already holds an archived queue named {name}", dst.display()));
     }
     let landing = trunk.join(LANDING_DIR).join(name);
     if landing.join("_sync").exists() {

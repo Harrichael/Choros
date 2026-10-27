@@ -218,9 +218,9 @@ fn settle_pending(ws: &Path, repo: &str) -> Result<()> {
     let git = Git::new(&ws.join(repo));
     if git.in_progress()?.is_some() {
         return Err(eyre!(
-            "{:?} is in the middle of a rebase or merge; finish it (`git rebase --continue`) \
+            "{} is in the middle of a rebase or merge; finish it (`git rebase --continue`) \
              or abort it, then try again",
-            git.dir()
+            git.dir().display()
         ));
     }
     let Some(pending) = workspace::read(ws)?.repo.get(repo).and_then(|r| r.pending.clone()) else {
@@ -242,13 +242,13 @@ fn settle_pending(ws: &Path, repo: &str) -> Result<()> {
 
 fn check_clean(git: &Git, through: &str) -> Result<()> {
     if !git.is_clean()? {
-        return Err(eyre!("{:?} has uncommitted changes; commit or stash them first", git.dir()));
+        return Err(eyre!("{} has uncommitted changes; commit or stash them first", git.dir().display()));
     }
     if !git.is_ancestor(through, "HEAD")? {
         return Err(eyre!(
-            "commits that were already landed have been rewritten in {:?}; \
+            "commits that were already landed have been rewritten in {}; \
              the landed history must stay as it was",
-            git.dir()
+            git.dir().display()
         ));
     }
     Ok(())
@@ -258,9 +258,9 @@ fn check_landable(git: &Git, through: &str) -> Result<()> {
     check_clean(git, through)?;
     if git.has_merges(through, "HEAD")? {
         return Err(eyre!(
-            "the commits to land in {:?} include a merge; rebase them onto the \
+            "the commits to land in {} include a merge; rebase them onto the \
              merge head instead (`choros repo sync`)",
-            git.dir()
+            git.dir().display()
         ));
     }
     Ok(())
@@ -357,11 +357,11 @@ fn return_onto(env: &Env, q: &Queue, repo: &str, mh: &str, returned: &[workspace
     let what = format!("the commits of dropped {}", names.join(", "));
     let tip = work.replay(repo, mh, &commits, &what)?.map_err(|files| {
         eyre!(
-            "{what} no longer apply onto {}'s merge head (conflicts in {}); they are kept in {:?} \
+            "{what} no longer apply onto {}'s merge head (conflicts in {}); they are kept in {} \
              under refs/choros/returned/",
             q.name,
             files.join(", "),
-            q.sync_dir(repo)
+            q.sync_dir(repo).display()
         )
     })?;
     work.save()?;
@@ -918,14 +918,14 @@ pub fn sync_workspace(env: &Env, cwd: &Path) -> Result<Vec<String>> {
 /// with no work of its own yet is moved onto the merge head, so new work
 /// starts there.
 pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()> {
-    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros trunk"))?;
+    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{} is not under a choros trunk", ws.display()))?;
     let git = Git::new(&ws.join(repo));
     let Some(queue) = queue else {
         return update_repo(ws, repo, |rl| rl.queue = Some(workspace::NO_QUEUE.to_string()));
     };
     let q = Queue::open(&trunk, queue)?;
     if !q.config.scope.admits(&space::rel(&trunk, ws)?) {
-        return Err(eyre!("queue {queue} only takes landings from {:?}", q.config.scope));
+        return Err(eyre!("queue {queue} only takes landings from {}", q.config.scope));
     }
     let mh = current_merge_head(env, &q, repo)?;
 

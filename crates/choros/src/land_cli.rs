@@ -96,7 +96,8 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
                 on_conflict = Some(match it.next().as_deref() {
                     Some("depend") => OnConflict::Depend,
                     Some("merge-head") => OnConflict::MergeHead,
-                    other => return Err(eyre!("--on-conflict takes depend or merge-head, got {other:?}")),
+                    Some(other) => return Err(eyre!("--on-conflict takes depend or merge-head, got `{other}`")),
+                    None => return Err(eyre!("--on-conflict takes depend or merge-head")),
                 })
             }
             "--title" => title = it.next(),
@@ -172,6 +173,13 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// `3` or `landing-3`.
+fn set_number(s: &str) -> Result<u32> {
+    s.trim_start_matches("landing-")
+        .parse()
+        .map_err(|_| eyre!("`{s}` is not a landing-set; write N or landing-N"))
+}
+
 /// `1,2`, `landing-1`, `other-queue/landing-3`, or `none`.
 fn parse_deps(s: &str) -> Result<Vec<Dep>> {
     if s == "none" || s.is_empty() {
@@ -183,7 +191,7 @@ fn parse_deps(s: &str) -> Result<Vec<Dep>> {
             let num = |x: &str| -> Result<u32> {
                 x.trim_start_matches("landing-")
                     .parse()
-                    .map_err(|_| eyre!("not a landing-set: {part:?}"))
+                    .map_err(|_| eyre!("`{part}` is not a landing-set; write N, landing-N or QUEUE/N"))
             };
             match part.split_once('/') {
                 Some((queue, n)) => Ok(Dep::Cross {
@@ -410,7 +418,7 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         ["drop", name, n] => {
-            let n: u32 = n.trim_start_matches("landing-").parse()?;
+            let n = set_number(n)?;
             let dropped = admin::drop_set(&env, &Queue::open(&trunk, name)?, n)?;
             print_report(name, &dropped.report);
             if let Some(note) = dropped_note(&dropped) {
@@ -447,17 +455,9 @@ fn scope_arg(trunk: &Path, flag: &str, path: &str) -> Result<Scope> {
             Ok(Scope::Workspace(path.to_string()))
         }
         "branch" if below && space::is_branch_space(&trunk.join(path)) => Ok(Scope::Branch(path.to_string())),
-        "workspace" => Err(eyre!("no workspace {path:?} in {}; give its path below the trunk", trunk.display())),
-        "branch" => Err(eyre!("no branch-space {path:?} in {}; give its path below the trunk", trunk.display())),
+        "workspace" => Err(eyre!("no workspace {path} in {}; give its path below the trunk", trunk.display())),
+        "branch" => Err(eyre!("no branch-space {path} in {}; give its path below the trunk", trunk.display())),
         _ => usage("choros queue new [-i] NAME [--workspace PATH | --branch PATH]"),
-    }
-}
-
-fn scope_text(scope: &Scope) -> String {
-    match scope {
-        Scope::Trunk => "trunk".into(),
-        Scope::Workspace(p) => format!("workspace {p}"),
-        Scope::Branch(p) => format!("branch {p}"),
     }
 }
 
@@ -485,7 +485,7 @@ fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
     })?;
     let scope = question(
         "scope: trunk, branch PATH or workspace PATH",
-        Some(&scope_text(&scope)),
+        Some(&scope.to_string()),
         |a| {
             let scope = match a.split_once(' ') {
                 _ if a == "trunk" => Scope::Trunk,
@@ -529,7 +529,7 @@ fn created(trunk: &Path, q: &Queue) {
     let name = &q.name;
     match &q.config.scope {
         Scope::Trunk => eprintln!("created queue {name}; bind a workspace's repos with `choros repo bind REPO {name}`"),
-        scope => eprintln!("created queue {name}; workspaces in {} land into it", scope_text(scope)),
+        scope => eprintln!("created queue {name}; workspaces in {} land into it", scope),
     }
     if !q.config.push.private_sets {
         return;
@@ -554,7 +554,7 @@ fn question<T>(prompt: &str, default: Option<&str>, parse: impl Fn(&str) -> Resu
     let shown = default.map(|d| format!(" ({d})")).unwrap_or_default();
     loop {
         let answer = read_answer(&format!("{prompt}{shown}: "))?
-            .ok_or_else(|| eyre!("no answer to {prompt:?}"))?;
+            .ok_or_else(|| eyre!("no answer to `{prompt}`"))?;
         let answer = match (answer.as_str(), default) {
             ("", Some(d)) => d,
             ("", None) => continue,
@@ -591,7 +591,7 @@ fn print_queues(trunk: &Path, names: &[String]) -> Result<()> {
         let open = st.sets.values().filter(|s| s.is_open()).count();
         rows.push([
             name.clone(),
-            scope_text(&q.config.scope),
+            q.config.scope.to_string(),
             or_dash(st.repos.keys().cloned().collect()),
             open.to_string(),
             or_dash(q.config.diffbase.clone()),
@@ -676,7 +676,7 @@ fn print_report(name: &str, r: &PassReport) {
 pub fn run_landing(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let (n, rest) = match a.as_slice() {
-        ["open", n, rest @ ..] => (n.trim_start_matches("landing-").parse::<u32>()?, rest),
+        ["open", n, rest @ ..] => (set_number(n)?, rest),
         _ => usage("choros landing open N [--queue Q] [--session ID]"),
     };
     let trunk = trunk_here()?;
@@ -834,7 +834,7 @@ pub fn run_repo_bind_here(repo: &str, queue: &str) -> Result<()> {
 /// Bind a just-created workspace's repo to a queue (the `work` picker's `b`,
 /// or its branch-space's default).
 pub fn bind_new(ws: &Path, repo: &str, queue: Option<&str>) -> Result<()> {
-    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{ws:?} is not under a choros trunk"))?;
+    let trunk = space::find_trunk(ws).ok_or_else(|| eyre!("{} is not under a choros trunk", ws.display()))?;
     let tools = Tools::for_trunk(&trunk);
     land::bind(&tools.env(), ws, repo, queue)
 }

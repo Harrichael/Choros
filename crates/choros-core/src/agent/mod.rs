@@ -118,8 +118,8 @@ fn copy_templates(dirs: &[PathBuf], workspace: &Path) -> Result<()> {
             let dest = workspace.join(tf.rel);
             if dest.exists() {
                 return Err(eyre!(
-                    "template collision: {:?} already exists in workspace; refusing to overwrite",
-                    dest
+                    "template collision: {} already exists in the workspace; refusing to overwrite",
+                    dest.display()
                 ));
             }
             if let Some(parent) = dest.parent() {

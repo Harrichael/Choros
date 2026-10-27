@@ -44,12 +44,12 @@ pub fn find_space(cwd: &Path) -> Option<PathBuf> {
 pub fn rel(trunk: &Path, dir: &Path) -> Result<String> {
     let rel = dir
         .strip_prefix(trunk)
-        .map_err(|_| eyre!("{dir:?} is not under the trunk {trunk:?}"))?;
+        .map_err(|_| eyre!("{} is not under the trunk {}", dir.display(), trunk.display()))?;
     let parts: Vec<&str> = rel
         .components()
         .map(|c| match c {
-            Component::Normal(s) => s.to_str().ok_or_else(|| eyre!("non-UTF-8 path {dir:?}")),
-            _ => Err(eyre!("unexpected path component in {dir:?}")),
+            Component::Normal(s) => s.to_str().ok_or_else(|| eyre!("{} is not a UTF-8 path", dir.display())),
+            _ => Err(eyre!("unexpected path component in {}", dir.display())),
         })
         .collect::<Result<_>>()?;
     Ok(parts.join("/"))
@@ -57,7 +57,7 @@ pub fn rel(trunk: &Path, dir: &Path) -> Result<String> {
 
 /// `space` and each space above it, nearest first, ending at the trunk.
 pub fn chain(space: &Path) -> Result<Vec<PathBuf>> {
-    let trunk = find_trunk(space).ok_or_else(|| eyre!("{space:?} is not under a choros trunk"))?;
+    let trunk = find_trunk(space).ok_or_else(|| eyre!("{} is not under a choros trunk", space.display()))?;
     Ok(space
         .ancestors()
         .take_while(|d| d.starts_with(&trunk))
@@ -110,7 +110,7 @@ pub fn tree(space: &Path) -> Result<Tree> {
 /// becomes part of their git branch names.
 pub fn create_branch(parent: &Path, name: &str) -> Result<PathBuf> {
     if !(is_trunk(parent) || is_branch_space(parent)) {
-        return Err(eyre!("{parent:?} is not a trunk or branch-space"));
+        return Err(eyre!("{} is not a trunk or branch-space", parent.display()));
     }
     choros::validate_name(parent, name)?;
     let dir = parent.join(name);
@@ -130,16 +130,16 @@ pub fn archive_path(trunk: &Path, dir: &Path) -> Result<PathBuf> {
 /// the two are merged; a name taken on both sides refuses the whole move.
 pub fn archive_branch(dir: &Path) -> Result<PathBuf> {
     if !is_branch_space(dir) {
-        return Err(eyre!("refusing to archive: {dir:?} is not a branch-space"));
+        return Err(eyre!("refusing to archive: {} is not a branch-space", dir.display()));
     }
-    let trunk = find_trunk(dir).ok_or_else(|| eyre!("{dir:?} is not under a choros trunk"))?;
+    let trunk = find_trunk(dir).ok_or_else(|| eyre!("{} is not under a choros trunk", dir.display()))?;
     let dst = archive_path(&trunk, dir)?;
     let mut clashes = Vec::new();
     find_clashes(dir, &dst, &mut clashes);
     if !clashes.is_empty() {
         return Err(eyre!(
             "the archive already holds {}",
-            clashes.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ")
+            clashes.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         ));
     }
     merge_move(dir, &dst)?;
