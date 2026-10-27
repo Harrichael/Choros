@@ -1,0 +1,82 @@
+# `choros status --json` is what other tools read: every set, merged ones
+# too, with its PR, title, sessions and labels.
+
+$ choros work ws app
+...
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue --title "Write a" --session s-1
+...
+$ gh pr merge 1 --squash
+$ echo b > b.txt && git add b.txt && git commit -qm "write b"
+$ choros land continue
+...
+$ choros queue sync appq
+...
+$ choros status --json
+{
+  "queues": [
+    {
+      "trunk": "$ROOT/trunk",
+      "name": "appq",
+      "repos": [
+        "app"
+      ],
+      "sets": [
+        {
+          "n": 1,
+          "repo": "app",
+          "branch": "appq/landing-1",
+          "state": "merged",
+          "title": "Write a",
+          "pr": {
+            "number": 1,
+            "url": "https://github.test/pull/1"
+          },
+          "sessions": [
+            {
+              "source": "s-1",
+...
+            }
+          ],
+          "labels": [],
+          "deps": [],
+          "park": null,
+          "blocked": false,
+          "conflicts_with": [],
+          "landing_dirty": false
+        },
+        {
+          "n": 2,
+          "repo": "app",
+          "branch": "appq/landing-2",
+          "state": "front",
+          "title": null,
+          "pr": {
+            "number": 2,
+            "url": "https://github.test/pull/2"
+          },
+          "sessions": [],
+          "labels": [],
+          "deps": [
+            "landing-1"
+          ],
+          "park": null,
+          "blocked": false,
+          "conflicts_with": [],
+          "landing_dirty": false
+        }
+      ],
+      "needs_sync": [
+        {
+          "workspace": "$ROOT/trunk/ws",
+          "repo": "app"
+        }
+      ],
+      "diffbase": [],
+      "diffbase_park": null
+    }
+  ]
+}

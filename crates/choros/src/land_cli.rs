@@ -262,13 +262,24 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         print!("{}", status::prompt_token(&cwd));
         return Ok(());
     }
-    let all = match args.as_slice() {
-        [] => false,
-        [a] if a == "--all" => true,
-        _ => usage("choros status [--prompt | --all]"),
-    };
+    let (mut all, mut json) = (false, false);
+    for a in &args {
+        match a.as_str() {
+            "--all" => all = true,
+            "--json" => json = true,
+            _ => usage("choros status [--prompt | --all] [--json]"),
+        }
+    }
     let config = choros_core::trunks::config_home();
     let report = status::report(&cwd, config.as_deref(), all)?;
+    if json {
+        #[derive(serde::Serialize)]
+        struct Report {
+            queues: Vec<status::QueueStatus>,
+        }
+        println!("{}", serde_json::to_string_pretty(&Report { queues: report })?);
+        return Ok(());
+    }
     if report.is_empty() {
         println!("no landing queues here");
         return Ok(());
@@ -293,7 +304,7 @@ fn print_queue_status(q: &status::QueueStatus) {
             line.push_str(&format!("  after {}", s.deps.join(", ")));
         }
         if let Some(pr) = &s.pr {
-            line.push_str(&format!("  {pr}"));
+            line.push_str(&format!("  {}", pr.url));
         }
         if let Some(p) = &s.park {
             line.push_str(&format!("  ! parked ({:?}) {}", p.op, p.files.join(", ")));
@@ -314,8 +325,8 @@ fn print_queue_status(q: &status::QueueStatus) {
         println!("  ({merged} merged)");
     }
     print_diffbase(q);
-    for (ws, repo) in &q.needs_sync {
-        println!("  ⇣ {} ({repo}) needs `choros repo sync`", ws.display());
+    for ns in &q.needs_sync {
+        println!("  ⇣ {} ({}) needs `choros repo sync`", ns.workspace.display(), ns.repo);
     }
 }
 

@@ -5,14 +5,19 @@ use std::path::{Path, PathBuf};
 use choros_core::choros as core;
 use choros_core::space;
 use color_eyre::eyre::Result;
+use serde::Serialize;
 
 use crate::git::Git;
 use crate::graph;
 use crate::queue::{self, Queue};
 use crate::forge::PrState;
-use crate::state::{DiffbasePark, Park, Scope, SetStatus};
+use crate::state::{DiffbasePark, Park, PrRef, Scope, SessionFork, SetStatus};
 use crate::workspace;
 
+/// Serialized, this is `choros status --json`; the set fields are a contract
+/// other tools read. `pr` and `sessions` serialize state.rs types, so renaming
+/// their fields there renames them here too.
+#[derive(Serialize)]
 pub struct QueueStatus {
     pub trunk: PathBuf,
     pub name: String,
@@ -20,25 +25,37 @@ pub struct QueueStatus {
     pub repos: Vec<String>,
     pub sets: Vec<SetLine>,
     /// Workspaces (and repos) whose base the merge head has moved past.
-    pub needs_sync: Vec<(PathBuf, String)>,
+    pub needs_sync: Vec<NeedsSync>,
     /// Each PR in the diffbase, with what's known of it.
     pub diffbase: Vec<DiffbaseLine>,
     pub diffbase_park: Option<DiffbasePark>,
 }
 
+#[derive(Serialize)]
+pub struct NeedsSync {
+    pub workspace: PathBuf,
+    pub repo: String,
+}
+
+#[derive(Serialize)]
 pub struct DiffbaseLine {
     pub pr: String,
     /// `open`, `merged`, `closed`, or `unseen` before a pass has asked.
     pub state: &'static str,
 }
 
+#[derive(Serialize)]
 pub struct SetLine {
     pub n: u32,
     pub repo: String,
     pub branch: String,
     pub state: &'static str,
+    pub title: Option<String>,
+    pub pr: Option<PrRef>,
+    pub sessions: Vec<SessionFork>,
+    /// Always empty for now: nothing sets labels yet.
+    pub labels: Vec<String>,
     pub deps: Vec<String>,
-    pub pr: Option<String>,
     pub park: Option<Park>,
     pub blocked: bool,
     pub conflicts_with: Vec<u32>,
@@ -133,6 +150,10 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             repo: set.repo().to_string(),
             branch: set.branch(name),
             state,
+            title: set.title.clone(),
+            pr: set.pr.clone(),
+            sessions: set.sessions.clone(),
+            labels: Vec::new(),
             deps: set
                 .deps
                 .iter()
@@ -141,7 +162,6 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
                     crate::state::Dep::Cross { queue, n } => format!("{queue}/landing-{n}"),
                 })
                 .collect(),
-            pr: set.pr.as_ref().map(|p| p.url.clone()),
             park: set.park.clone(),
             blocked: set.is_open() && set.park.is_none() && graph::blocked(&st, *n),
             conflicts_with: set.conflicts_with.clone(),
@@ -157,7 +177,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             }
             let current = merge_head_key(&st, &repo);
             if wl.repo.get(&repo).and_then(|rl| rl.composition.clone()) != current {
-                needs_sync.push((ws.path.clone(), repo));
+                needs_sync.push(NeedsSync { workspace: ws.path.clone(), repo });
             }
         }
     }

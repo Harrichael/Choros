@@ -438,6 +438,14 @@ trunk, every queue of every registered trunk. Per queue: each set's state (queue
 and why), deps, flagged conflicting forks, dirty landing folders, and
 workspaces that need a sync.
 
+`choros status --json` is the same report for tools, merged sets included:
+`{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,
+diffbase_park}]}`. Other tools read each set's `n`, `repo`, `state`
+(`queued`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
+`sessions` (`[{source, fork}]`) and `labels`, so those names stay fixed;
+`labels` is always empty until something sets them. Dropped sets are left
+out.
+
 `choros status --prompt` prints one short token (`⇣sync`, `!resolve`, or
 nothing) from local files only — no git, no network, no lock — for the bash
 prompt and Gnomon.

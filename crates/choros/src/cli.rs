@@ -104,8 +104,10 @@ INSIDE A WORKSPACE
                                     open the landing's forked Claude Code session
 
 QUEUES (anywhere in a trunk; narrowed to where you are)
-    choros status [--prompt|--all]  landing queues and their sets; --prompt prints one token
-                                    (⇣sync / !resolve) for shell prompts
+    choros status [--prompt|--all] [--json]
+                                    landing queues and their sets; --prompt prints one token
+                                    (⇣sync / !resolve) for shell prompts; --json gives the
+                                    whole report as JSON, merged sets included
     choros queue NAME               a queue's landing-sets, as `choros status` shows them
     choros queue -i [NAME]          TUI: a queue's landing-sets; edit dependencies, drop, sync
     choros queue ls [--all]         each queue: its scope, repos, open sets, diffbase
