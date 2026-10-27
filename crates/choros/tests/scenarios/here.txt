@@ -62,4 +62,4 @@ repo settings: $ROOT/trunk/.choros-config/repos.toml
 
 # `choros help agent` is the long form, for an agent that has to drive choros.
 $ choros help agent | head -1
-# Working in a choros space
+# Landing work with choros

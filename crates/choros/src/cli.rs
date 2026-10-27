@@ -52,7 +52,7 @@ __choros_leave() {
 }
 "#;
 
-/// How to work in a choros space, for an agent; `choros help agent`.
+/// How an agent makes workspaces and lands its work; `choros help agent`.
 pub const AGENT_DOC: &str = include_str!("../../../docs/agent.md");
 
 const USAGE: &str = "\
@@ -133,8 +133,8 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
 AGENTS
     choros here                     what this folder is, where a land from it goes, whether each
                                     repo has a check, and where queue state lives
-    choros help agent               how to work in a choros space: workspaces, land flags,
-                                    --deps auto, repos.toml
+    choros help agent               for an agent: making workspaces, landing and its flags,
+                                    --deps auto, and changing a landed set
     choros agent ls                 resumable claude / cursor sessions under the current directory
     choros agent save settings      TUI: promote this workspace's claude settings to the template
 
