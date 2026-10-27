@@ -93,8 +93,9 @@ INSIDE A WORKSPACE
     choros land continue|archive    land this repo (or, at the workspace root, each repo as its own
                                     set) into its queue, or straight to main when it has none; `archive` then
                                     archives the workspace. --fork --deps SET,…|none (or -i to pick
-                                    them) lands beside the queue instead of on top; --title/--body-file
-                                    set the PR text
+                                    them) lands beside the queue instead of on top; --deps auto on only
+                                    what the commits need, if repos.toml gives the repo a check;
+                                    --title/--body-file set the PR text
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
 
