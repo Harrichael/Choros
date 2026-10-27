@@ -27,7 +27,7 @@ $ cd trunk
 $ printf '[app]\ncheck = "cargo check"\n' > .choros-config/repos.toml
 $ cd trunk/one/app
 $ choros here
-here: workspace one
+here: repo app, a clone in workspace one (the workspace root is ..)
 trunk: $ROOT/trunk
 a land from here lands app:
   app: into appq; check `cargo check`, so --deps auto works; a plain land goes on everything queued

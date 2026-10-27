@@ -33,18 +33,23 @@ pub fn run() -> Result<()> {
                 return Ok(());
             }
             let rel = space::rel(&trunk, ws)?;
-            match space_name(&trunk, &space)? {
-                Some(b) => println!("here: workspace {rel}, in branch-space {b}"),
-                None => println!("here: workspace {rel}"),
-            }
-            println!("trunk: {}", trunk.display());
             let meta = choros::read_meta(ws)?;
-            let inside = cwd
-                .strip_prefix(ws)
-                .ok()
-                .and_then(|r| r.components().next())
+            let below = cwd.strip_prefix(ws).unwrap_or(Path::new(""));
+            let inside = below
+                .components()
+                .next()
                 .and_then(|c| c.as_os_str().to_str())
                 .and_then(|first| meta.repos.iter().find(|r| r.as_str() == first).cloned());
+            let mut what = format!("workspace {rel}");
+            if let Some(repo) = &inside {
+                let up = vec![".."; below.components().count()].join("/");
+                what = format!("repo {repo}, a clone in {what} (the workspace root is {up})");
+            }
+            match space_name(&trunk, &space)? {
+                Some(b) => println!("here: {what}, in branch-space {b}"),
+                None => println!("here: {what}"),
+            }
+            println!("trunk: {}", trunk.display());
             let repos = match inside {
                 Some(repo) => {
                     println!("a land from here lands {repo}:");
