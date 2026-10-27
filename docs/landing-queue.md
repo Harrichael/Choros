@@ -112,8 +112,8 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--fork --deps SET,...|none | --fork -i] [--title T] [--body-file F] [--session UUID]...
-choros land archive  [--fork --deps SET,...|none | --fork -i] [--title T] [--body-file F] [--session UUID]...
+choros land continue [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--session UUID]...
+choros land archive  [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
@@ -160,6 +160,33 @@ a fork never loses commits it builds on.
    is flagged), or make this fork depend on the sets it conflicts with.
 4. Push, record, rebuild the merge head. `landed_through = HEAD`; `base` is
    unchanged (the workspace still sits on the merge head).
+
+### Auto land
+
+`--fork --deps auto`, or every plain land into a repo with `deps = "auto"` in
+`<trunk>/.choros-config/repos.toml`, lands on as little of the queue as the
+commits need:
+
+```toml
+[app]
+check = "cargo check --workspace"
+deps = "auto"
+```
+
+1. Start on main plus the workspace's own earlier sets.
+2. Replay the commits there. A conflict adds the queued sets that changed the
+   conflicting files, and the replay runs again.
+3. Test-merge the result against every other leaf; a set it conflicts with
+   becomes a dependency too, and the replay runs again.
+4. Run the repo's `check` in the sync clone on the result. Not conflicting
+   isn't the same as not needing: the commits may call what a skipped set
+   adds. Auto is refused for a repo with no `check`.
+
+The land reports each dependency and why, and the sets it went ahead of. When
+nothing short of the whole queue works (its commits need every set, a
+conflict with main itself, or the check fails), it warns why and lands on the
+merge head as a normal land does. The check runs under the queue lock, so a
+slow one holds up other lands meanwhile.
 
 ### Both kinds, after recording
 

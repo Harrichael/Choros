@@ -11,6 +11,7 @@ pub mod graph;
 pub mod instant;
 pub mod land;
 pub mod queue;
+pub mod repos;
 pub mod state;
 pub mod status;
 pub mod uuid;

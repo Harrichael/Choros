@@ -3,6 +3,7 @@
 //! work` makes them. GitHub is a fake that performs real merges on origin;
 //! conflicts go to a scripted handler.
 
+mod auto;
 mod branches;
 mod diffbase;
 mod regressions;
@@ -19,7 +20,7 @@ use color_eyre::eyre::{Result, eyre};
 use crate::agent::{Agent, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use crate::forge::{Forge, MergeMethod, PrRequest, PrState, RepoSettings};
-use crate::land::{LandOutcome, LandRequest};
+use crate::land::{ForkDeps, LandOutcome, LandRequest};
 use crate::queue::Queue;
 use crate::state::{Dep, LandMode, PrRef, QueueConfig, QueueState, Scope};
 
@@ -363,6 +364,31 @@ impl World {
         self.land_with(ws, None, None, None)
     }
 
+    /// `choros land continue --fork --deps auto`.
+    pub fn land_auto(&self, ws: &Path) -> Result<LandOutcome> {
+        let req = LandRequest {
+            cwd: ws.join(REPO),
+            mode: LandMode::Continue,
+            fork: Some(ForkDeps::Auto),
+            on_conflict: None,
+            title: None,
+            body: None,
+            sessions: vec!["source-session".into()],
+            env_session: None,
+        };
+        crate::land::land(&self.env(), &req, None)
+    }
+
+    /// Write the trunk's `.choros-config/repos.toml`.
+    pub fn repos_toml(&self, toml: &str) {
+        std::fs::write(self.trunk.join(".choros-config/repos.toml"), toml).unwrap();
+    }
+
+    /// `choros repo sync`: move the workspace onto the merge head.
+    pub fn sync(&self, ws: &Path) {
+        crate::land::sync_workspace(&self.env(), &ws.join(REPO)).unwrap();
+    }
+
     pub fn land_with(
         &self,
         ws: &Path,
@@ -373,7 +399,7 @@ impl World {
         let req = LandRequest {
             cwd: ws.join(REPO),
             mode: LandMode::Continue,
-            fork,
+            fork: fork.map(ForkDeps::Picked),
             on_conflict,
             title: None,
             body: None,

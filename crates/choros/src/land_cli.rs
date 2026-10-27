@@ -8,7 +8,7 @@ use std::process::Command;
 use choros_land::agent::{Claude, ConflictBrief};
 use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use choros_land::forge::Gh;
-use choros_land::land::{self, LandRequest};
+use choros_land::land::{self, ForkDeps, LandRequest};
 use choros_land::queue::{self, Queue};
 use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
@@ -73,11 +73,11 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--fork --deps SET,…|none | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…"),
+        _ => usage("choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…"),
     };
     let mut fork = false;
     let mut pick = false;
-    let mut deps: Option<Vec<Dep>> = None;
+    let mut deps: Option<ForkDeps> = None;
     let mut on_conflict = None;
     let mut title = None;
     let mut body = None;
@@ -86,7 +86,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         match arg.as_str() {
             "--fork" => fork = true,
             "-i" | "--interactive" => pick = true,
-            "--deps" => deps = Some(parse_deps(&it.next().unwrap_or_default())?),
+            "--deps" => {
+                deps = Some(match it.next().unwrap_or_default().as_str() {
+                    "auto" => ForkDeps::Auto,
+                    list => ForkDeps::Picked(parse_deps(list)?),
+                })
+            }
             "--on-conflict" => {
                 on_conflict = Some(match it.next().as_deref() {
                     Some("depend") => OnConflict::Depend,
@@ -110,10 +115,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         (false, ..) => return Err(eyre!("--deps and -i choose what a fork depends on; add --fork")),
         (true, Some(_), true) => return Err(eyre!("pass --deps or -i, not both")),
         (true, Some(d), false) => Some(d),
-        (true, None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none")),
-        (true, None, true) => Some(pick_fork_deps(&trunk, &ws, &cwd)?),
+        (true, None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none|auto")),
+        (true, None, true) => Some(ForkDeps::Picked(pick_fork_deps(&trunk, &ws, &cwd)?)),
         (true, None, false) => {
-            return Err(eyre!("--fork needs --deps SET,…|none (none: on main), or -i to pick them"));
+            return Err(eyre!(
+                "--fork needs --deps SET,…|none (none: on main) or auto (as few as it needs), or -i to pick them"
+            ));
         }
     };
 
@@ -149,6 +156,9 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
                 }
             }
             _ => eprintln!("{} → merged to main", l.repo),
+        }
+        for n in &l.notes {
+            eprintln!("    {n}");
         }
         for w in &l.warnings {
             eprintln!("    warning: {w}");
