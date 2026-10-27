@@ -11,8 +11,24 @@ use choros_core::{agent, choros, git, json_diff, registry};
 
 use color_eyre::Result;
 
-fn main() -> Result<()> {
-    color_eyre::install()?;
+fn main() {
+    color_eyre::install().expect("installing the panic and error reports");
+    if let Err(e) = run() {
+        // The full report (where it was raised, a backtrace) is for debugging
+        // choros, not for the person using it.
+        if std::env::var_os("RUST_BACKTRACE").is_some() {
+            eprintln!("{e:?}");
+        } else {
+            eprintln!("choros: {e}");
+            for cause in e.chain().skip(1) {
+                eprintln!("  because: {cause}");
+            }
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let sub = args.next();
     let rest: Vec<String> = args.collect();

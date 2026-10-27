@@ -154,6 +154,8 @@ a fork never loses commits it builds on.
 2. In the sync clone (which first fetches the workspace repo:
    `fetch <workspace path> +<ws branch>:refs/choros/incoming/<ws>`),
    cherry-pick the landed commits onto the base. Conflicts → *Conflicts*.
+   A clean cherry-pick that changes less than the commits did (they remove
+   lines a set left out of `--deps` added) refuses the land, naming the set.
 3. **Test-merge into the merge head before anything is public.** If the fork
    conflicts with what is queued, ask (TTY) or require
    `--on-conflict=merge-head|depend`: resolve in the merge head only (the pair

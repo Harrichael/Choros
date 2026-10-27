@@ -523,11 +523,25 @@ fn land_fork(
                 return Err(eyre!("{what} does not apply onto its dependencies; conflicts in: {}", files.join(", ")));
             }
         };
+        let mine = graph::ancestors_of_deps(&work.st, &set_deps);
+        let live = graph::live_in(&work.st, repo);
+        // As in an auto land, a clean replay can still lose what the commits
+        // change; here the dependencies were picked, so say which are missing.
+        let lost = lost_changes(&sync, (&through, &head), (&base, &tip))?;
+        let missing = owners(&work.st, &sync, &live, &mine, &mut BTreeMap::new(), &lost)?;
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().map(|m| crate::state::branch(&q.name, *m)).collect();
+            return Err(eyre!(
+                "{what} would lose part of what its commits change in {}: they change what {} wrote; \
+                 add {} to --deps, or use --deps auto",
+                lost.join(", "),
+                names.join(", "),
+                if missing.len() == 1 { "it" } else { "them" }
+            ));
+        }
 
         // Settle the fork's place before anything about it is public: check it
         // against every other leaf of the merge head it would sit beside.
-        let mine = graph::ancestors_of_deps(&work.st, &set_deps);
-        let live = graph::live_in(&work.st, repo);
         let mut clashes = Vec::new();
         for leaf in graph::leaves(&work.st, &live) {
             if mine.contains(&leaf) {

@@ -547,3 +547,27 @@ fn landing_again_points_at_the_open_set() {
     let dropped = crate::admin::drop_set(&w.env(), &w.queue(), 2).unwrap();
     assert_eq!(dropped.workspace, crate::workspace::Unland::Kept);
 }
+
+/// A fork on main of work that takes back what a queued set added would
+/// replay clean and quietly keep that set's lines. The deps were picked, so
+/// the land refuses and names the set they leave out.
+#[test]
+fn a_fork_that_would_lose_changes_names_the_missing_set() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "a.txt", "a\n");
+    w.land(&one).unwrap();
+    w.sync(&two);
+    git(&two.join(REPO), &["rm", "--quiet", "a.txt"]);
+    w.commit(&two, "b.txt", "instead of a.txt\n");
+
+    let err = w.land_with(&two, Some(vec![]), None, None).unwrap_err().to_string();
+
+    assert_eq!(
+        err,
+        "appq/landing-2 would lose part of what its commits change in a.txt: they change what \
+         appq/landing-1 wrote; add it to --deps, or use --deps auto"
+    );
+    assert_eq!(w.state().sets.len(), 1);
+}
