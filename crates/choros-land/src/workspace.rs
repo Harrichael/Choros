@@ -99,6 +99,11 @@ pub struct InstantPr {
     pub number: u64,
     /// The commit it lands through, as rebased in the workspace.
     pub head: String,
+    /// What the land that opened it was given, kept for when it merges.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

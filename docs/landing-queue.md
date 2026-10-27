@@ -212,7 +212,7 @@ first commit subject (GitHub requires one).
 **Labels.** Each `--label` is kept, in order and without repeats, on every
 set the land makes, and shown by `choros status`. Choros never reads them;
 they are for other tools to tie their own records to a set. Instant mode
-makes no set, so a repo landing that way keeps none and the land warns.
+makes no set, so it keeps them on the land's line in its log (below).
 
 **Instant mode.** Fetch, rebase `landed_through..HEAD` onto `origin/main` in
 the workspace (conflicts stop the land as in a normal land), then push to main
@@ -221,7 +221,9 @@ folder. The land isn't done until the PR merges: one that can't merge yet (a
 review due, checks running) is recorded in the workspace, and the next land
 finishes it first, retrying it while open, counting it once merged, and
 forgetting it if closed, which leaves its commits to land again. A second PR
-with the same commits is never opened.
+with the same commits is never opened. Each land, once on main, appends a
+line to `<trunk>/.choros-config/instant.jsonl` with its repo, workspace, last
+commit, PR, labels and sessions: the only record of it other tools can read.
 
 ## Diffbase
 
@@ -448,7 +450,10 @@ workspaces that need a sync.
 diffbase_park}]}`. Other tools read each set's `n`, `repo`, `state`
 (`queued`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
 `sessions` (`[{source, fork}]`) and `labels`, so those names stay fixed.
-Dropped sets are left out.
+Dropped sets are left out. Beside `queues`, `instant` lists the instant-mode
+lands in the same scope (by the workspace they came from), each
+`{repo, workspace, commit, pr, labels, sessions}`, with `pr` a number or
+null and `sessions` the source ids.
 
 `choros status --prompt` prints one short token (`⇣sync`, `!resolve`, or
 nothing) from local files only — no git, no network, no lock — for the bash

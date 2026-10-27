@@ -1,7 +1,7 @@
 # Labels are opaque text a land puts on each set it makes, for other tools
 # to read back from `choros status`. A repeat is kept once, in the order
-# first given. A repo that lands straight to main makes no set, so its
-# labels aren't kept, and the land says so.
+# first given. A repo that lands straight to main makes no set; its labels
+# are kept on the land's line under `instant`.
 
 $ choros work ws app
 ...
@@ -24,9 +24,24 @@ $ choros work solo app
 ...
 $ cd trunk/solo/app
 $ echo s > s.txt && git add s.txt && git commit -qm "write s"
-$ choros land continue --label tasks/xJ77
+$ choros land continue --label tasks/xJ77 --session s-1
 app → merged to main
-    warning: app lands straight to main, so its labels aren't kept (labels go on landing-sets)
+$ choros status --json | grep -A20 '"instant"'
+  "instant": [
+    {
+      "repo": "app",
+      "workspace": "$ROOT/trunk/solo",
+...
+      "pr": null,
+      "labels": [
+        "tasks/xJ77"
+      ],
+      "sessions": [
+        "s-1"
+      ]
+    }
+  ]
+}
 $ choros land continue --label ""
 choros: --label needs text
 [exit 1]

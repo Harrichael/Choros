@@ -118,6 +118,30 @@ fn queues_of(trunk: &Path, ws: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The straight-to-main lands a command run at `cwd` is about, chosen as
+/// [`visible_queues`] chooses queues: inside a workspace, its own; in a
+/// branch-space, those of the workspaces under it; at the trunk, or with
+/// `all`, every one there; outside any trunk, those of every trunk.
+pub fn instant_lands(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<crate::instant::Landed>> {
+    let Some(space) = space::find_space(cwd) else {
+        let trunks = config_home.map(choros_core::trunks::list).transpose()?.unwrap_or_default();
+        let mut out = Vec::new();
+        for trunk in trunks {
+            out.extend(crate::instant::read(&trunk)?);
+        }
+        return Ok(out);
+    };
+    let trunk = space::find_trunk(&space).unwrap_or_else(|| space.clone());
+    let within = match core::find_workspace(cwd) {
+        Ok((_, ws)) if !all && ws.starts_with(&space) => ws,
+        _ if all => trunk.clone(),
+        _ => space,
+    };
+    let mut lands = crate::instant::read(&trunk)?;
+    lands.retain(|l| l.workspace.starts_with(&within));
+    Ok(lands)
+}
+
 pub fn report(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<QueueStatus>> {
     visible_queues(cwd, config_home, all)?
         .into_iter()

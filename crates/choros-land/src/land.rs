@@ -114,13 +114,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         }
         let out = match &queues[repo] {
             None => {
-                let mut out = land_instant(env, &trunk, &ws, repo)?;
-                if !req.labels.is_empty() {
-                    out.warnings.push(format!(
-                        "{repo} lands straight to main, so its labels aren't kept (labels go on landing-sets)"
-                    ));
-                }
-                out
+                land_instant(env, &trunk, &ws, repo, req)?
             }
             Some(queue) => {
                 let q = Queue::open(&trunk, queue)?;
@@ -980,7 +974,7 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
 /// running) is remembered, and finished here first: retried while open,
 /// counted once merged, forgotten if closed, which leaves its commits to
 /// land again.
-fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed> {
+fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str, req: &LandRequest) -> Result<Landed> {
     let git = Git::new(&ws.join(repo));
     let landed = Landed {
         repo: repo.to_string(),
@@ -994,8 +988,8 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed
     let earlier = workspace::read(ws)?.repo.get(repo).and_then(|r| r.instant_pr.clone());
     if let Some(pr) = earlier {
         match env.forge.pr_state(git.dir(), pr.number)? {
-            PrState::Open => merge_instant_pr(env, &git, ws, repo, &pr)?,
-            PrState::Merged => finish_instant_pr(ws, repo, &pr)?,
+            PrState::Open => merge_instant_pr(env, &git, trunk, ws, repo, &pr)?,
+            PrState::Merged => finish_instant_pr(trunk, ws, repo, &pr)?,
             PrState::Closed => update_repo(ws, repo, |rl| rl.instant_pr = None)?,
         }
         if !has_unlanded(ws, repo)? {
@@ -1010,6 +1004,7 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed
     let origin_main = format!("refs/remotes/origin/{main}");
     let main_sha = git.sha(&origin_main)?;
     update_repo(ws, repo, |rl| rl.pending = Some(main_sha))?;
+    let sessions = pick_sessions(env, ws, &session_scope(ws, repo, req)?, req);
     if !git.succeeds(&["rebase", "--onto", &origin_main, &through])? {
         return Err(eyre!(
             "rebasing onto {main} conflicts in: {}\nresolve them, `git rebase --continue`, then land again",
@@ -1039,21 +1034,38 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed
             let pr = InstantPr {
                 number: pr.number,
                 head: head.clone(),
+                labels: req.labels.clone(),
+                sessions,
             };
             // `pending` stays: if the PR closes unmerged, the work is unlanded
             // again from the main it was rebased onto.
             update_repo(ws, repo, |rl| rl.instant_pr = Some(pr.clone()))?;
-            return merge_instant_pr(env, &git, ws, repo, &pr).map(|()| landed);
+            return merge_instant_pr(env, &git, trunk, ws, repo, &pr).map(|()| landed);
         }
     }
+    // Logged before the workspace counts it landed: a land that fails between
+    // the two runs again and logs twice, which readers shrug off, rather
+    // than never logging at all.
+    crate::instant::record(
+        trunk,
+        &crate::instant::Landed {
+            repo: repo.to_string(),
+            workspace: ws.to_path_buf(),
+            commit: head.clone(),
+            pr: None,
+            labels: req.labels.clone(),
+            sessions,
+        },
+    )?;
     update_repo(ws, repo, |rl| {
-        rl.landed_through = Some(head.clone());
+        rl.landed_through = Some(head);
         rl.pending = None;
+        rl.last_landed = Some(now_secs());
     })?;
     Ok(landed)
 }
 
-fn merge_instant_pr(env: &Env, git: &Git, ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
+fn merge_instant_pr(env: &Env, git: &Git, trunk: &Path, ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
     let main = main_branch(git)?;
     let settings = env.forge.settings(git.dir(), &main)?;
     let method = *settings
@@ -1067,14 +1079,27 @@ fn merge_instant_pr(env: &Env, git: &Git, ws: &Path, repo: &str, pr: &InstantPr)
             pr.number
         )
     })?;
-    finish_instant_pr(ws, repo, pr)
+    finish_instant_pr(trunk, ws, repo, pr)
 }
 
-fn finish_instant_pr(ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
+/// Logged first, as on the push path.
+fn finish_instant_pr(trunk: &Path, ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
+    crate::instant::record(
+        trunk,
+        &crate::instant::Landed {
+            repo: repo.to_string(),
+            workspace: ws.to_path_buf(),
+            commit: pr.head.clone(),
+            pr: Some(pr.number),
+            labels: pr.labels.clone(),
+            sessions: pr.sessions.clone(),
+        },
+    )?;
     update_repo(ws, repo, |rl| {
         rl.landed_through = Some(pr.head.clone());
         rl.instant_pr = None;
         rl.pending = None;
+        rl.last_landed = Some(now_secs());
     })
 }
 
@@ -1152,13 +1177,7 @@ fn fork_sessions(
     req: &LandRequest,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<String>> {
-    let repo_dir = ws.join(repo);
-    let scope = if repo_of(ws, &req.cwd, &core::read_meta(ws)?).is_some() {
-        &repo_dir
-    } else {
-        ws
-    };
-    let sources = pick_sessions(env, ws, scope, req);
+    let sources = pick_sessions(env, ws, &session_scope(ws, repo, req)?, req);
     let branch = crate::state::branch(&q.name, n);
     let mut forks = Vec::new();
     for source in sources {
@@ -1184,6 +1203,16 @@ fn fork_sessions(
     drop(lock);
     update_repo(ws, repo, |rl| rl.last_landed = Some(now_secs()))?;
     Ok(ids)
+}
+
+/// Where to look for sessions that touched the work: the repo, when `land`
+/// ran inside it, else the whole workspace.
+fn session_scope(ws: &Path, repo: &str, req: &LandRequest) -> Result<PathBuf> {
+    Ok(if repo_of(ws, &req.cwd, &core::read_meta(ws)?).is_some() {
+        ws.join(repo)
+    } else {
+        ws.to_path_buf()
+    })
 }
 
 /// The sessions to fork: those named; else the one `land` runs inside; else

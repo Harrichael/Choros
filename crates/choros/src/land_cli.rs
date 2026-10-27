@@ -284,8 +284,11 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         #[derive(serde::Serialize)]
         struct Report {
             queues: Vec<status::QueueStatus>,
+            /// Lands that went straight to main, which make no set.
+            instant: Vec<choros_land::instant::Landed>,
         }
-        println!("{}", serde_json::to_string_pretty(&Report { queues: report })?);
+        let instant = status::instant_lands(&cwd, config.as_deref(), all)?;
+        println!("{}", serde_json::to_string_pretty(&Report { queues: report, instant })?);
         return Ok(());
     }
     if report.is_empty() {
