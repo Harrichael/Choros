@@ -610,12 +610,15 @@ fn print_diffbase(q: &status::QueueStatus) {
     let prs: Vec<String> = q
         .diffbase
         .iter()
-        .map(|d| format!("{} ({})", d.pr, d.state))
+        .map(|d| match d.state {
+            "closed" => format!("{} (closed, left out until reopened)", d.pr),
+            state => format!("{} ({state})", d.pr),
+        })
         .collect();
     println!("  diffbase: {}", prs.join(", "));
     match &q.diffbase_park {
-        Some(p) => match &p.conflict {
-            Some(c) => {
+        Some(p) => {
+            if let Some(c) = &p.conflict {
                 let mut onto = vec!["main".to_string()];
                 onto.extend(c.onto.iter().cloned());
                 println!(
@@ -626,13 +629,9 @@ fn print_diffbase(q: &status::QueueStatus) {
                     q.name
                 );
             }
-            None => println!(
-                "  ! parked: {} was closed without merging; reopen it, or `choros queue base rm {} {}`",
-                p.pr, q.name, p.pr
-            ),
-        },
-        None if q.diffbase.iter().any(|d| d.state != "merged") => {
-            println!("  (no PR opens here until these merge)");
+        }
+        None if q.diffbase.iter().any(|d| d.state == "open" || d.state == "unseen") => {
+            println!("  (no PR opens here until the open ones merge)");
         }
         None => {}
     }

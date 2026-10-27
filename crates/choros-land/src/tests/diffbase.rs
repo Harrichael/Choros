@@ -147,10 +147,9 @@ fn listed_prs_that_conflict_park_the_queue_until_resolved() {
 }
 
 /// A PR in another repo is built on in that repo only: work in this one
-/// stays on main, but opens no PR until it merges. A listed PR closed
-/// without merging parks the queue until it is reopened.
+/// stays on main, but opens no PR until it merges.
 #[test]
-fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
+fn other_repos_prs_hold_the_queue_until_they_merge() {
     let w = World::new();
     let registry = w.trunk.join(".choros-config/registry");
     git(
@@ -173,12 +172,6 @@ fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
     assert_eq!(st.sets[&1].base_sha, w.origin_main());
     assert!(st.sets[&1].pr.is_none(), "held until lib's PR merges");
 
-    w.forge.close(theirs);
-    assert!(w.pass().diffbase_parked);
-    assert!(w.state().diffbase.park.unwrap().conflict.is_none());
-    w.forge.reopen(theirs);
-    assert!(!w.pass().diffbase_parked);
-
     w.forge.merge(theirs, MergeMethod::Merge);
     let report = w.pass();
     assert_eq!(report.opened, [1]);
@@ -186,6 +179,37 @@ fn other_repos_prs_hold_the_queue_and_a_closed_one_parks_it() {
         w.state().diffbase.prs[&format!("lib#{theirs}")].state,
         PrState::Merged
     );
+}
+
+/// A listed PR closed without merging is left out, as if taken off the list:
+/// its code leaves the base, so new workspaces start without it, queued work
+/// is replayed off it, and nothing waits for it. Reopened, it comes back.
+#[test]
+fn a_closed_pr_leaves_the_base_until_reopened() {
+    let w = World::new();
+    let dropped = w.outside_pr("dropped", "dropped.txt", "dropped\n");
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{dropped}")).unwrap();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "mine.txt", "mine\n");
+    w.land(&ws).unwrap();
+    assert!(w.state().sets[&1].pr.is_none(), "waits for the PR");
+
+    w.forge.close(dropped);
+    let report = w.pass();
+
+    let st = w.state();
+    assert!(!report.diffbase_parked);
+    assert!(diffbase_of(&st, REPO).is_none(), "back on main");
+    assert_eq!(w.file_at(&st.sets[&1].tip, "dropped.txt"), None);
+    assert_eq!(w.file_at(&st.sets[&1].tip, "mine.txt").as_deref(), Some("mine\n"));
+    assert!(st.sets[&1].pr.is_some(), "nothing waits for a closed PR");
+    let fresh = w.workspace("fresh");
+    assert!(!fresh.join(REPO).join("dropped.txt").exists());
+
+    w.forge.reopen(dropped);
+    w.pass();
+    let db = diffbase_of(&w.state(), REPO).expect("built on it again");
+    assert_eq!(w.file_at(&db.sha, "dropped.txt").as_deref(), Some("dropped\n"));
 }
 
 /// Adding and removing PRs edits only the `diffbase` line of queue.toml, and

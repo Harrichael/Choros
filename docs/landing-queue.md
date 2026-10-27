@@ -231,15 +231,23 @@ status` show it.
 - **Nothing opens early.** Front sets open their PRs only once every listed PR
   has merged (asked of GitHub, since a squash merge leaves no trace in git) and
   the set has been replayed onto plain main.
+- **Closed PRs are left out.** A listed PR closed without merging is built
+  without, as if taken off the list, until it is reopened: its code leaves the
+  diffbase, the merge head and new workspaces, sets are replayed off it (one
+  that needed it parks like any conflict), and nothing waits for it. It stays
+  in `queue.toml`, and `choros status` shows it as left out.
 - **Parks.** A listed PR that won't merge onto main and those before it parks
-  the whole queue, naming the pair and the files; so does one closed without
-  merging, until it is reopened or taken out. Nothing else moves while the
+  the whole queue, naming the pair and the files. Nothing else moves while the
   diffbase is parked. `choros queue resolve` resolves the conflict like any
   other: it is recorded, and rerere replays it on every rebuild. That
   resolution exists only to hold the queue together and never ships: when the
   PRs merge, main's own resolution is what the sets are replayed onto.
-- `queue base add` builds at once, so a conflict shows (and, at a terminal, can
-  be resolved) right away.
+- **Changes take effect at once.** `queue base add` and `queue base rm` run a
+  pass before they return, so the diffbase and merge head are rebuilt right
+  away (and a conflict shows, at a terminal resolvable, at once). A hand edit
+  of `queue.toml` is read on the daemon's next pass. Workspaces already open
+  stay where they are until `choros repo sync`, which their prompt asks for
+  with `⇣sync`; new ones start on the new merge head.
 
 ## Merge head
 

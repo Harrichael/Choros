@@ -4,6 +4,9 @@
 //! merged in, in list order; nothing in the queue opens a PR until every
 //! listed PR has merged, and then its sets are replayed onto main.
 //!
+//! A listed PR closed without merging is left out, as if taken off the list,
+//! until it is reopened: its code must not stay under the queue's work.
+//!
 //! A conflict between the listed PRs parks the whole queue. Resolving it
 //! (`choros queue resolve`) is recorded and replayed by rerere on every
 //! rebuild, but never ships: when the PRs merge, main's own resolution of
@@ -83,23 +86,13 @@ impl Work<'_, '_> {
         git.sha(&local)
     }
 
-    /// Build each repo's diffbase whose inputs changed. A listed PR closed
-    /// without merging, or one that won't merge onto those before it, parks
-    /// the queue instead.
+    /// Build each repo's diffbase whose inputs changed: the open PRs, since a
+    /// merged one is in main and a closed one is left out. A PR that won't
+    /// merge onto those before it parks the queue instead.
     pub fn rebuild_diffbase(&mut self) -> Result<()> {
         let listed = self.q.config.diffbase()?;
         let db = &mut self.st.diffbase;
-        if let Some(closed) = listed.iter().find(|p| {
-            db.prs
-                .get(&p.to_string())
-                .is_some_and(|s| s.state == PrState::Closed)
-        }) {
-            db.park = Some(DiffbasePark {
-                pr: closed.to_string(),
-                conflict: None,
-            });
-            return Ok(());
-        }
+        // Parks on a closed PR, from before closed ones were left out.
         if db.park.as_ref().is_some_and(|p| p.conflict.is_none()) {
             db.park = None;
         }
@@ -226,15 +219,15 @@ impl Work<'_, '_> {
         }
     }
 
-    /// A listed PR hasn't merged (or hasn't been seen yet), so the queue's
-    /// work isn't ready for main.
+    /// A listed PR is still open (or hasn't been seen yet), so the queue's
+    /// work isn't ready for main. A closed one is left out, not waited for.
     pub fn diffbase_waiting(&self) -> Result<bool> {
         Ok(self.q.config.diffbase()?.iter().any(|p| {
             self.st
                 .diffbase
                 .prs
                 .get(&p.to_string())
-                .is_none_or(|s| s.state != PrState::Merged)
+                .is_none_or(|s| s.state == PrState::Open)
         }))
     }
 }

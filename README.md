@@ -272,9 +272,11 @@ choros queue base add appq app#41  # build on app's PR #41 while it's in review
 A queue's **diffbase** lets it start before the work it needs has merged: it
 builds on main with the listed PRs merged in (any PRs, landed through Choros
 or not), and opens nothing until they merge, when its sets are replayed onto
-main. A PR in another repo (`lib#12`) is only waited for. If the listed PRs
-conflict, the queue parks until `choros queue resolve`; that resolution only
-holds the queue together and never ships.
+main. A PR in another repo (`lib#12`) is only waited for, and one closed
+without merging is left out until it's reopened. If the listed PRs conflict,
+the queue parks until `choros queue resolve`; that resolution only holds the
+queue together and never ships. `choros queue base add|rm` takes effect at
+once; workspaces already open follow with `choros repo sync`.
 
 ## Development
 

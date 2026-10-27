@@ -119,7 +119,9 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
     choros queue base add|rm NAME REPO#N[,N…]…
                                     build on PRs in review in their repos, or stop (app#40,41
                                     lib#7: a bare number is in the repo before it). Nothing in
-                                    the queue opens a PR until every listed one merges
+                                    the queue opens a PR until every listed one merges; one closed
+                                    unmerged is left out. Takes effect at once; workspaces follow
+                                    with `choros repo sync`
 
 AGENTS
     choros agent ls                 resumable claude / cursor sessions under the current directory
