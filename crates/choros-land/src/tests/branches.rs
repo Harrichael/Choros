@@ -70,7 +70,7 @@ fn land_archive_retires_the_workspace_it_ran_in() {
         sessions: vec![],
         env_session: None,
     };
-    let out = crate::land::land(&w.env(), &req, None).unwrap();
+    let out = w.land_req(&req, None).unwrap();
     assert_eq!(out.archived_to, Some(w.trunk.join(".choros-config/archive/epic-x/login")));
     assert!(!in_epic.exists());
     assert!(at_trunk.exists());

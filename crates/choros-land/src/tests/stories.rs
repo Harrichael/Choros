@@ -238,7 +238,7 @@ fn a_closed_pr_parks_its_subtree_until_dropped() {
     assert_eq!(st.sets[&1].status, SetStatus::Closed);
     assert_eq!(st.repos[REPO].merge_head.as_ref().unwrap().sha, w.origin_main(), "neither is in the merge head");
 
-    crate::admin::drop_set(&w.env(), &w.queue(), 1).unwrap();
+    w.drop_set(1);
     let st = w.state();
     assert!(st.sets[&2].pr.is_some(), "landing-2 moved to the front");
     assert_eq!(w.file_at(&st.sets[&2].tip, "a.txt"), None);
@@ -302,7 +302,7 @@ fn concurrent_lands_serialize() {
                         sessions: Vec::new(),
                         env_session: None,
                     };
-                    crate::land::land(&w.env(), &req, None).map(|_| ()).map_err(|e| e.to_string())
+                    w.land_req(&req, None).map(|_| ()).map_err(|e| e.to_string())
                 })
             })
             .collect();
@@ -501,8 +501,8 @@ fn landing_folders_follow_their_sets_and_retire_on_merge() {
     assert_eq!(git(&second.join(REPO), &["rev-parse", "HEAD"]), tip);
 }
 
-/// A dropped set's commits go back to its workspace: they count as unlanded,
-/// and the next land queues them again rather than finding nothing to land.
+/// A dropped set's commits go back to its workspace: the next land queues
+/// them again rather than finding nothing to land.
 #[test]
 fn a_dropped_set_lands_again_from_its_workspace() {
     let w = World::new();
@@ -513,8 +513,8 @@ fn a_dropped_set_lands_again_from_its_workspace() {
     w.commit(&ws, "b.txt", "b\n");
     w.land(&ws).unwrap();
 
-    let dropped = crate::admin::drop_set(&w.env(), &w.queue(), 2).unwrap();
-    assert_eq!(dropped.workspace, crate::workspace::Unland::Unlanded);
+    let dropped = w.drop_set(2);
+    assert_eq!(dropped.returned_to, Some(ws.join(REPO)));
 
     w.land(&ws).unwrap();
     let st = w.state();
@@ -522,9 +522,36 @@ fn a_dropped_set_lands_again_from_its_workspace() {
     assert_eq!(w.file_at(&st.sets[&3].tip, "b.txt").as_deref(), Some("b\n"));
 }
 
+/// Syncing after a land moves the workspace past its commits, which then
+/// live only in the merge head; a drop takes them out of that. They still
+/// come back to the workspace, under the work done since.
+#[test]
+fn a_dropped_set_comes_back_after_the_workspace_moved_on() {
+    let w = World::new();
+    let first = w.workspace("first");
+    w.commit(&first, "a.txt", "a\n");
+    w.land(&first).unwrap();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    let other = w.workspace("other");
+    w.commit(&other, "c.txt", "c\n");
+    w.land(&other).unwrap();
+    w.sync(&ws);
+    w.commit(&ws, "b.txt", "b, then more\n");
+
+    w.drop_set(2);
+    w.sync(&ws);
+
+    assert_eq!(std::fs::read_to_string(ws.join(REPO).join("b.txt")).unwrap(), "b, then more\n");
+    w.land(&ws).unwrap();
+    let st = w.state();
+    assert_eq!(w.file_at(&st.sets[&4].tip, "b.txt").as_deref(), Some("b, then more\n"));
+    assert_eq!(w.own_commits(4), 2, "the dropped commit and the one after it");
+}
+
 /// Landing again from a workspace makes a new set, so the land says where
-/// changes to its still-open one go; and dropping that earlier set leaves
-/// its commits landed, since the new set builds on them.
+/// changes to its still-open one go.
 #[test]
 fn landing_again_points_at_the_open_set() {
     let w = World::new();
@@ -544,30 +571,4 @@ fn landing_again_points_at_the_open_set() {
           (`choros landing open 2 --queue appq`)"
             .to_string()]
     );
-    let dropped = crate::admin::drop_set(&w.env(), &w.queue(), 2).unwrap();
-    assert_eq!(dropped.workspace, crate::workspace::Unland::Kept);
-}
-
-/// A fork on main of work that takes back what a queued set added would
-/// replay clean and quietly keep that set's lines. The deps were picked, so
-/// the land refuses and names the set they leave out.
-#[test]
-fn a_fork_that_would_lose_changes_names_the_missing_set() {
-    let w = World::new();
-    let one = w.workspace("one");
-    let two = w.workspace("two");
-    w.commit(&one, "a.txt", "a\n");
-    w.land(&one).unwrap();
-    w.sync(&two);
-    git(&two.join(REPO), &["rm", "--quiet", "a.txt"]);
-    w.commit(&two, "b.txt", "instead of a.txt\n");
-
-    let err = w.land_with(&two, Some(vec![]), None, None).unwrap_err().to_string();
-
-    assert_eq!(
-        err,
-        "appq/landing-2 would lose part of what its commits change in a.txt: they change what \
-         appq/landing-1 wrote; add it to --deps, or use --deps auto"
-    );
-    assert_eq!(w.state().sets.len(), 1);
 }

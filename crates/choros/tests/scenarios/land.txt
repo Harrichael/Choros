@@ -1,0 +1,37 @@
+# A workspace lands into its queue; with nothing ahead, the set goes
+# straight to the front as a PR.
+
+$ choros work ws app
+$ROOT/trunk/ws/app
+mkdir $ROOT/trunk/ws
+cloning app…
+copying agent templates…
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/landing/appq/landing-1
+$ choros status
+appq (app) @ $ROOT/trunk
+  front    appq/landing-1 (app)  https://github.test/pull/1
+
+# Landing again makes a new set, and says where changes to the open one go.
+$ echo "a, reviewed" > a.txt && git commit -qam "review a"
+$ choros land continue
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/landing/appq/landing-2
+    appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
+
+# Once the front merges, the next set opens its PR.
+$ gh pr merge 1 --squash
+$ choros queue sync appq
+appq: merged landing-1
+appq: re-synced landing-2
+appq: opened PRs for landing-2
+$ choros status
+appq (app) @ $ROOT/trunk
+  front    appq/landing-2 (app)  after landing-1  https://github.test/pull/2
+  (1 merged)
+  ⇣ $ROOT/trunk/ws (app) needs `choros repo sync`

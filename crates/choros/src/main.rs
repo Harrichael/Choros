@@ -63,8 +63,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some(other) => {
-            eprintln!("unknown subcommand: {other}");
-            cli::print_usage();
+            eprintln!("choros: no command `{other}`; `choros --help` lists them");
             std::process::exit(2);
         }
     }
@@ -72,8 +71,7 @@ fn run() -> Result<()> {
 
 fn reject_extra_args(sub: &str, rest: &[String]) {
     if !rest.is_empty() {
-        eprintln!("`choros {sub}` takes no arguments, got: {}", rest.join(" "));
-        cli::print_usage();
+        eprintln!("choros: `choros {sub}` takes no arguments, got: {}", rest.join(" "));
         std::process::exit(2);
     }
 }

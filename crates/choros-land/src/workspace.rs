@@ -38,10 +38,6 @@ pub struct RepoLanding {
     /// Everything up to here has been landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_through: Option<String>,
-    /// The queued sets this repo landed into, so dropping one can count its
-    /// commits as unlanded again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sets: Vec<LandedSet>,
     /// The merge head content `base` had (`Composition::key`), so the prompt
     /// can tell "needs sync" from files alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +50,13 @@ pub struct RepoLanding {
     pub pending: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_composition: Option<String>,
+    /// Dropped sets whose commits come back on the next sync, as unlanded:
+    /// leaving the queue doesn't take work out of the workspace that made it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returned: Vec<Returned>,
+    /// `returned`, while the rebase bringing them back is under way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_returned: Vec<Returned>,
     /// Sets a fork land moved this repo onto: the commits now build on them,
     /// so the fork must keep depending on them when the land is re-run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -69,56 +72,26 @@ pub struct RepoLanding {
     pub instant_pr: Option<InstantPr>,
 }
 
-impl RepoLanding {
-    /// Count everything through `head` as landed, as set `n` of `queue`.
-    pub fn landed(&mut self, queue: &str, n: u32, head: &str) {
-        let from = self.landed_through.replace(head.to_string());
-        self.sets.push(LandedSet {
-            queue: queue.to_string(),
-            n,
-            from,
-            through: head.to_string(),
-        });
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LandedSet {
+/// A dropped set's own commits, `base..tip` in the queue's sync clone, kept
+/// there under `refs/choros/returned/<n>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Returned {
     pub queue: String,
     pub n: u32,
-    /// `landed_through` before this set; none for a workspace's first land.
-    pub from: Option<String>,
-    pub through: String,
+    pub base: String,
+    pub tip: String,
 }
 
-/// What dropping a set did to the workspace it came from.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Unland {
-    /// Its commits count as unlanded again.
-    Unlanded,
-    /// The workspace landed again on top of them, so they stay landed.
-    Kept,
-    /// The workspace is gone, or has no record of the set.
-    Unknown,
-}
-
-/// Set `n` of `queue`, landed from `repo` of `ws`, was dropped: if it was
-/// the repo's last land, count its commits as unlanded again.
-pub fn unland(ws: &Path, repo: &str, queue: &str, n: u32) -> Result<Unland> {
-    let mut wl = read(ws)?;
-    let Some(rl) = wl.repo.get_mut(repo) else {
-        return Ok(Unland::Unknown);
-    };
-    let Some(i) = rl.sets.iter().position(|s| s.queue == queue && s.n == n) else {
-        return Ok(Unland::Unknown);
-    };
-    if rl.landed_through.as_deref() != Some(rl.sets[i].through.as_str()) {
-        return Ok(Unland::Kept);
+/// Hand a dropped set's commits back to `repo` of `ws`; false if the
+/// workspace is gone.
+pub fn give_back(ws: &Path, repo: &str, returned: Returned) -> Result<bool> {
+    if !ws.join(repo).exists() {
+        return Ok(false);
     }
-    let set = rl.sets.remove(i);
-    rl.landed_through = set.from;
+    let mut wl = read(ws)?;
+    wl.repo.entry(repo.to_string()).or_default().returned.push(returned);
     write(ws, &wl)?;
-    Ok(Unland::Unlanded)
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

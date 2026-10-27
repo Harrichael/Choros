@@ -6,6 +6,7 @@
 mod auto;
 mod branches;
 mod diffbase;
+mod invariants;
 mod regressions;
 mod repos;
 mod stories;
@@ -366,17 +367,44 @@ impl World {
 
     /// `choros land continue --fork --deps auto`.
     pub fn land_auto(&self, ws: &Path) -> Result<LandOutcome> {
-        let req = LandRequest {
+        self.land_req(&self.request(ws, Some(ForkDeps::Auto), None), None)
+    }
+
+    pub fn request(&self, ws: &Path, fork: Option<ForkDeps>, on_conflict: Option<OnConflict>) -> LandRequest {
+        LandRequest {
             cwd: ws.join(REPO),
             mode: LandMode::Continue,
-            fork: Some(ForkDeps::Auto),
-            on_conflict: None,
+            fork,
+            on_conflict,
             title: None,
             body: None,
             sessions: vec!["source-session".into()],
             env_session: None,
-        };
-        crate::land::land(&self.env(), &req, None)
+        }
+    }
+
+    /// Land, then check that every set it made carries the workspace's
+    /// changes whole.
+    pub fn land_req(&self, req: &LandRequest, handler: Option<&mut Scripted>) -> Result<LandOutcome> {
+        let (_, ws) = choros_core::choros::find_workspace(&req.cwd).unwrap();
+        let repos = choros_core::choros::read_meta(&ws).unwrap().repos;
+        let before: BTreeMap<String, _> =
+            repos.iter().map(|r| (r.clone(), self.unlanded_changes(&ws, r))).collect();
+        let seen = handler.as_ref().map_or(0, |h| h.seen.len());
+        let mut handler = handler;
+        let out = crate::land::land(
+            &self.env(),
+            req,
+            handler.as_deref_mut().map(|h| h as &mut (dyn ConflictHandler + 'static)),
+        );
+        let resolved: Vec<String> = handler
+            .map(|h| h.seen[seen..].iter().flat_map(|s| s.files.clone()).collect())
+            .unwrap_or_default();
+        match &out {
+            Ok(out) => self.check_landed(out, &before, &resolved),
+            Err(_) => self.check(),
+        }
+        out
     }
 
     /// Write the trunk's `.choros-config/repos.toml`.
@@ -387,6 +415,7 @@ impl World {
     /// `choros repo sync`: move the workspace onto the merge head.
     pub fn sync(&self, ws: &Path) {
         crate::land::sync_workspace(&self.env(), &ws.join(REPO)).unwrap();
+        self.check();
     }
 
     pub fn land_with(
@@ -396,29 +425,26 @@ impl World {
         on_conflict: Option<OnConflict>,
         handler: Option<&mut Scripted>,
     ) -> Result<LandOutcome> {
-        let req = LandRequest {
-            cwd: ws.join(REPO),
-            mode: LandMode::Continue,
-            fork: fork.map(ForkDeps::Picked),
-            on_conflict,
-            title: None,
-            body: None,
-            sessions: vec!["source-session".into()],
-            env_session: None,
-        };
-        crate::land::land(
-            &self.env(),
-            &req,
-            handler.map(|h| h as &mut (dyn ConflictHandler + 'static)),
-        )
+        self.land_req(&self.request(ws, fork.map(ForkDeps::Picked), on_conflict), handler)
+    }
+
+    /// `choros queue drop`.
+    pub fn drop_set(&self, n: u32) -> crate::admin::Dropped {
+        let d = crate::admin::drop_set(&self.env(), &self.queue(), n).unwrap();
+        self.check();
+        d
     }
 
     pub fn pass(&self) -> PassReport {
-        crate::admin::sync(&self.env(), &self.queue(), None).unwrap()
+        let r = crate::admin::sync(&self.env(), &self.queue(), None).unwrap();
+        self.check();
+        r
     }
 
     pub fn resolve(&self, handler: &mut Scripted) -> PassReport {
-        crate::admin::sync(&self.env(), &self.queue(), Some(handler)).unwrap()
+        let r = crate::admin::sync(&self.env(), &self.queue(), Some(handler)).unwrap();
+        self.check();
+        r
     }
 
     /// A file's content at a commit, read from `app`'s sync clone.

@@ -114,8 +114,8 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
     choros queue sync [NAME]        run the daemon's pass now
     choros queue resolve NAME [--agent trust|review|manual]
                                     retry parked conflicts, asking how to resolve each
-    choros queue drop NAME N        remove a queued landing-set; if it was its workspace's last
-                                    land, its commits there count as unlanded again
+    choros queue drop NAME N        remove a queued landing-set; its commits go back to the
+                                    workspace that landed them, unlanded, on its next sync or land
     choros queue doctor NAME        compare the queue's state with origin, then sync
     choros queue base NAME          the PRs the queue builds on before they reach main
     choros queue base add|rm NAME REPO#N[,N…]…

@@ -1,0 +1,38 @@
+# Dropping a set takes it out of the queue, not out of the workspace that
+# made it: its commits come back, unlanded, and land again.
+
+$ choros work first app
+$ROOT/trunk/first/app
+mkdir $ROOT/trunk/first
+cloning app…
+copying agent templates…
+$ cd trunk/first/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/landing/appq/landing-1
+
+$ cd trunk
+$ choros work ws app
+$ROOT/trunk/ws/app
+mkdir $ROOT/trunk/ws
+cloning app…
+copying agent templates…
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo b > b.txt && git add b.txt && git commit -qm "write b"
+$ choros land continue
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/landing/appq/landing-2
+$ choros queue drop appq 2
+its commits go back to $ROOT/trunk/ws/app: its next land or `choros repo sync` brings them back, unlanded
+$ choros land continue
+app → appq/landing-3, queued
+    landing: $ROOT/trunk/landing/appq/landing-3
+$ git log --format=%s
+write b
+write a
+init

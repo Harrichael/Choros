@@ -284,3 +284,16 @@ once; workspaces already open follow with `choros repo sync`.
 cargo test --release
 cargo build --release
 ```
+
+Two kinds of tests:
+
+- **Stories** (`crates/choros-land/src/tests/`) drive the engine against real
+  git and a fake GitHub. After every land, pass, sync and drop, the fixture
+  checks invariants (`tests/invariants.rs`): a set carries exactly what its
+  commits changed, and a dropped set's commits are never lost from their
+  workspace.
+- **Scenarios** (`crates/choros/tests/scenarios/*.txt`) are transcripts of
+  shell commands against the real `choros` binary, a fake `gh` and a fixed
+  git clock: the exact output, errors and exit codes a person sees.
+  `CHOROS_BLESS=1 cargo test --test scenarios` rewrites them from actual
+  output; review the diff.

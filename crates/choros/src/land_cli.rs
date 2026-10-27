@@ -11,7 +11,6 @@ use choros_land::forge::Gh;
 use choros_land::land::{self, ForkDeps, LandRequest};
 use choros_land::queue::{self, Queue};
 use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
-use choros_land::workspace::Unland;
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -641,17 +640,14 @@ fn print_diffbase(q: &status::QueueStatus) {
     }
 }
 
-/// What became of a dropped set's commits in the workspace they came from.
+/// Where a dropped set's commits went.
 pub fn dropped_note(d: &admin::Dropped) -> Option<String> {
-    let at = d.source.workspace.join(&d.source.repo);
-    match d.workspace {
-        Unland::Unlanded => Some(format!("its commits in {} count as unlanded again", at.display())),
-        Unland::Kept => Some(format!(
-            "its commits in {} stay landed: that workspace landed again on top of them",
+    d.returned_to.as_ref().map(|at| {
+        format!(
+            "its commits go back to {}: its next land or `choros repo sync` brings them back, unlanded",
             at.display()
-        )),
-        Unland::Unknown => None,
-    }
+        )
+    })
 }
 
 fn print_report(name: &str, r: &PassReport) {

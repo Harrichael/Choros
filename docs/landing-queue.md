@@ -454,10 +454,11 @@ same-repo cross-queue edges; public sets cannot gain deps) and trigger a
 re-sync and merge-head rebuild, conflicts parked as usual.
 
 `choros queue drop <set>` removes a queued set (its dependents re-sync without
-it). If the set was its workspace's last land, its commits there count as
-unlanded again, so they can be landed anew; otherwise the next sync would take
-them out of the workspace, as no longer in the queue. A workspace that landed
-again on top of the set keeps them landed.
+it). Its commits go back to the workspace that landed them: otherwise that
+workspace's next sync would take them out, as no longer in the merge head.
+The next `choros repo sync` or land replays them onto the merge head, under
+any work done since, as unlanded. The set's tip stays in the sync clone under
+`refs/choros/returned/<n>`.
 
 Landing again from a workspace always makes a new set. Changes to a set still
 in the queue go through its landing folder, and the land says so when the

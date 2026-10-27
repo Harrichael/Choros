@@ -27,7 +27,7 @@ fn landing_two_repos_makes_a_set_in_each() {
         sessions: vec![],
         env_session: None,
     };
-    let out = crate::land::land(&w.env(), &req, None).unwrap();
+    let out = w.land_req(&req, None).unwrap();
     let mut landed: Vec<(String, u32)> = out.landed.iter().map(|l| (l.repo.clone(), l.n.unwrap())).collect();
     landed.sort();
     assert_eq!(landed, [(REPO.to_string(), 1), ("lib".to_string(), 2)]);
@@ -44,7 +44,7 @@ fn landing_two_repos_makes_a_set_in_each() {
 
     w.commit_in(&ws, "lib", "m.txt", "m\n");
     let req = LandRequest { cwd: ws.join("lib"), ..req };
-    crate::land::land(&w.env(), &req, None).unwrap();
+    w.land_req(&req, None).unwrap();
     assert_eq!(w.state().sets[&3].deps, [Dep::Set(2)], "only lib's sets");
 }
 

@@ -166,7 +166,11 @@ fn repo_of(ws: &Path, cwd: &Path, meta: &ChorosMeta) -> Option<String> {
 fn has_unlanded(ws: &Path, repo: &str) -> Result<bool> {
     let git = Git::new(&ws.join(repo));
     let through = landed_through(ws, repo)?;
-    Ok(through != git.head()?)
+    Ok(through != git.head()? || !returned(ws, repo)?.is_empty())
+}
+
+fn returned(ws: &Path, repo: &str) -> Result<Vec<workspace::Returned>> {
+    Ok(workspace::read(ws)?.repo.get(repo).map(|r| r.returned.clone()).unwrap_or_default())
 }
 
 /// Where this repo's landing history starts. A workspace made before
@@ -184,7 +188,7 @@ pub fn unlanded(ws: &Path) -> Result<Vec<(String, usize)>> {
     Ok(out)
 }
 
-fn landed_through(ws: &Path, repo: &str) -> Result<String> {
+pub(crate) fn landed_through(ws: &Path, repo: &str) -> Result<String> {
     let rl = workspace::read(ws)?.repo.get(repo).cloned().unwrap_or_default();
     if let Some(sha) = rl.landed_through {
         return Ok(sha);
@@ -225,9 +229,12 @@ fn settle_pending(ws: &Path, repo: &str) -> Result<()> {
     let reached = git.is_ancestor(&pending, "HEAD")?;
     update_repo(ws, repo, |rl| {
         let composition = rl.pending_composition.take();
+        let returned = std::mem::take(&mut rl.pending_returned);
         if reached {
             rl.landed_through = Some(pending);
             rl.composition = composition;
+        } else {
+            rl.returned.extend(returned);
         }
         rl.pending = None;
     })
@@ -311,15 +318,54 @@ fn sync_to_merge_head(env: &Env, q: &Queue, ws: &Path, repo: &str) -> Result<Mer
     let known = workspace::read(ws)?.repo.get(repo).and_then(|r| r.composition.clone());
     // A merge in the range (main merged in by hand) is straightened out too:
     // the rebase drops it, and main's commits already in the merge head.
+    let returned = returned(ws, repo)?;
     let needed = known.as_deref() != Some(key.as_str())
         || !git.is_ancestor(&mh.sha, "HEAD")?
-        || git.has_merges(&through, "HEAD")?;
-    if needed {
-        let mh_ref = format!("refs/heads/{}/merge-head", q.name);
-        let what = format!("{}'s merge head", q.name);
-        rebase_workspace(q, ws, repo, &git, &mh_ref, &mh.sha, Some(key), &what)?;
+        || git.has_merges(&through, "HEAD")?
+        || !returned.is_empty();
+    if !needed {
+        return Ok(mh);
     }
+    let what = format!("{}'s merge head", q.name);
+    if returned.is_empty() {
+        let mh_ref = format!("refs/heads/{}/merge-head", q.name);
+        rebase_workspace(q, ws, repo, &git, &mh_ref, &mh.sha, Some(key), &what)?;
+        return Ok(mh);
+    }
+    // Dropped sets' commits go between the merge head and the workspace's
+    // own unlanded ones, which may build on them; landing counts only up to
+    // the merge head, so they come back unlanded.
+    let onto = return_onto(env, q, repo, &mh.sha, &returned)?;
+    update_repo(ws, repo, |rl| rl.pending_returned = std::mem::take(&mut rl.returned))?;
+    let onto_ref = "refs/choros/onto-returned";
+    let sync = Git::new(&q.sync_dir(repo));
+    sync.run(&["update-ref", onto_ref, &onto])?;
+    rebase_workspace(q, ws, repo, &git, onto_ref, &mh.sha, Some(key), &what)?;
     Ok(mh)
+}
+
+/// The merge head with the dropped sets' commits replayed on top, in the
+/// sync clone.
+fn return_onto(env: &Env, q: &Queue, repo: &str, mh: &str, returned: &[workspace::Returned]) -> Result<String> {
+    let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+    let sync = work.git(repo);
+    let mut commits = Vec::new();
+    for r in returned {
+        commits.extend(sync.commits(&r.base, &r.tip)?);
+    }
+    let names: Vec<String> = returned.iter().map(|r| crate::state::branch(&r.queue, r.n)).collect();
+    let what = format!("the commits of dropped {}", names.join(", "));
+    let tip = work.replay(repo, mh, &commits, &what)?.map_err(|files| {
+        eyre!(
+            "{what} no longer apply onto {}'s merge head (conflicts in {}); they are kept in {:?} \
+             under refs/choros/returned/",
+            q.name,
+            files.join(", "),
+            q.sync_dir(repo)
+        )
+    })?;
+    work.save()?;
+    Ok(tip)
 }
 
 /// `auto_check` is set when the land picks its own dependencies: the repo's
@@ -336,6 +382,11 @@ fn land_queued(
     let mut warnings = Vec::new();
     let mut notes = Vec::new();
 
+    // A dropped set's commits come back before anything lands beside the
+    // queue, which works from the workspace as it stands.
+    if !returned(ws, repo)?.is_empty() {
+        sync_to_merge_head(env, q, ws, repo)?;
+    }
     let n = match (&req.fork, auto_check) {
         (_, Some(check)) => match land_auto(env, q, ws, repo, check, req)? {
             Auto::Landed(n, why) => {
@@ -438,7 +489,7 @@ fn land_normal(
         work.save()?;
         let key = work.st.repos[repo].merge_head.as_ref().map(|m| m.composition.key());
         update_repo(ws, repo, |rl| {
-            rl.landed(&q.name, n, &head);
+            rl.landed_through = Some(head.clone());
             rl.composition = key;
         })?;
         return Ok(n);
@@ -588,7 +639,7 @@ fn land_fork(
         work.rebuild_merge_head(repo)?;
         work.save()?;
         update_repo(ws, repo, |rl| {
-            rl.landed(&q.name, n, &head);
+            rl.landed_through = Some(head.clone());
             rl.fork_deps.clear();
         })?;
         return Ok(n);
@@ -703,7 +754,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         work.rebuild_merge_head(repo)?;
         work.save()?;
         update_repo(ws, repo, |rl| {
-            rl.landed(&q.name, n, &head);
+            rl.landed_through = Some(head.clone());
             rl.fork_deps.clear();
         })?;
 
@@ -755,7 +806,7 @@ fn lost_changes(git: &Git, written: (&str, &str), replayed: (&str, &str)) -> Res
 
 /// Each file's `+`/`-` lines from `from` to `to`, sorted, so that where a
 /// hunk lands doesn't matter, only what it changes.
-fn changed_lines(git: &Git, (from, to): (&str, &str)) -> Result<BTreeMap<String, Vec<String>>> {
+pub(crate) fn changed_lines(git: &Git, (from, to): (&str, &str)) -> Result<BTreeMap<String, Vec<String>>> {
     let diff = git.run(&["diff", "--no-color", "--no-renames", "--no-ext-diff", "-U0", from, to])?;
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut file = None;

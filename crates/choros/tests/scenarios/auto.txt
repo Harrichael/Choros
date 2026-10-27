@@ -1,0 +1,51 @@
+# --deps auto lands on only what the commits need. Work that takes back
+# what a queued set added needs that set: without it, the removal would
+# quietly vanish.
+
+$ printf '[app]\ncheck = "true"\n' > .choros-config/repos.toml
+$ choros work one app
+$ROOT/trunk/one/app
+mkdir $ROOT/trunk/one
+cloning app…
+copying agent templates…
+$ cd trunk/one/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/landing/appq/landing-1
+$ cd trunk
+$ choros work three app
+$ROOT/trunk/three/app
+mkdir $ROOT/trunk/three
+cloning app…
+copying agent templates…
+$ cd trunk/three/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo c > c.txt && git add c.txt && git commit -qm "write c"
+$ choros land continue
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/landing/appq/landing-2
+
+$ cd trunk
+$ choros work two app
+$ROOT/trunk/two/app
+mkdir $ROOT/trunk/two
+cloning app…
+copying agent templates…
+$ cd trunk/two/app
+$ choros repo bind app appq
+app now lands into appq
+$ git rm -q a.txt && echo instead > b.txt && git add b.txt && git commit -qm "replace a with b"
+
+# Picking deps that leave that set out is refused, naming it.
+$ choros land continue --fork --deps none
+choros: appq/landing-3 would lose part of what its commits change in a.txt: they change what appq/landing-1 wrote; add it to --deps, or use --deps auto
+[exit 1]
+$ choros land continue --fork --deps auto
+app → appq/landing-3, queued
+    landing: $ROOT/trunk/landing/appq/landing-3
+    on appq/landing-1: its commits change what it wrote (a.txt)
+    ahead of appq/landing-2; `true` passed without them

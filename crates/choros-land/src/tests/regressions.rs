@@ -63,7 +63,7 @@ fn landing_from_a_landing_folder_is_refused() {
         sessions: Vec::new(),
         env_session: None,
     };
-    let err = crate::land::land(&w.env(), &req, None).unwrap_err();
+    let err = w.land_req(&req, None).unwrap_err();
     assert!(err.to_string().contains("push review fixes"), "{err}");
     assert_eq!(w.file_at(&w.origin_main(), "a.txt"), None);
 }

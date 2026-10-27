@@ -8,8 +8,8 @@ use color_eyre::eyre::{Result, eyre};
 use crate::engine::{Handler, Env, PassReport, Work};
 use crate::graph;
 use crate::queue::Queue;
-use crate::state::{Dep, ParkOp, SetStatus, Source};
-use crate::workspace::{self, Unland};
+use crate::state::{Dep, ParkOp, SetStatus};
+use crate::workspace::{self, Returned};
 
 /// One pass now, in the foreground. With a handler, parked conflicts are
 /// retried and handed to it.
@@ -36,9 +36,9 @@ pub fn sync(env: &Env, q: &Queue, handler: Handler<'_>) -> Result<PassReport> {
 }
 
 /// Remove a queued set. Its dependents inherit its dependencies and re-sync
-/// without it on the pass that follows. If it was its workspace's last land,
-/// its commits there count as unlanded again; otherwise the next sync would
-/// take them out of the workspace, as no longer in the queue.
+/// without it on the pass that follows. Its commits go back to the
+/// workspace that landed them, to come back as unlanded on its next sync:
+/// otherwise that sync would take them out, as no longer in the queue.
 pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
     let set = work
@@ -57,25 +57,33 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
         let branch = set.branch(&q.name);
         work.set_git(n).delete_remote_branch("origin", &branch)?;
     }
+    let returned = Returned {
+        queue: q.name.clone(),
+        n,
+        base: set.base_sha.clone(),
+        tip: set.tip.clone(),
+    };
+    let source = set.source.clone();
+    work.git(&source.repo)
+        .run(&["update-ref", &format!("refs/choros/returned/{n}"), &returned.tip])?;
     graph::splice_out(&mut work.st, n);
     let set = work.st.sets.get_mut(&n).unwrap();
     set.status = SetStatus::Dropped;
     set.park = None;
-    let source = set.source.clone();
     let report = work.pass(env.forge);
     work.save()?;
-    let workspace = workspace::unland(&source.workspace, &source.repo, &q.name, n)?;
+    let returned_to = workspace::give_back(&source.workspace, &source.repo, returned)?
+        .then(|| source.workspace.join(&source.repo));
     Ok(Dropped {
         report: report?,
-        workspace,
-        source,
+        returned_to,
     })
 }
 
 pub struct Dropped {
     pub report: PassReport,
-    pub workspace: Unland,
-    pub source: Source,
+    /// The repo its commits went back to, unless that workspace is gone.
+    pub returned_to: Option<PathBuf>,
 }
 
 /// Differences between state.json and origin that a pass would not fix on
