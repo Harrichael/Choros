@@ -299,6 +299,7 @@ fn concurrent_lands_serialize() {
                         on_conflict: None,
                         title: None,
                         body: None,
+                        labels: Vec::new(),
                         sessions: Vec::new(),
                         env_session: None,
                     };

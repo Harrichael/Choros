@@ -378,6 +378,7 @@ impl World {
             on_conflict,
             title: None,
             body: None,
+            labels: Vec::new(),
             sessions: vec!["source-session".into()],
             env_session: None,
         }

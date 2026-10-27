@@ -32,6 +32,9 @@ pub struct LandRequest {
     pub on_conflict: Option<OnConflict>,
     pub title: Option<String>,
     pub body: Option<String>,
+    /// Kept on each set made, for other tools to read; choros never looks
+    /// inside them.
+    pub labels: Vec<String>,
     /// Sessions to fork into the landing; empty means "work it out".
     pub sessions: Vec<String>,
     /// The Claude Code session `land` is running inside, if any (the CLI
@@ -110,7 +113,15 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
             continue;
         }
         let out = match &queues[repo] {
-            None => land_instant(env, &trunk, &ws, repo)?,
+            None => {
+                let mut out = land_instant(env, &trunk, &ws, repo)?;
+                if !req.labels.is_empty() {
+                    out.warnings.push(format!(
+                        "{repo} lands straight to main, so its labels aren't kept (labels go on landing-sets)"
+                    ));
+                }
+                out
+            }
             Some(queue) => {
                 let q = Queue::open(&trunk, queue)?;
                 land_queued(env, &q, &ws, repo, req, checks.get(repo), handler.as_deref_mut())?
@@ -894,6 +905,7 @@ fn new_set(
         mode: req.mode,
         title: req.title.clone(),
         body: req.body.clone(),
+        labels: req.labels.clone(),
         sessions: Vec::new(),
         conflicts_with: Vec::new(),
         pending: None,

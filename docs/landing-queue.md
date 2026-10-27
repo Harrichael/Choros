@@ -112,8 +112,8 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--session UUID]...
-choros land archive  [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--session UUID]...
+choros land continue [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land archive  [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
@@ -208,6 +208,11 @@ slow one holds up other lands meanwhile.
 the text it proposes at land time; it is stored with the set. A raw-terminal
 land stores none: the body is blank and the title falls back to the set's
 first commit subject (GitHub requires one).
+
+**Labels.** Each `--label` is kept, in order and without repeats, on every
+set the land makes, and shown by `choros status`. Choros never reads them;
+they are for other tools to tie their own records to a set. Instant mode
+makes no set, so a repo landing that way keeps none and the land warns.
 
 **Instant mode.** Fetch, rebase `landed_through..HEAD` onto `origin/main` in
 the workspace (conflicts stop the land as in a normal land), then push to main
@@ -442,9 +447,8 @@ workspaces that need a sync.
 `{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,
 diffbase_park}]}`. Other tools read each set's `n`, `repo`, `state`
 (`queued`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
-`sessions` (`[{source, fork}]`) and `labels`, so those names stay fixed;
-`labels` is always empty until something sets them. Dropped sets are left
-out.
+`sessions` (`[{source, fork}]`) and `labels`, so those names stay fixed.
+Dropped sets are left out.
 
 `choros status --prompt` prints one short token (`⇣sync`, `!resolve`, or
 nothing) from local files only — no git, no network, no lock — for the bash

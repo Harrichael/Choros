@@ -53,7 +53,6 @@ pub struct SetLine {
     pub title: Option<String>,
     pub pr: Option<PrRef>,
     pub sessions: Vec<SessionFork>,
-    /// Always empty for now: nothing sets labels yet.
     pub labels: Vec<String>,
     pub deps: Vec<String>,
     pub park: Option<Park>,
@@ -153,7 +152,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             title: set.title.clone(),
             pr: set.pr.clone(),
             sessions: set.sessions.clone(),
-            labels: Vec::new(),
+            labels: set.labels.clone(),
             deps: set
                 .deps
                 .iter()

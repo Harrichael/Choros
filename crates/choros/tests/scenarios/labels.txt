@@ -1,0 +1,32 @@
+# Labels are opaque text a land puts on each set it makes, for other tools
+# to read back from `choros status`. A repeat is kept once, in the order
+# first given. A repo that lands straight to main makes no set, so its
+# labels aren't kept, and the land says so.
+
+$ choros work ws app
+...
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue --label tasks/xJ77 --label "b, c" --label tasks/xJ77
+...
+$ choros status
+appq (app) @ $ROOT/trunk
+  front    appq/landing-1 (app)  https://github.test/pull/1  [tasks/xJ77, b, c]
+$ choros status --json | grep -A3 '"labels"'
+          "labels": [
+            "tasks/xJ77",
+            "b, c"
+          ],
+$ cd trunk
+$ choros work solo app
+...
+$ cd trunk/solo/app
+$ echo s > s.txt && git add s.txt && git commit -qm "write s"
+$ choros land continue --label tasks/xJ77
+app → merged to main
+    warning: app lands straight to main, so its labels aren't kept (labels go on landing-sets)
+$ choros land continue --label ""
+choros: --label needs text
+[exit 1]

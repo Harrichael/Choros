@@ -297,6 +297,8 @@ pub struct LandingSet {
     pub title: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     #[serde(default)]
     pub sessions: Vec<SessionFork>,
     /// Forks this one was found to conflict with in the merge head and was

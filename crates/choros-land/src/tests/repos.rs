@@ -24,6 +24,7 @@ fn landing_two_repos_makes_a_set_in_each() {
         on_conflict: None,
         title: None,
         body: None,
+        labels: Vec::new(),
         sessions: vec![],
         env_session: None,
     };
@@ -67,6 +68,7 @@ fn a_dependency_across_repos_orders_the_prs() {
         on_conflict: None,
         title: None,
         body: None,
+        labels: Vec::new(),
         sessions: vec![],
         env_session: None,
     };

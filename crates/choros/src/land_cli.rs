@@ -73,7 +73,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…"),
+        _ => usage("choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
     };
     let mut fork = false;
     let mut pick = false;
@@ -81,6 +81,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mut on_conflict = None;
     let mut title = None;
     let mut body = None;
+    let mut labels: Vec<String> = Vec::new();
     let mut sessions = Vec::new();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -105,6 +106,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
                 let path = it.next().ok_or_else(|| eyre!("--body-file needs a path"))?;
                 body = Some(std::fs::read_to_string(path)?);
             }
+            "--label" => match it.next() {
+                Some(l) if l.is_empty() => return Err(eyre!("--label needs text")),
+                Some(l) if labels.contains(&l) => {}
+                Some(l) => labels.push(l),
+                None => return Err(eyre!("--label needs text")),
+            },
             "--session" => sessions.push(it.next().ok_or_else(|| eyre!("--session needs an id"))?),
             other => return Err(eyre!("unknown option {other}")),
         }
@@ -134,6 +141,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         on_conflict,
         title,
         body,
+        labels,
         sessions,
         env_session: std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
     };
@@ -305,6 +313,9 @@ fn print_queue_status(q: &status::QueueStatus) {
         }
         if let Some(pr) = &s.pr {
             line.push_str(&format!("  {}", pr.url));
+        }
+        if !s.labels.is_empty() {
+            line.push_str(&format!("  [{}]", s.labels.join(", ")));
         }
         if let Some(p) = &s.park {
             line.push_str(&format!("  ! parked ({:?}) {}", p.op, p.files.join(", ")));

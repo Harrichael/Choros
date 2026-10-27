@@ -10,7 +10,7 @@ $ choros nope
 choros: no command `nope`; `choros --help` lists them
 [exit 2]
 $ choros land
-usage: choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--session ID]…
+usage: choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…
 [exit 2]
 $ choros init now
 choros: `choros init` takes no arguments, got: now

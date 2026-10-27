@@ -40,6 +40,9 @@ its own set. A repo lands into its queue, or straight to main without one.
 `continue` keeps the workspace; `archive` archives it after.
 
     --title T, --body-file F    the PR's title and body
+    --label L                   a label kept on each set made, for other
+                                tools to read (repeatable); a repo that
+                                lands straight to main keeps none
     --fork --deps SET,…|none    land beside the queue, on only these sets
                                 (3, landing-3, otherq/3); none: on main alone
     --fork --deps auto          land on only what the commits need (below)
