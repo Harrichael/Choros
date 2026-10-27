@@ -175,7 +175,10 @@ deps = "auto"
 
 1. Start on main plus the workspace's own earlier sets.
 2. Replay the commits there. A conflict adds the queued sets that changed the
-   conflicting files, and the replay runs again.
+   conflicting files, and the replay runs again. So does a replay that goes
+   through but changes less than the commits did: removing lines a skipped
+   set added is "already done" without it, and that part would be lost. The
+   skipped sets that changed those files are added.
 3. Test-merge the result against every other leaf; a set it conflicts with
    becomes a dependency too, and the replay runs again.
 4. Run the repo's `check` in the sync clone on the result. Not conflicting

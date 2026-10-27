@@ -626,17 +626,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         let tip = match work.replay(repo, &base, &own, &what)? {
             Ok(tip) => tip,
             Err(files) => {
-                let mut owners = Vec::new();
-                for m in live.iter().filter(|m| !mine.contains(m)) {
-                    if !touched.contains_key(m) {
-                        let set = &work.st.sets[m];
-                        let changed = sync.run(&["diff", "--name-only", &set.base_sha, &set.tip])?;
-                        touched.insert(*m, changed.lines().map(str::to_string).collect());
-                    }
-                    if files.iter().any(|f| touched[m].contains(f)) {
-                        owners.push(*m);
-                    }
-                }
+                let owners = owners(&work.st, &sync, &live, &mine, &mut touched, &files)?;
                 if owners.is_empty() {
                     return Ok(Auto::Fallback(format!(
                         "its commits conflict with main itself in {}",
@@ -649,6 +639,17 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
                 continue;
             }
         };
+        // A replay can go through clean and still lose changes: deleting or
+        // re-deleting lines a skipped set added is "already done" without
+        // that set, so the hunk vanishes. Such commits need the set.
+        let lost = lost_changes(&sync, (&through, &head), (&base, &tip))?;
+        let owners = owners(&work.st, &sync, &live, &mine, &mut touched, &lost)?;
+        if !owners.is_empty() {
+            for m in owners {
+                why.insert(m, format!("its commits change what it wrote ({})", lost.join(", ")));
+            }
+            continue;
+        }
         let mut clashed = false;
         for leaf in graph::leaves(&work.st, &live) {
             if mine.contains(&leaf) {
@@ -687,6 +688,68 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
         }
         return Ok(Auto::Landed(n, notes));
     }
+}
+
+/// The live sets outside `mine` that change any of `files`.
+fn owners(
+    st: &crate::state::QueueState,
+    sync: &Git,
+    live: &[u32],
+    mine: &BTreeSet<u32>,
+    touched: &mut BTreeMap<u32, BTreeSet<String>>,
+    files: &[String],
+) -> Result<Vec<u32>> {
+    let mut owners = Vec::new();
+    for m in live.iter().filter(|m| !mine.contains(m)) {
+        if !touched.contains_key(m) {
+            let set = &st.sets[m];
+            let changed = sync.run(&["diff", "--name-only", &set.base_sha, &set.tip])?;
+            touched.insert(*m, changed.lines().map(str::to_string).collect());
+        }
+        if files.iter().any(|f| touched[m].contains(f)) {
+            owners.push(*m);
+        }
+    }
+    Ok(owners)
+}
+
+/// Files whose added and removed lines differ between the commits as written
+/// and as replayed.
+fn lost_changes(git: &Git, written: (&str, &str), replayed: (&str, &str)) -> Result<Vec<String>> {
+    let a = changed_lines(git, written)?;
+    let b = changed_lines(git, replayed)?;
+    let files: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    Ok(files
+        .into_iter()
+        .filter(|f| a.get(*f) != b.get(*f))
+        .cloned()
+        .collect())
+}
+
+/// Each file's `+`/`-` lines from `from` to `to`, sorted, so that where a
+/// hunk lands doesn't matter, only what it changes.
+fn changed_lines(git: &Git, (from, to): (&str, &str)) -> Result<BTreeMap<String, Vec<String>>> {
+    let diff = git.run(&["diff", "--no-color", "--no-renames", "--no-ext-diff", "-U0", from, to])?;
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut file = None;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if let Some(name) = line.strip_prefix("diff --git a/") {
+            file = name.split(" b/").next().map(str::to_string);
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk
+            && (line.starts_with('+') || line.starts_with('-'))
+            && let Some(f) = &file
+        {
+            out.entry(f.clone()).or_default().push(line.to_string());
+        }
+    }
+    for lines in out.values_mut() {
+        lines.sort();
+    }
+    Ok(out)
 }
 
 /// Run `check` in the sync clone at `tip`: `Err` with the end of its output

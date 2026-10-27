@@ -58,6 +58,38 @@ fn work_on_what_a_set_wrote_lands_behind_it() {
     );
 }
 
+/// Work that takes back what a queued set added replays clean without it,
+/// the deletion "already done", and would quietly lose that part. It lands
+/// behind the set instead, whole.
+#[test]
+fn work_that_undoes_a_set_lands_behind_it() {
+    let w = World::new();
+    w.repos_toml("[app]\ncheck = \"true\"\n");
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "a.txt", "a\n");
+    w.land(&one).unwrap();
+    let three = w.workspace("three");
+    w.commit(&three, "c.txt", "c\n");
+    w.land(&three).unwrap();
+    w.sync(&two);
+    git(&two.join(REPO), &["rm", "--quiet", "a.txt"]);
+    w.commit(&two, "b.txt", "instead of a.txt\n");
+
+    let out = w.land_auto(&two).unwrap();
+
+    let st = w.state();
+    assert_eq!(st.sets[&3].deps, [Dep::Set(1)]);
+    assert_eq!(w.file_at(&st.sets[&3].tip, "a.txt"), None, "removed, as written");
+    assert_eq!(
+        out.landed[0].notes,
+        [
+            "on appq/landing-1: its commits change what it wrote (a.txt)".to_string(),
+            "ahead of appq/landing-2; `true` passed without them".to_string(),
+        ]
+    );
+}
+
 /// No conflict doesn't mean no need: these commits use a file a queued set
 /// adds without touching it. The check catches it, and the land goes on top
 /// of everything queued instead.
