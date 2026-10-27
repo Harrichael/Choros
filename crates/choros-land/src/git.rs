@@ -167,10 +167,15 @@ impl Git {
     }
 
     pub fn cherry_pick(&self, sha: &str) -> Result<Step> {
-        // --keep-redundant-commits: a commit that became empty on its new
-        // base still belongs to the set's history; dropping it would make
-        // the set's own-commit list lie about what was landed.
+        // Kept even when empty so the pick never stops on one; the caller
+        // decides what an empty result means.
         self.step(&["cherry-pick", "--allow-empty", "--keep-redundant-commits", sha])
+    }
+
+    /// Whether `rev` changes nothing: its tree is its parent's.
+    pub fn is_empty_commit(&self, rev: &str) -> Result<bool> {
+        let tree = |r: String| self.run(&["rev-parse", &format!("{r}^{{tree}}")]);
+        Ok(tree(rev.to_string())? == tree(format!("{rev}^"))?)
     }
 
     pub fn merge(&self, rev: &str, message: &str) -> Result<Step> {

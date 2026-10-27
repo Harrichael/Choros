@@ -389,6 +389,85 @@ fn instant_mode_lands_on_main() {
     assert!(w.land(&ws).is_err(), "nothing left to land");
 }
 
+/// With no queue and a PR as the route, a PR that can't merge yet is
+/// remembered: landing again retries it rather than opening another with the
+/// same commits, and once it merges only the newer work lands. One closed
+/// without merging leaves its commits to land again.
+#[test]
+fn an_instant_pr_that_cannot_merge_yet_is_finished_later() {
+    let w = World::new();
+    choros_core::choros::create(&w.trunk, "ws", &[REPO.to_string()], &()).unwrap();
+    let ws = w.trunk.join("ws");
+    let mut wl = crate::workspace::read(&ws).unwrap();
+    wl.instant = Some(crate::instant::Via::Pr);
+    crate::workspace::write(&ws, &wl).unwrap();
+    let on_main = |file: &str| {
+        let main = w.origin_main();
+        Command::new("git")
+            .arg("-C")
+            .arg(&w.origin)
+            .args(["cat-file", "-e", &format!("{main}:{file}")])
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    *w.forge.refuse_merges.lock().unwrap() = true;
+    w.commit(&ws, "a.txt", "a\n");
+    let err = w.land(&ws).unwrap_err().to_string();
+    assert!(err.contains("PR #1") && err.contains("approving review"), "{err}");
+    w.commit(&ws, "b.txt", "b\n");
+    assert!(w.land(&ws).is_err());
+    assert_eq!(w.forge.pr_count(), 1, "no second PR for a.txt");
+
+    *w.forge.refuse_merges.lock().unwrap() = false;
+    w.land(&ws).unwrap();
+    assert!(on_main("a.txt") && on_main("b.txt"));
+    assert_eq!(w.forge.pr_count(), 2, "#1 for a.txt, then #2 for b.txt alone");
+    assert!(w.land(&ws).is_err(), "nothing left to land");
+
+    *w.forge.refuse_merges.lock().unwrap() = true;
+    w.commit(&ws, "c.txt", "c\n");
+    assert!(w.land(&ws).is_err());
+    w.forge.close(3);
+    *w.forge.refuse_merges.lock().unwrap() = false;
+    w.land(&ws).unwrap();
+    assert!(on_main("c.txt"));
+    assert_eq!(w.forge.pr_count(), 4);
+}
+
+/// A set's commits whose change reached main some other way are dropped
+/// when it is re-synced, so its PR lists only what it still changes; a set
+/// left with nothing is merged without a PR at all.
+#[test]
+fn work_already_on_main_drops_out_of_its_set() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.commit(&ws, "c.txt", "c\n");
+    w.land(&ws).unwrap();
+    w.commit(&ws, "d.txt", "d\n");
+    w.land(&ws).unwrap();
+    w.pass();
+
+    w.push_to_main("b.txt", "b\n");
+    w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
+    w.pass();
+    assert_eq!(w.own_commits(2), 1, "b.txt is already on main");
+    let pr = w.state().sets[&2].pr.as_ref().unwrap().number;
+    assert_eq!(w.forge.pr_text(pr).0, "write c.txt");
+
+    w.push_to_main("d.txt", "d\n");
+    w.forge.merge(pr, MergeMethod::Squash);
+    let report = w.pass();
+    let set = &w.state().sets[&3];
+    assert_eq!(set.status, SetStatus::Merged);
+    assert!(set.pr.is_none());
+    assert_eq!(report.already_on_main, [3]);
+}
+
 /// Parked sets show up as `!resolve` until resolved.
 #[test]
 fn the_prompt_flags_a_parked_queue() {

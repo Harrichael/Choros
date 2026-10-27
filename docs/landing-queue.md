@@ -180,7 +180,11 @@ first commit subject (GitHub requires one).
 **Instant mode.** Fetch, rebase `landed_through..HEAD` onto `origin/main` in
 the workspace (conflicts stop the land as in a normal land), then push to main
 or open a PR and merge it with the first method the repo allows. No landing
-folder.
+folder. The land isn't done until the PR merges: one that can't merge yet (a
+review due, checks running) is recorded in the workspace, and the next land
+finishes it first, retrying it while open, counting it once merged, and
+forgetting it if closed, which leaves its commits to land again. A second PR
+with the same commits is never opened.
 
 ## Diffbase
 
@@ -261,13 +265,18 @@ the next pass.
    If the desired base differs from the recorded one, replay the set's own
    commits (`recorded base..tip`, no merges) onto it by cherry-pick, and push
    with `--force-with-lease=<ref>:<recorded tip>`. Squash merges need nothing
-   special: the set's own commits are known exactly.
+   special: the set's own commits are known exactly. A commit that comes out
+   empty on the new base is dropped: its change already reached main some
+   other way, and its PR would otherwise list it, and GitHub's squash message
+   carry its text, for a change the diff doesn't have.
 4. **Public sets** are never rebased. They are left alone unless they conflict
    with main or the repo requires branches to be up to date; then `origin/main`
    is *merged into* them (a new commit; review comments stay put).
 5. Rebuild the merge head.
 6. Open draft PRs for sets that just reached the front (all deps merged,
-   cross-queue deps included).
+   cross-queue deps included). A set left with no commits of its own has
+   nothing to review: it is marked merged without a PR, and goes the way of
+   any merged set.
 7. **Landing folders** of private sets that were re-synced are `reset --hard`
    to the new tip when clean; when dirty, status warns. Merged sets' landing
    folders move to `archive/landing/<queue>/landing-N` (from `continue` and

@@ -75,6 +75,8 @@ pub struct PassReport {
     pub resynced: Vec<u32>,
     pub updated_public: Vec<u32>,
     pub opened: Vec<u32>,
+    /// Merged without a PR: every change in them was already on main.
+    pub already_on_main: Vec<u32>,
     pub parked: Vec<u32>,
     /// Pushes origin refused; the old tip was kept and the next pass retries.
     pub push_failed: Vec<u32>,
@@ -289,7 +291,9 @@ impl<'q, 'h> Work<'q, 'h> {
         Ok(Ok(git.head()?))
     }
 
-    /// Cherry-pick `commits` onto `base`, one at a time.
+    /// Cherry-pick `commits` onto `base`, one at a time, dropping any that
+    /// change nothing there: their change already reached the base, and a
+    /// PR listing them would carry their messages for nothing.
     pub fn replay(
         &mut self,
         repo: &str,
@@ -303,6 +307,9 @@ impl<'q, 'h> Work<'q, 'h> {
             let step = git.cherry_pick(c)?;
             if let Some(files) = self.settle(repo, step, &format!("replaying {what}"))? {
                 return Ok(Err(files));
+            }
+            if git.is_empty_commit("HEAD")? {
+                git.reset_hard("HEAD^")?;
             }
         }
         Ok(Ok(git.head()?))
@@ -781,6 +788,16 @@ impl<'q, 'h> Work<'q, 'h> {
                 || !base.deps.is_empty()
                 || !base.main.as_deref().is_some_and(|m| git.is_ancestor(m, &main).unwrap_or(false))
             {
+                continue;
+            }
+            // Everything it had reached main some other way: nothing is left
+            // to review, so it is done as if its PR had merged.
+            if set.tip == set.base_sha {
+                let set = self.st.sets.get_mut(&n).unwrap();
+                set.status = SetStatus::Merged;
+                set.merged_into = Some(main);
+                report.merged.push(n);
+                report.already_on_main.push(n);
                 continue;
             }
             match self.open_pr(n, forge) {

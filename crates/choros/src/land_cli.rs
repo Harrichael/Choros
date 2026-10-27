@@ -636,6 +636,7 @@ fn print_report(name: &str, r: &PassReport) {
         ("re-synced", &r.resynced),
         ("took main in", &r.updated_public),
         ("opened PRs for", &r.opened),
+        ("found everything already on main, so no PR, for", &r.already_on_main),
         ("parked", &r.parked),
     ] {
         if !v.is_empty() {

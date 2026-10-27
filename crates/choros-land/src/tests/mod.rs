@@ -71,6 +71,8 @@ struct FakePr {
 pub struct FakeForge {
     prs: Mutex<BTreeMap<u64, FakePr>>,
     pub require_up_to_date: Mutex<bool>,
+    /// Refuse to merge, as branch protection does while a review is due.
+    pub refuse_merges: Mutex<bool>,
 }
 
 impl FakeForge {
@@ -118,6 +120,10 @@ impl FakeForge {
 
     pub fn close(&self, number: u64) {
         self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Closed);
+    }
+
+    pub fn pr_count(&self) -> usize {
+        self.prs.lock().unwrap().len()
     }
 }
 
@@ -191,6 +197,9 @@ impl Forge for FakeForge {
     }
 
     fn merge_pr(&self, _repo: &Path, number: u64, method: MergeMethod) -> Result<()> {
+        if *self.refuse_merges.lock().unwrap() {
+            return Err(eyre!("at least 1 approving review is required"));
+        }
         self.merge(number, method);
         Ok(())
     }
@@ -286,6 +295,7 @@ impl World {
             forge: FakeForge {
                 prs: Mutex::new(BTreeMap::new()),
                 require_up_to_date: Mutex::new(false),
+                refuse_merges: Mutex::new(false),
             },
             agent: FakeAgent::default(),
             trunk,

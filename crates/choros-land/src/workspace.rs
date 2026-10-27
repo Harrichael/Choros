@@ -58,6 +58,18 @@ pub struct RepoLanding {
     /// sessions active since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_landed: Option<u64>,
+    /// A PR an instant land opened that hasn't merged: the land isn't done
+    /// until it does, and the next land picks it up rather than opening
+    /// another PR with the same commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instant_pr: Option<InstantPr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstantPr {
+    pub number: u64,
+    /// The commit it lands through, as rebased in the workspace.
+    pub head: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

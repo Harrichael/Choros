@@ -12,12 +12,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::engine::{Handler, Env, OnConflict, Work};
-use crate::forge::PrRequest;
+use crate::forge::{PrRequest, PrState};
 use crate::git::Git;
 use crate::graph;
 use crate::queue::Queue;
 use crate::state::{BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
-use crate::workspace::{self, LandingOf, RepoLanding};
+use crate::workspace::{self, InstantPr, LandingOf, RepoLanding};
 
 pub struct LandRequest {
     /// Where `land` was run: a repo (land that repo) or the workspace root
@@ -618,9 +618,32 @@ pub fn bind(env: &Env, ws: &Path, repo: &str, queue: Option<&str>) -> Result<()>
 }
 
 /// No queue: rebase onto main and put it there, by push or by a PR merged on
-/// the spot.
+/// the spot. A PR that couldn't merge then (a review it needs, checks still
+/// running) is remembered, and finished here first: retried while open,
+/// counted once merged, forgotten if closed, which leaves its commits to
+/// land again.
 fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed> {
     let git = Git::new(&ws.join(repo));
+    let landed = Landed {
+        repo: repo.to_string(),
+        queue: None,
+        n: None,
+        landing: None,
+        forked_sessions: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let earlier = workspace::read(ws)?.repo.get(repo).and_then(|r| r.instant_pr.clone());
+    if let Some(pr) = earlier {
+        match env.forge.pr_state(git.dir(), pr.number)? {
+            PrState::Open => merge_instant_pr(env, &git, ws, repo, &pr)?,
+            PrState::Merged => finish_instant_pr(ws, repo, &pr)?,
+            PrState::Closed => update_repo(ws, repo, |rl| rl.instant_pr = None)?,
+        }
+        if !has_unlanded(ws, repo)? {
+            return Ok(landed);
+        }
+    }
+
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
     git.fetch("origin", &[])?;
@@ -654,25 +677,45 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str) -> Result<Landed
                     draft: false,
                 },
             )?;
-            let settings = env.forge.settings(git.dir(), &main)?;
-            let method = *settings
-                .methods
-                .first()
-                .ok_or_else(|| eyre!("the repo allows no merge method"))?;
-            env.forge.merge_pr(git.dir(), pr.number, method)?;
+            let pr = InstantPr {
+                number: pr.number,
+                head: head.clone(),
+            };
+            // `pending` stays: if the PR closes unmerged, the work is unlanded
+            // again from the main it was rebased onto.
+            update_repo(ws, repo, |rl| rl.instant_pr = Some(pr.clone()))?;
+            return merge_instant_pr(env, &git, ws, repo, &pr).map(|()| landed);
         }
     }
     update_repo(ws, repo, |rl| {
         rl.landed_through = Some(head.clone());
         rl.pending = None;
     })?;
-    Ok(Landed {
-        repo: repo.to_string(),
-        queue: None,
-        n: None,
-        landing: None,
-        forked_sessions: Vec::new(),
-        warnings: Vec::new(),
+    Ok(landed)
+}
+
+fn merge_instant_pr(env: &Env, git: &Git, ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
+    let main = main_branch(git)?;
+    let settings = env.forge.settings(git.dir(), &main)?;
+    let method = *settings
+        .methods
+        .first()
+        .ok_or_else(|| eyre!("the repo allows no merge method"))?;
+    env.forge.merge_pr(git.dir(), pr.number, method).map_err(|e| {
+        eyre!(
+            "PR #{} for {repo} is open but couldn't be merged: {e}
+             land again once it can merge; it won't be opened a second time",
+            pr.number
+        )
+    })?;
+    finish_instant_pr(ws, repo, pr)
+}
+
+fn finish_instant_pr(ws: &Path, repo: &str, pr: &InstantPr) -> Result<()> {
+    update_repo(ws, repo, |rl| {
+        rl.landed_through = Some(pr.head.clone());
+        rl.instant_pr = None;
+        rl.pending = None;
     })
 }
 
