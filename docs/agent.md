@@ -21,7 +21,11 @@ the commits since the last land. Keep working and land again as you go.
     --on-conflict depend|merge-head
                                 when a fork clashes with a set it left out:
                                 land behind it, or resolve beside it
-    --title T, --body-file F    the PR's title and body
+    --title T, --body-file F    the PR's title and body. The body tells the
+                                reviewer what changed and why, in the repo's
+                                PR template; leave out landing-sets and
+                                dependencies. Landing without one shows the
+                                template to fill
     --label L                   text kept on the set for other tools
                                 (repeatable); choros never reads it
     --session ID                the session to fork into the landing folder;

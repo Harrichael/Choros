@@ -39,6 +39,7 @@ db="$FAKE_GH"; mkdir -p "$db"
 case "$1 $2" in
   "api repos/{owner}/{repo}") echo '{"allow_merge_commit":true,"allow_squash_merge":true}' ;;
   api*) echo 'Not Found' >&2; exit 1 ;;
+  "repo view") echo '{"pullRequestTemplates":[]}' ;;
   "pr create")
     shift 2
     while [ $# -gt 0 ]; do case "$1" in --head) head="$2"; shift 2 ;; --draft) shift ;; *) shift 2 ;; esac; done

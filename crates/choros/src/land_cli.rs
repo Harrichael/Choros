@@ -798,11 +798,11 @@ impl ConflictHandler for Interactive {
                     .status();
                 match ask("push this resolution? [y] push / [i] intervene / [s] skip > ")?.as_str() {
                     "y" | "" => Ok(Handled::Resolved { used_session: true }),
-                    "i" => drive(c).map(|_| Handled::Resolved { used_session: true }),
+                    "i" => drive(&brief()).map(|_| Handled::Resolved { used_session: true }),
                     _ => Ok(Handled::Declined),
                 }
             }
-            'c' => drive(c).map(|_| Handled::Resolved { used_session: true }),
+            'c' => drive(&brief()).map(|_| Handled::Resolved { used_session: true }),
             _ => Ok(Handled::Declined),
         }
     }
@@ -820,19 +820,15 @@ impl ConflictHandler for Interactive {
 
 /// Open Claude Code on the resync agent's session in the sync clone, with the
 /// conflict in progress, and let the user drive.
-fn drive(c: &Conflict) -> Result<()> {
+fn drive(brief: &ConflictBrief) -> Result<()> {
     let mut cmd = Command::new("claude");
-    cmd.current_dir(c.dir);
-    if c.slot.fresh {
-        cmd.args(["--session-id", &c.slot.id]);
+    cmd.current_dir(brief.dir);
+    if brief.session.fresh {
+        cmd.args(["--session-id", &brief.session.id]);
     } else {
-        cmd.args(["--resume", &c.slot.id]);
+        cmd.args(["--resume", &brief.session.id]);
     }
-    cmd.arg(format!(
-        "A conflict is in progress here while {}. Help me resolve it; stage the result \
-         but do not commit, continue or push — Choros finishes the operation.",
-        c.operation
-    ));
+    cmd.arg(choros_land::agent::driven_conflict_prompt(brief));
     cmd.status()?;
     Ok(())
 }

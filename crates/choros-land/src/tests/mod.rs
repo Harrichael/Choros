@@ -75,6 +75,7 @@ pub struct FakeForge {
     pub require_up_to_date: Mutex<bool>,
     /// Refuse to merge, as branch protection does while a review is due.
     pub refuse_merges: Mutex<bool>,
+    pub template: Mutex<Option<String>>,
 }
 
 impl FakeForge {
@@ -205,6 +206,10 @@ impl Forge for FakeForge {
         self.merge(number, method);
         Ok(())
     }
+
+    fn pr_template(&self, _repo: &Path) -> Result<Option<String>> {
+        Ok(self.template.lock().unwrap().clone())
+    }
 }
 
 /// Claude Code, minus Claude: forks are recorded, never run.
@@ -298,6 +303,7 @@ impl World {
                 prs: Mutex::new(BTreeMap::new()),
                 require_up_to_date: Mutex::new(false),
                 refuse_merges: Mutex::new(false),
+                template: Mutex::new(None),
             },
             agent: FakeAgent::default(),
             trunk,

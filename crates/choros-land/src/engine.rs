@@ -305,7 +305,7 @@ impl<'q, 'h> Work<'q, 'h> {
         git.checkout_detached(base)?;
         for c in commits {
             let step = git.cherry_pick(c)?;
-            if let Some(files) = self.settle(repo, step, &format!("replaying {what}"))? {
+            if let Some(files) = self.settle(repo, step, &format!("replaying {what} onto its new base"))? {
                 return Ok(Err(files));
             }
             if git.is_empty_commit("HEAD")? {
@@ -668,13 +668,18 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(());
         }
         let main = self.main_branch(set.repo())?;
+        let body = match &set.body {
+            Some(b) => b.clone(),
+            // A nicety: if GitHub can't say, the PR still opens.
+            None => forge.pr_template(git.dir()).ok().flatten().unwrap_or_default(),
+        };
         let pr = forge.create_pr(
             git.dir(),
             &PrRequest {
                 head: &branch,
                 base: &main,
                 title: &title,
-                body: set.body.as_deref().unwrap_or(""),
+                body: &body,
                 draft: self.q.config.pr.draft,
             },
         )?;

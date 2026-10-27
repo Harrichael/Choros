@@ -437,6 +437,34 @@ fn an_instant_pr_that_cannot_merge_yet_is_finished_later() {
     assert_eq!(w.forge.pr_count(), 4);
 }
 
+/// An agent that lands without a PR body is shown the repo's template and
+/// what a body is for, and nothing lands; given one, its PR carries it. A
+/// person landing without a body gets the template as the PR's body.
+#[test]
+fn a_pr_body_follows_the_repos_template() {
+    let w = World::new();
+    *w.forge.template.lock().unwrap() = Some("## Purpose\n\n## Test Plan\n".into());
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+
+    let mut req = w.request(&ws, None, None);
+    req.env_session = Some("agent-session".into());
+    let err = w.land_req(&req, None).unwrap_err().to_string();
+    assert!(err.contains("what changed and why") && err.contains("## Purpose"), "{err}");
+    assert!(w.state().sets.is_empty(), "nothing landed");
+
+    req.body = Some("## Purpose\n\nwrite a\n".into());
+    w.land_req(&req, None).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land(&ws).unwrap();
+    w.pass();
+    let pr = |n: u32| w.state().sets[&n].pr.as_ref().unwrap().number;
+    assert_eq!(w.forge.pr_text(pr(1)).1, "## Purpose\n\nwrite a\n");
+    w.forge.merge(pr(1), MergeMethod::Merge);
+    w.pass();
+    assert_eq!(w.forge.pr_text(pr(2)).1, "## Purpose\n\n## Test Plan\n");
+}
+
 /// An instant PR that merges on GitHub after its land is logged by the
 /// daemon, with the land's labels, though no one lands from that workspace
 /// again, even once it is archived, and though another PR can't be checked

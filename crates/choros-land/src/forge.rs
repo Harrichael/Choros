@@ -46,6 +46,8 @@ pub trait Forge {
     fn find_open_pr(&self, repo: &Path, head: &str) -> Result<Option<PrRef>>;
     fn pr_state(&self, repo: &Path, number: u64) -> Result<PrState>;
     fn merge_pr(&self, repo: &Path, number: u64, method: MergeMethod) -> Result<()>;
+    /// The repo's PR template, the org's default included.
+    fn pr_template(&self, repo: &Path) -> Result<Option<String>>;
 }
 
 pub struct Gh {
@@ -73,6 +75,15 @@ impl Gh {
 }
 
 impl Forge for Gh {
+    fn pr_template(&self, repo: &Path) -> Result<Option<String>> {
+        let v: Value = serde_json::from_str(&self.run(repo, &["repo", "view", "--json", "pullRequestTemplates"])?)?;
+        Ok(v["pullRequestTemplates"]
+            .as_array()
+            .and_then(|t| t.first())
+            .and_then(|t| t["body"].as_str())
+            .map(str::to_string))
+    }
+
     fn settings(&self, repo: &Path, branch: &str) -> Result<RepoSettings> {
         let v: Value = serde_json::from_str(&self.run(repo, &["api", "repos/{owner}/{repo}"])?)?;
         let allowed = |k: &str| v[k].as_bool().unwrap_or(false);

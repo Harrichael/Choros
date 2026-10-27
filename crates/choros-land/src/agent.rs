@@ -84,8 +84,7 @@ impl Agent for Claude {
 }
 
 pub fn conflict_prompt(brief: &ConflictBrief) -> String {
-    let mut p = String::new();
-    p.push_str(&format!(
+    let mut p = format!(
         "You are the resync agent for a Choros landing queue, working in {}.\n\
          A conflict is in progress while {}.\n\
          Conflicted files: {}.\n\n\
@@ -97,12 +96,35 @@ pub fn conflict_prompt(brief: &ConflictBrief) -> String {
          not part of the repo); add to it anything the next session should know.\n",
         brief.dir.display(),
         brief.operation,
-        if brief.files.is_empty() {
-            "(none reported; check `git status`)".to_string()
-        } else {
-            brief.files.join(", ")
-        },
-    ));
+        files(brief),
+    );
+    push_context(&mut p, brief);
+    p
+}
+
+/// For someone resolving by hand in the resync agent's session.
+pub fn driven_conflict_prompt(brief: &ConflictBrief) -> String {
+    let mut p = format!(
+        "A conflict is in progress here while {}.\n\
+         Conflicted files: {}.\n\n\
+         Help me resolve it so both sides' intent survives, then `git add` each file. \
+         Do not commit, continue, abort, reset or push: Choros finishes the operation.\n",
+        brief.operation,
+        files(brief),
+    );
+    push_context(&mut p, brief);
+    p
+}
+
+fn files(brief: &ConflictBrief) -> String {
+    if brief.files.is_empty() {
+        "(none reported; check `git status`)".to_string()
+    } else {
+        brief.files.join(", ")
+    }
+}
+
+fn push_context(p: &mut String, brief: &ConflictBrief) {
     if !brief.recorded.is_empty() {
         p.push_str("\nThese files conflicted before; this is how that was resolved:\n\n");
         for r in brief.recorded {
@@ -110,5 +132,12 @@ pub fn conflict_prompt(brief: &ConflictBrief) -> String {
             p.push_str("\n\n");
         }
     }
-    p
+    p.push_str(
+        "\nThe goal: get the front of the queue up as (draft) PRs. Once this resolves, \
+         Choros pushes the set and opens or updates its PR.\n\n\
+         Glossary:\n\
+         - queue: where landed work waits to merge, each set on top of the sets it builds on.\n\
+         - landing-set (landing-N): one land's commits from one repo; it becomes one PR.\n\
+         - front: the sets whose dependencies have all merged; they get PRs.\n",
+    );
 }

@@ -107,6 +107,10 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         }
     }
 
+    if req.body.is_none() && req.env_session.as_ref().is_some_and(|s| !s.is_empty()) {
+        refuse_without_body(env, &trunk, &ws, &scope)?;
+    }
+
     let mut landed = Vec::new();
     for repo in &scope {
         if !has_unlanded(&ws, repo)? {
@@ -162,6 +166,48 @@ fn refuse_landing_folder(ws: &Path) -> Result<()> {
 }
 
 /// The repo `cwd` is inside, if any.
+/// An agent that lands without a PR body has most likely not thought about
+/// one, so it is told what one is for, with the template to fill, before
+/// anything lands. A person landing without one gets the template as is.
+/// "Agent" is a guess from running inside a Claude Code session, which also
+/// catches a person's `!` command there; the message says what to do.
+fn refuse_without_body(env: &Env, trunk: &Path, ws: &Path, scope: &[String]) -> Result<()> {
+    let mut templates = Vec::new();
+    for repo in scope {
+        if has_unlanded(ws, repo)? && opens_pr(trunk, ws, repo)? {
+            templates.push((repo, env.forge.pr_template(&ws.join(repo))));
+        }
+    }
+    if templates.is_empty() {
+        return Ok(());
+    }
+    let mut msg = "nothing landed: a PR body tells the reviewer what changed and why. Fill in the \
+                   template below, save it to a file, and land again with --body-file FILE. Leave \
+                   out landing-sets and dependencies; choros tracks those."
+        .to_string();
+    for (repo, template) in templates {
+        match template {
+            Ok(Some(t)) => msg.push_str(&format!("\n\n--- {repo}'s PR template ---\n{}", t.trim_end())),
+            Ok(None) => msg.push_str(&format!("\n\n{repo} has no PR template; say what changed and why.")),
+            Err(_) => msg.push_str(&format!("\n\ncouldn't fetch {repo}'s PR template; say what changed and why.")),
+        }
+    }
+    Err(eyre!(msg))
+}
+
+/// Whether landing `repo` now would open a PR: always into a queue; straight
+/// to main only by `via = "pr"`, and not when the PR already open covers it.
+fn opens_pr(trunk: &Path, ws: &Path, repo: &str) -> Result<bool> {
+    if workspace::queue_for(trunk, ws, repo)?.is_some() {
+        return Ok(true);
+    }
+    if crate::instant::via(trunk, ws)? != crate::instant::Via::Pr {
+        return Ok(false);
+    }
+    let waiting = workspace::read(ws)?.repo.get(repo).and_then(|r| r.instant_pr.clone());
+    Ok(waiting.is_none_or(|pr| Git::new(&ws.join(repo)).head().is_ok_and(|h| h != pr.head)))
+}
+
 fn repo_of(ws: &Path, cwd: &Path, meta: &ChorosMeta) -> Option<String> {
     let rel = cwd.strip_prefix(ws).ok()?;
     let first = rel.components().next()?.as_os_str().to_str()?;
@@ -1020,14 +1066,21 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str, req: &LandReques
             let ws_name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("choros");
             let branch = format!("{ws_name}/instant-{}", &head[..12]);
             git.run(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")])?;
-            let title = git.subject(&head)?;
+            let title = match &req.title {
+                Some(t) => t.clone(),
+                None => git.subject(&head)?,
+            };
+            let body = match &req.body {
+                Some(b) => b.clone(),
+                None => env.forge.pr_template(git.dir()).ok().flatten().unwrap_or_default(),
+            };
             let pr = env.forge.create_pr(
                 git.dir(),
                 &PrRequest {
                     head: &branch,
                     base: &main,
                     title: &title,
-                    body: "",
+                    body: &body,
                     draft: false,
                 },
             )?;
