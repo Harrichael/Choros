@@ -87,7 +87,8 @@ SPACES (in the trunk or a branch-space; acts where you are)
                                     .choros-config/archive/); NAME defaults to the one you're in
 
 INSIDE A WORKSPACE
-    choros repo ls                  the repos cloned into it
+    choros repo ls [--git]          the repos cloned into it that hold unlanded commits or a
+                                    dropped set given back; --git: those with uncommitted changes
     choros repo add REPO [REPO…]    clone more registry repos in, on its branch
     choros repo sync                rebase unlanded commits onto the queue's current merge head
     choros repo bind REPO QUEUE|none
@@ -210,13 +211,13 @@ fn run_agent_save_settings(args: Vec<String>) -> Result<()> {
 pub fn run_repo(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
-        ["ls"] => {}
+        ["ls"] | ["ls", "--git"] => {}
         ["add", repos @ ..] if !repos.is_empty() => {}
         ["sync"] => return crate::land_cli::run_sync(Vec::new()),
         ["bind", repo, queue] => return crate::land_cli::run_repo_bind_here(repo, queue),
         _ => {
             eprintln!(
-                "usage: choros repo ls | repo add REPO [REPO…] | repo sync | repo bind REPO QUEUE|none"
+                "usage: choros repo ls [--git] | repo add REPO [REPO…] | repo sync | repo bind REPO QUEUE|none"
             );
             std::process::exit(2);
         }
@@ -231,11 +232,56 @@ pub fn run_repo(args: Vec<String>) -> Result<()> {
         }
         return Ok(());
     }
-    let meta = choros::read_meta(&space.join(&name))?;
-    for repo in meta.repos {
-        println!("{repo}");
+    let changes = repo_changes(&space.join(&name), a.len() == 2)?;
+    let width = changes.iter().map(|(repo, _)| repo.len()).max().unwrap_or(0);
+    for (repo, what) in changes {
+        println!("{repo:width$}  {what}");
     }
     Ok(())
+}
+
+/// The repos of workspace `ws` with unlanded commits, or with uncommitted
+/// changes when `uncommitted`, and how many of them. Unlanded work includes
+/// returned sets: a dropped set's commits look landed until the next sync
+/// brings them back. A clone git can't read is listed with why, so one
+/// broken clone doesn't hide the rest.
+fn repo_changes(ws: &std::path::Path, uncommitted: bool) -> Result<Vec<(String, String)>> {
+    let landing = choros_land::workspace::read(ws)?;
+    let mut out = Vec::new();
+    for repo in choros::read_meta(ws)?.repos {
+        let (count, what) = if uncommitted {
+            (git::changed_count(&ws.join(&repo)), "uncommitted")
+        } else {
+            (choros_land::land::unlanded_count(ws, &repo), "unlanded")
+        };
+        let mut parts = match count {
+            Ok(0) => Vec::new(),
+            Ok(n) => vec![format!("{n} {what}")],
+            Err(e) => {
+                let why = e.to_string();
+                let why = why.lines().find(|l| l.starts_with("fatal:")).or(why.lines().next()).unwrap_or("").to_string();
+                vec![format!("couldn't tell ({why})")]
+            }
+        };
+        if !uncommitted {
+            let sets: Vec<String> = landing
+                .repo
+                .get(&repo)
+                .into_iter()
+                .flat_map(|rl| rl.returned.iter().chain(&rl.pending_returned))
+                .map(|r| choros_land::state::branch(&r.queue, r.n))
+                .collect();
+            match sets.len() {
+                0 => {}
+                1 => parts.push(format!("1 returned set ({})", sets[0])),
+                n => parts.push(format!("{n} returned sets ({})", sets.join(", "))),
+            }
+        }
+        if !parts.is_empty() {
+            out.push((repo, parts.join(", ")));
+        }
+    }
+    Ok(out)
 }
 
 pub fn run_add(args: Vec<String>) -> Result<()> {
@@ -525,5 +571,56 @@ mod tests {
         for bad in [&[][..], &["PROJ-1"], &["-i", "PROJ-1", "api"], &["PROJ-1", "--nope", "api"]] {
             assert_eq!(parse(bad), None, "{bad:?}");
         }
+    }
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git").current_dir(dir).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    }
+
+    /// `choros repo ls` names only the clones holding work: by default those
+    /// with commits not yet landed or a dropped set given back, with --git
+    /// those with uncommitted edits.
+    #[test]
+    fn repo_ls_shows_clones_with_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        sh(&origin, &["init", "--quiet", "--initial-branch=main"]);
+        sh(&origin, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", "init"]);
+        let ws = tmp.path().join("ws");
+        let repos = ["api", "web", "docs"];
+        for repo in repos {
+            sh(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), &format!("ws/{repo}")]);
+        }
+        choros::write_meta(
+            &ws,
+            &choros::ChorosMeta {
+                name: "ws".into(),
+                created_at: "2026-01-01T12:00:00Z".into(),
+                repos: repos.map(String::from).to_vec(),
+                branch: None,
+            },
+        )
+        .unwrap();
+        for n in 0..2 {
+            let msg = format!("c{n}");
+            sh(&ws.join("api"), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", &msg]);
+        }
+        std::fs::write(ws.join("web/notes.md"), "wip").unwrap();
+        // A dropped set handed back to docs: its commits read as landed
+        // until the next sync, but the work hasn't reached main.
+        let returned = choros_land::workspace::Returned {
+            queue: "q".into(),
+            n: 7,
+            base: String::new(),
+            tip: String::new(),
+        };
+        choros_land::workspace::give_back(&ws, "docs", returned).unwrap();
+
+        let ls = |git| repo_changes(&ws, git).unwrap();
+        let row = |repo: &str, what: &str| (repo.to_string(), what.to_string());
+        assert_eq!(ls(false), [row("api", "2 unlanded"), row("docs", "1 returned set (q/landing-7)")]);
+        assert_eq!(ls(true), [row("web", "1 uncommitted")]);
     }
 }

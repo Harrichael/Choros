@@ -230,13 +230,18 @@ fn returned(ws: &Path, repo: &str) -> Result<Vec<workspace::Returned>> {
 pub fn unlanded(ws: &Path) -> Result<Vec<(String, usize)>> {
     let mut out = Vec::new();
     for repo in core::read_meta(ws)?.repos {
-        let through = landed_through(ws, &repo)?;
-        let n = Git::new(&ws.join(&repo)).commits(&through, "HEAD")?.len();
+        let n = unlanded_count(ws, &repo)?;
         if n > 0 {
             out.push((repo, n));
         }
     }
     Ok(out)
+}
+
+/// How many commits in `repo` of `ws` haven't been landed.
+pub fn unlanded_count(ws: &Path, repo: &str) -> Result<usize> {
+    let through = landed_through(ws, repo)?;
+    Ok(Git::new(&ws.join(repo)).commits(&through, "HEAD")?.len())
 }
 
 pub(crate) fn landed_through(ws: &Path, repo: &str) -> Result<String> {

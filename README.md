@@ -70,7 +70,9 @@ choros agent save settings      # inside a workspace: TUI to promote claude
                                 # settings entries up to the template
 choros agent ls                 # list resumable claude / cursor sessions for
                                 # the current directory
-choros repo ls                  # inside a workspace: list its cloned repos
+choros repo ls [--git]          # inside a workspace: its clones with unlanded
+                                # commits or returned sets (--git: uncommitted
+                                # changes)
 choros repo add REPO [REPO…]    # inside a workspace: clone registry repos into it
 choros -h                       # every command
 ```
