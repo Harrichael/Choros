@@ -260,6 +260,17 @@ pub fn prompt_token(cwd: &Path) -> String {
     if sync { "⇣sync".into() } else { String::new() }
 }
 
+/// Whether `repo` of workspace `ws` lands into a queue whose merge head has
+/// moved since the workspace last synced onto it.
+pub fn needs_sync(trunk: &Path, ws: &Path, repo: &str) -> Result<bool> {
+    let Some(name) = workspace::queue_for(trunk, ws, repo)? else {
+        return Ok(false);
+    };
+    let st = Queue::open(trunk, &name)?.read_state()?;
+    let synced = workspace::read(ws)?.repo.get(repo).and_then(|rl| rl.composition.clone());
+    Ok(merge_head_key(&st, repo) != synced)
+}
+
 /// What `repo`'s merge head holds, as workspaces record it.
 fn merge_head_key(st: &crate::state::QueueState, repo: &str) -> Option<String> {
     st.repos.get(repo)?.merge_head.as_ref().map(|m| m.composition.key())

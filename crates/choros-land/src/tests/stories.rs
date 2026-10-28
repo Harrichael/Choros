@@ -339,21 +339,25 @@ fn a_workspace_that_merged_main_lands_only_its_own_commits() {
     assert_eq!(w.file_at(&st.sets[&1].tip, "theirs.txt").as_deref(), Some("theirs\n"));
 }
 
-/// The prompt token tells a workspace when the queue moved under it, and
-/// `choros repo sync` clears it.
+/// The prompt token, and `choros repo ls` through `needs_sync`, tell a
+/// workspace when the queue moved under it, and `choros repo sync` clears it.
 #[test]
 fn the_prompt_says_sync_until_the_workspace_is_synced() {
     let w = World::new();
     let one = w.workspace("one");
     let two = w.workspace("two");
+    let needs_sync = || crate::status::needs_sync(&w.trunk, &two, REPO).unwrap();
     assert_eq!(crate::status::prompt_token(&two.join(REPO)), "");
+    assert!(!needs_sync());
 
     w.commit(&one, "a.txt", "a\n");
     w.land(&one).unwrap();
     assert_eq!(crate::status::prompt_token(&two.join(REPO)), "⇣sync");
+    assert!(needs_sync());
 
     crate::land::sync_workspace(&w.env(), &two.join(REPO)).unwrap();
     assert_eq!(crate::status::prompt_token(&two.join(REPO)), "");
+    assert!(!needs_sync());
     assert!(two.join(REPO).join("a.txt").exists());
 }
 
