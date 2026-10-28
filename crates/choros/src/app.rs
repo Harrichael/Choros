@@ -34,11 +34,25 @@ pub struct App {
     scoped: Option<String>,
     pub repo_idx: usize,
     pub error: Option<String>,
-    /// The latest progress line while a create runs; `None` when idle.
-    pub working: Option<String>,
+    pub popup: Option<Popup>,
     work_rx: Option<Receiver<WorkMsg>>,
     pub should_quit: bool,
     pub created_path: Option<PathBuf>,
+}
+
+/// The box over the picker once Enter is pressed.
+pub enum Popup {
+    /// The latest progress line while a create runs.
+    Working(String),
+    /// A create that failed stays up until dismissed, so the cause can be read.
+    Failed {
+        /// The last progress line before the failure, so the step in the user's terms.
+        during: String,
+        /// The error chain, outermost first.
+        error: Vec<String>,
+        /// Where the workspace would have been, if a failure left it there.
+        kept: Option<PathBuf>,
+    },
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -49,7 +63,7 @@ pub enum NewFocus {
 
 enum WorkMsg {
     Status(String),
-    Done(std::result::Result<ChorosInfo, String>),
+    Done(std::result::Result<ChorosInfo, Vec<String>>),
 }
 
 impl App {
@@ -83,7 +97,7 @@ impl App {
             focus,
             repo_idx: 0,
             error,
-            working: None,
+            popup: None,
             work_rx: None,
             should_quit: false,
             created_path: None,
@@ -136,22 +150,33 @@ fn drain_worker(app: &mut App) {
     };
     let done = loop {
         match rx.try_recv() {
-            Ok(WorkMsg::Status(s)) => app.working = Some(s),
+            Ok(WorkMsg::Status(s)) => app.popup = Some(Popup::Working(s)),
             Ok(WorkMsg::Done(r)) => break Some(r),
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => break None,
         }
     };
     app.work_rx = None;
-    app.working = None;
-    match done {
+    let error = match done {
         Some(Ok(info)) => {
+            app.popup = None;
             app.created_path = Some(info.cd_target());
             app.should_quit = true;
+            return;
         }
-        Some(Err(e)) => app.error = Some(e),
-        None => app.error = Some("worker disconnected".into()),
-    }
+        Some(Err(chain)) => chain,
+        None => vec!["the worker thread stopped without a result".into()],
+    };
+    let during = match app.popup.take() {
+        Some(Popup::Working(s)) => s,
+        _ => String::new(),
+    };
+    let target = app.space.join(&app.name);
+    app.popup = Some(Popup::Failed {
+        during,
+        error,
+        kept: target.exists().then_some(target),
+    });
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -159,8 +184,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         app.should_quit = true;
         return;
     }
-    if app.working.is_some() {
-        return;
+    match app.popup {
+        Some(Popup::Working(_)) => return,
+        Some(Popup::Failed { .. }) => {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                app.popup = None;
+            }
+            return;
+        }
+        None => {}
     }
     match key.code {
         KeyCode::Esc => app.should_quit = true,
@@ -239,7 +271,7 @@ fn submit(app: &mut App) {
     let space = app.space.clone();
     let name = app.name.clone();
     app.error = None;
-    app.working = Some(format!("creating '{name}'"));
+    app.popup = Some(Popup::Working(format!("creating '{name}'")));
     app.work_rx = Some(rx);
     thread::spawn(move || {
         let progress = ChannelProgress(tx.clone());
@@ -252,7 +284,9 @@ fn submit(app: &mut App) {
             }
             Ok(info)
         });
-        let _ = tx.send(WorkMsg::Done(result.map_err(|e| e.to_string())));
+        let _ = tx.send(WorkMsg::Done(
+            result.map_err(|e| e.chain().map(|cause| cause.to_string()).collect()),
+        ));
     });
 }
 
@@ -281,11 +315,13 @@ mod tests {
         );
     }
 
-    /// A create that fails lands back in the picker with the error shown and
-    /// the user's name and picks intact, rather than quitting or losing them.
-    /// The registry repo here has no `origin`, so cloning it fails.
+    /// A create that fails keeps its popup up, now saying what went wrong:
+    /// the step it got to and the whole error chain, not just the outermost
+    /// line. Dismissing it returns to the picker with the name and picks
+    /// intact, and nothing left on disk. The registry repo here has no
+    /// `origin`, so cloning it fails.
     #[test]
-    fn a_failed_create_returns_to_the_picker() {
+    fn a_failed_create_explains_itself_then_returns_to_the_picker() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join(".choros-config/registry/orphan");
         std::fs::create_dir_all(&repo).unwrap();
@@ -303,17 +339,24 @@ mod tests {
         );
         press(&mut app, KeyCode::Char(' '));
         press(&mut app, KeyCode::Enter);
-        assert!(app.working.is_some());
+        assert!(matches!(app.popup, Some(Popup::Working(_))));
         while app.work_rx.is_some() {
             drain_worker(&mut app);
             thread::sleep(Duration::from_millis(10));
         }
 
+        let Some(Popup::Failed { during, error, kept }) = &app.popup else {
+            panic!("expected the failure popup");
+        };
+        assert_eq!(during, "cloning orphan…");
+        assert!(error.concat().contains("No such remote 'origin'"), "{error:?}");
+        assert!(kept.is_none());
+        assert!(!tmp.path().join("PROJ-1").exists());
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.popup.is_none());
         assert!(!app.should_quit);
-        assert!(app.working.is_none());
-        assert!(app.error.is_some());
         assert_eq!(app.name, "PROJ-1");
         assert_eq!(app.repo_selected, [true]);
-        assert!(!tmp.path().join("PROJ-1").exists());
     }
 }

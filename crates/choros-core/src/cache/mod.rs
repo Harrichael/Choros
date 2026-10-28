@@ -48,19 +48,18 @@ pub fn setup_workspace_caches<P: ProgressSink>(
 }
 
 mod tool {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     pub fn available(name: &str) -> bool {
-        let Some(path) = std::env::var_os("PATH") else {
-            return false;
-        };
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if is_executable(&candidate) {
-                return true;
-            }
-        }
-        false
+        find(name).is_some()
+    }
+
+    /// The executable `name` resolves to on PATH, as a spawn would find it.
+    pub fn find(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| is_executable(candidate))
     }
 
     #[cfg(unix)]

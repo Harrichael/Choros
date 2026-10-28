@@ -2,9 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use std::path::Path;
 
-use crate::app::{App, NewFocus};
+use crate::app::{App, NewFocus, Popup};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -52,8 +53,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         chunks[4],
     );
 
-    if let Some(what) = &app.working {
-        draw_working(f, area, what);
+    match &app.popup {
+        Some(Popup::Working(what)) => draw_working(f, area, what),
+        Some(Popup::Failed { during, error, kept }) => {
+            draw_failed(f, area, during, error, kept.as_deref())
+        }
+        None => {}
     }
 }
 
@@ -129,4 +134,113 @@ fn draw_working(f: &mut Frame, parent: Rect, what: &str) {
     .alignment(Alignment::Center)
     .block(Block::default().title(" Working ").borders(Borders::ALL));
     f.render_widget(p, area);
+}
+
+/// Sized to the message, up to nearly the whole screen. A message too long
+/// for that (pnpm's output can run to pages) keeps its head and tail: the
+/// outermost cause says what choros was doing, the last lines say why the
+/// tool gave up.
+fn draw_failed(f: &mut Frame, parent: Rect, during: &str, error: &[String], kept: Option<&Path>) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let w = 100.min(parent.width.saturating_sub(4));
+    let inner_w = usize::from(w.saturating_sub(2)).max(1);
+    let rows = |lines: &[Line]| -> usize { lines.iter().map(|l| l.width().max(1).div_ceil(inner_w)).sum() };
+
+    let mut head = Vec::new();
+    if !during.is_empty() {
+        head.push(Line::from(vec![Span::styled("last step: ", dim), Span::raw(during.to_string())]));
+        head.push(Line::default());
+    }
+    let mut body: Vec<Line> = Vec::new();
+    for (i, cause) in error.iter().enumerate() {
+        let style = if i == 0 {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        body.extend(cause.lines().map(|l| Line::styled(l.to_string(), style)));
+    }
+    let left = match kept {
+        Some(path) => format!("{} is still there.", path.display()),
+        None => "Nothing was left behind.".to_string(),
+    };
+    let foot = vec![
+        Line::default(),
+        Line::styled(left, dim),
+        Line::styled("Enter/Esc: back to the picker", dim),
+    ];
+
+    let max_h = usize::from(parent.height.saturating_sub(2));
+    let budget = max_h.saturating_sub(2 + rows(&head) + rows(&foot));
+    if rows(&body) > budget && body.len() > 2 {
+        let first = body.remove(0);
+        let mut tail = Vec::new();
+        let mut used = rows(std::slice::from_ref(&first)) + 1;
+        while let Some(line) = body.pop() {
+            let r = rows(std::slice::from_ref(&line));
+            if used + r > budget {
+                body.push(line);
+                break;
+            }
+            used += r;
+            tail.push(line);
+        }
+        tail.reverse();
+        let hidden = Line::styled(format!("… {} lines hidden …", body.len()), dim);
+        body = std::iter::once(first).chain(std::iter::once(hidden)).chain(tail).collect();
+    }
+
+    let lines: Vec<Line> = head.into_iter().chain(body).chain(foot).collect();
+    let h = (rows(&lines) + 2).min(max_h) as u16;
+    let area = Rect::new(
+        parent.x + (parent.width.saturating_sub(w)) / 2,
+        parent.y + (parent.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, area);
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(" Failed ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red)),
+    );
+    f.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn screen(error: &[String]) -> String {
+        let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        term.draw(|f| draw_failed(f, f.area(), "pnpm install in web…", error, None)).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// pnpm's output runs far past a screen. The popup keeps what choros was
+    /// doing (the outermost cause) and how the tool's output ended, and says
+    /// how much it dropped in between.
+    #[test]
+    fn a_long_failure_keeps_its_first_line_and_its_tail() {
+        let output: Vec<String> = (1..=60).map(|i| format!("progress line {i}")).collect();
+        let error = vec![
+            "setting up workspace caches".to_string(),
+            format!("pnpm install failed in /ws/web:\n{}\nexec: corepack: not found", output.join("\n")),
+        ];
+        let shown = screen(&error);
+        assert!(shown.contains("last step: pnpm install in web…"));
+        assert!(shown.contains("setting up workspace caches"));
+        assert!(shown.contains("lines hidden"));
+        assert!(shown.contains("progress line 60"));
+        assert!(shown.contains("exec: corepack: not found"));
+        assert!(!shown.contains("progress line 1 "));
+        assert!(shown.contains("Nothing was left behind."));
+    }
 }

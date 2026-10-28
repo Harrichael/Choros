@@ -84,12 +84,21 @@ fn exclude_from_git(repo_dir: &Path, pattern: &str) -> Result<()> {
 fn run_pnpm(cwd: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("pnpm").current_dir(cwd).args(args).output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Name the binary that ran: `pnpm` on PATH is often a shim (corepack,
+        // a version manager), and its own failure reads as nonsense without it.
+        let ran = tool::find("pnpm").map_or_else(|| "pnpm".into(), |p| p.display().to_string());
+        // pnpm reports its own errors (ERR_PNPM_*) on stdout, not stderr.
+        let said: Vec<_> = [&output.stderr, &output.stdout]
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(b).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         return Err(eyre!(
-            "pnpm {} failed in {}:\n{}",
+            "{ran} {} failed ({}) in {}:\n{}",
             args.join(" "),
+            output.status,
             cwd.display(),
-            stderr.trim()
+            said.join("\n")
         ));
     }
     Ok(())
