@@ -665,3 +665,25 @@ fn landing_again_points_at_the_open_set() {
             .to_string()]
     );
 }
+
+/// A set names only what it sits directly on. Three lands in a row make a
+/// chain, not a fan: the third depends on the second alone, which already
+/// carries the first. A fork picking a set along with one beneath it keeps
+/// only the upper one.
+#[test]
+fn a_set_depends_only_on_what_it_sits_directly_on() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    let other = w.workspace("other");
+    for (i, file) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
+        w.commit(&ws, file, &format!("{i}\n"));
+        w.land(&ws).unwrap();
+    }
+    let st = w.state();
+    assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);
+    assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
+
+    w.commit(&other, "d.txt", "d\n");
+    w.land_with(&other, Some(vec![Dep::Set(1), Dep::Set(2)]), None, None).unwrap();
+    assert_eq!(w.state().sets[&4].deps, [Dep::Set(2)]);
+}

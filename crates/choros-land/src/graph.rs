@@ -93,6 +93,28 @@ pub fn leaves(state: &QueueState, members: &[u32]) -> Vec<u32> {
         .collect()
 }
 
+/// What a new set stores as its dependencies: `deps` without any that
+/// another of them already builds on. A set names only what it sits directly
+/// on, so editing a dependency's place carries its dependents along.
+pub fn reduce(state: &QueueState, deps: &[Dep]) -> Vec<Dep> {
+    let sets: Vec<u32> = deps
+        .iter()
+        .filter_map(|d| if let Dep::Set(n) = d { Some(*n) } else { None })
+        .collect();
+    let kept: BTreeSet<u32> = leaves(state, &sets).into_iter().collect();
+    let mut out: Vec<Dep> = deps
+        .iter()
+        .filter(|d| match d {
+            Dep::Set(n) => kept.contains(n),
+            Dep::Cross { .. } => true,
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Every set `n` builds on, transitively, excluding `n`.
 pub fn ancestors(state: &QueueState, n: u32) -> BTreeSet<u32> {
     reachable(state, n, |set| base_deps(state, set).collect())

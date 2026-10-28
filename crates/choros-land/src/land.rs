@@ -528,7 +528,7 @@ fn land_normal(
 
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
-        let deps = work.next_dep_set(repo);
+        let deps = graph::reduce(&work.st, &work.next_dep_set(repo));
         let base = BaseSpec {
             main: Some(now.composition.main.clone()),
             deps: now.composition.sets.clone(),
@@ -686,7 +686,7 @@ fn land_fork(
             }
         }
 
-        let mut set = new_set(n, deps.clone(), spec, base, tip, ws, repo, req);
+        let mut set = new_set(n, graph::reduce(&work.st, &deps), spec, base, tip, ws, repo, req);
         set.conflicts_with = clashes;
         work.st.sets.insert(n, set);
         work.publish(n)?;
@@ -818,7 +818,7 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
 
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
-        let deps_of_set = deps.iter().map(|m| Dep::Set(*m)).collect();
+        let deps_of_set = graph::leaves(&work.st, &deps).into_iter().map(Dep::Set).collect();
         work.st.sets.insert(n, new_set(n, deps_of_set, spec, base, tip, ws, repo, req));
         work.publish(n)?;
         work.rebuild_merge_head(repo)?;
