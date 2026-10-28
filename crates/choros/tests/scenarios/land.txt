@@ -32,6 +32,6 @@ appq: re-synced landing-2
 appq: opened PRs for landing-2
 $ choros status
 appq (app) @ $ROOT/trunk
-  front    appq/landing-2 (app)  after landing-1  https://github.test/pull/2
+  front    appq/landing-2 (app)  https://github.test/pull/2
   (1 merged)
   ⇣ $ROOT/trunk/ws (app) needs `choros repo sync`

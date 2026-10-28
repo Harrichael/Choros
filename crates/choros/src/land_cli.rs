@@ -306,13 +306,17 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
 fn print_queue_status(q: &status::QueueStatus) {
     let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
     println!("{} ({repos}) @ {}", q.name, q.trunk.display());
+    // A merged dependency no longer holds anything back; JSON keeps it.
+    let merged: Vec<String> =
+        q.sets.iter().filter(|s| s.state == "merged").map(|s| format!("landing-{}", s.n)).collect();
     for s in &q.sets {
         if s.state == "merged" {
             continue;
         }
         let mut line = format!("  {:<8} {} ({})", s.state, s.branch, s.repo);
-        if !s.deps.is_empty() {
-            line.push_str(&format!("  after {}", s.deps.join(", ")));
+        let waiting: Vec<&str> = s.deps.iter().filter(|d| !merged.contains(d)).map(String::as_str).collect();
+        if !waiting.is_empty() {
+            line.push_str(&format!("  after {}", waiting.join(", ")));
         }
         if let Some(pr) = &s.pr {
             line.push_str(&format!("  {}", pr.url));
