@@ -41,10 +41,10 @@ app now lands into appq
 $ git rm -q a.txt && echo instead > b.txt && git add b.txt && git commit -qm "replace a with b"
 
 # Picking deps that leave that set out is refused, naming it.
-$ choros land continue --fork --deps none
+$ choros land continue --deps none
 choros: appq/landing-3 would lose part of what its commits change in a.txt: they change what appq/landing-1 wrote; add it to --deps, or use --deps auto
 [exit 1]
-$ choros land continue --fork --deps auto
+$ choros land continue --deps auto
 app → appq/landing-3, queued
     landing: $ROOT/trunk/landing/appq/landing-3
     on appq/landing-1: its commits change what it wrote (a.txt)

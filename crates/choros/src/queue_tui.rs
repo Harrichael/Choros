@@ -1,5 +1,5 @@
 //! The queue TUI (`choros queue -i [NAME]`) and the multi-select picker it shares
-//! with `land --fork`.
+//! with `land -i`.
 
 use std::path::Path;
 use std::time::Duration;

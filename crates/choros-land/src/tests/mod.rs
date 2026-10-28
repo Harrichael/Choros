@@ -371,7 +371,7 @@ impl World {
         self.land_with(ws, None, None, None)
     }
 
-    /// `choros land continue --fork --deps auto`.
+    /// `choros land continue --deps auto`.
     pub fn land_auto(&self, ws: &Path) -> Result<LandOutcome> {
         self.land_req(&self.request(ws, Some(ForkDeps::Auto), None), None)
     }

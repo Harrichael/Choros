@@ -115,14 +115,14 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
-choros land archive  [--fork --deps SET,...|none|auto | --fork -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land continue [--deps SET,...|none|auto | -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land archive  [--deps SET,...|none|auto | -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
 unlanded commits, each as its own landing-set with its own number. Repos
 landed together are not linked; a dependency across repos is added by hand
-(`--fork --deps` or `--fork -i`, or the queue TUI). A new set depends on what is queued in
+(`--deps` or `-i`, or the queue TUI). A new set depends on what is queued in
 its own repo. Multiple queues are locked one at a time in name order.
 
 **What is landed.** `rev-list --reverse landed_through..HEAD`, after the sync
@@ -148,8 +148,8 @@ commits.
 
 ### Fork land
 
-`--fork` takes `--deps` (`none` = based on main), or `-i` for a picker of
-queued sets (and other queues' sets, as ordering-only edges). The workspace's own unmerged earlier sets are always added as deps, so
+A land with `--deps` (`none` = based on main), or `-i` for a picker of
+queued sets (and other queues' sets, as ordering-only edges), forks: it lands beside the queue, on only those sets. The workspace's own unmerged earlier sets are always added as deps, so
 a fork never loses commits it builds on.
 
 1. Base: no deps → `origin/main`; one dep → its tip; several → a private base
@@ -168,7 +168,7 @@ a fork never loses commits it builds on.
 
 ### Auto land
 
-`--fork --deps auto`, or every plain land into a repo with `deps = "auto"` in
+`--deps auto`, or every plain land into a repo with `deps = "auto"` in
 `<trunk>/.choros-config/repos.toml`, lands on as little of the queue as the
 commits need:
 

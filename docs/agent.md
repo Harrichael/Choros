@@ -13,14 +13,15 @@ Inside a repo it lands that repo; at the workspace root, each repo with
 unlanded commits. Each land makes a new landing-set, and so a new PR, from
 the commits since the last land. Keep working and land again as you go.
 
-    (no --fork)                 on top of everything queued in the repo
-    --fork --deps SET,…|none    beside the queue, on only these sets (3,
+    (no --deps)                 on top of everything queued in the repo
+    --deps SET,…|none           beside the queue, on only these sets (3,
                                 landing-3, otherq/3); none: on main. This
                                 workspace's own earlier sets are always kept
-    --fork --deps auto          on only what the commits need (below)
+    --deps auto                 on only what the commits need (below)
     --on-conflict depend|merge-head
-                                when a fork clashes with a set it left out:
-                                land behind it, or resolve beside it
+                                when a --deps land clashes with a set it
+                                left out: land behind it, or resolve
+                                beside it
     --title T, --body-file F    the PR's title and body. The body tells the
                                 reviewer what changed and why, in the repo's
                                 PR template; leave out landing-sets and

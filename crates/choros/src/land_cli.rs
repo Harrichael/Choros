@@ -73,9 +73,8 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--fork --deps SET,…|none|auto | --fork -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
+        _ => usage("choros land continue|archive [--deps SET,…|none|auto | -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
     };
-    let mut fork = false;
     let mut pick = false;
     let mut deps: Option<ForkDeps> = None;
     let mut on_conflict = None;
@@ -85,7 +84,6 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mut sessions = Vec::new();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--fork" => fork = true,
             "-i" | "--interactive" => pick = true,
             "--deps" => {
                 deps = Some(match it.next().unwrap_or_default().as_str() {
@@ -118,18 +116,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     }
     let cwd = std::env::current_dir()?;
     let (trunk, ws) = choros::find_workspace(&cwd)?;
-    let fork = match (fork, deps, pick) {
-        (false, None, false) => None,
-        (false, ..) => return Err(eyre!("--deps and -i choose what a fork depends on; add --fork")),
-        (true, Some(_), true) => return Err(eyre!("pass --deps or -i, not both")),
-        (true, Some(d), false) => Some(d),
-        (true, None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none|auto")),
-        (true, None, true) => Some(ForkDeps::Picked(pick_fork_deps(&trunk, &ws, &cwd)?)),
-        (true, None, false) => {
-            return Err(eyre!(
-                "--fork needs --deps SET,…|none (none: on main) or auto (as few as it needs), or -i to pick them"
-            ));
-        }
+    let fork = match (deps, pick) {
+        (None, false) => None,
+        (Some(_), true) => return Err(eyre!("pass --deps or -i, not both")),
+        (Some(d), false) => Some(d),
+        (None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none|auto")),
+        (None, true) => Some(ForkDeps::Picked(pick_fork_deps(&trunk, &ws, &cwd)?)),
     };
 
     let tools = Tools::for_trunk(&trunk);
