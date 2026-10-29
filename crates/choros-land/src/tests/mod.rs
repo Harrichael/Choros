@@ -20,7 +20,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::agent::{Agent, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
-use crate::forge::{Forge, MergeMethod, PrRequest, PrState, RepoSettings};
+use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings};
 use crate::land::{ForkDeps, LandOutcome, LandRequest};
 use crate::queue::Queue;
 use crate::state::{Dep, LandMode, PrRef, QueueConfig, QueueState, Scope};
@@ -64,6 +64,7 @@ struct FakePr {
     title: String,
     body: String,
     draft: bool,
+    unanswered: bool,
     state: Option<PrState>,
 }
 
@@ -125,6 +126,15 @@ impl FakeForge {
         self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Closed);
     }
 
+    pub fn mark_ready(&self, number: u64) {
+        self.prs.lock().unwrap().get_mut(&number).unwrap().draft = false;
+    }
+
+    /// A reviewer comments (`true`), or the author answers (`false`).
+    pub fn set_unanswered(&self, number: u64, unanswered: bool) {
+        self.prs.lock().unwrap().get_mut(&number).unwrap().unanswered = unanswered;
+    }
+
     pub fn pr_count(&self) -> usize {
         self.prs.lock().unwrap().len()
     }
@@ -163,6 +173,7 @@ impl Forge for FakeForge {
                 title: req.title.to_string(),
                 body: req.body.to_string(),
                 draft: req.draft,
+                unanswered: false,
                 state: Some(PrState::Open),
             },
         );
@@ -197,6 +208,16 @@ impl Forge for FakeForge {
             );
         }
         Ok(state)
+    }
+
+    fn pr_review(&self, _repo: &Path, number: u64) -> Result<PrReview> {
+        let prs = self.prs.lock().unwrap();
+        let pr = prs.get(&number).ok_or_else(|| eyre!("no PR #{number}"))?;
+        Ok(PrReview {
+            draft: pr.draft,
+            unanswered: pr.unanswered,
+            approved: false,
+        })
     }
 
     fn merge_pr(&self, _repo: &Path, number: u64, method: MergeMethod) -> Result<()> {

@@ -687,3 +687,23 @@ fn a_set_depends_only_on_what_it_sits_directly_on() {
     w.land_with(&other, Some(vec![Dep::Set(1), Dep::Set(2)]), None, None).unwrap();
     assert_eq!(w.state().sets[&4].deps, [Dep::Set(2)]);
 }
+
+/// A pass notes where the front's PR review stands: a draft at first, then
+/// ready, then waiting on its author once a reviewer has the last word.
+#[test]
+fn a_pass_notes_the_front_prs_review() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land(&ws).unwrap();
+    let pr = w.state().sets[&1].pr.as_ref().unwrap().number;
+    let review = || w.state().sets[&1].review.clone().unwrap();
+
+    w.pass();
+    assert_eq!(review(), PrReview { draft: true, unanswered: false, approved: false });
+
+    w.forge.mark_ready(pr);
+    w.forge.set_unanswered(pr, true);
+    w.pass();
+    assert_eq!(review(), PrReview { draft: false, unanswered: true, approved: false });
+}

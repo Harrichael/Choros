@@ -420,7 +420,7 @@ impl<'q, 'h> Work<'q, 'h> {
         Ok(())
     }
 
-    /// Note merges and closes on GitHub.
+    /// Note merges, closes and reviews on GitHub.
     pub fn observe_prs(&mut self, forge: &dyn Forge, report: &mut PassReport) -> Result<()> {
         let mut refetched = BTreeSet::new();
         let ids: Vec<u32> = self.st.sets.keys().copied().collect();
@@ -452,6 +452,11 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 (PrState::Open, SetStatus::Closed) => set.status = SetStatus::Queued,
                 _ => {}
+            }
+            if set.status == SetStatus::Queued {
+                let number = set.pr.as_ref().unwrap().number;
+                let review = forge.pr_review(self.git(&repo).dir(), number)?;
+                self.st.sets.get_mut(&n).unwrap().review = Some(review);
             }
         }
         Ok(())

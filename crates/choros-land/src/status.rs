@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::git::Git;
 use crate::graph;
 use crate::queue::{self, Queue};
-use crate::forge::PrState;
+use crate::forge::{PrReview, PrState};
 use crate::state::{DiffbasePark, Park, PrRef, Scope, SessionFork, SetStatus};
 use crate::workspace;
 
@@ -52,6 +52,8 @@ pub struct SetLine {
     pub state: &'static str,
     pub title: Option<String>,
     pub pr: Option<PrRef>,
+    /// The open PR's review, once a pass has seen it.
+    pub review: Option<PrReview>,
     pub sessions: Vec<SessionFork>,
     pub labels: Vec<String>,
     pub deps: Vec<String>,
@@ -175,6 +177,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             state,
             title: set.title.clone(),
             pr: set.pr.clone(),
+            review: set.review.clone().filter(|_| set.is_open()),
             sessions: set.sessions.clone(),
             labels: set.labels.clone(),
             deps: set

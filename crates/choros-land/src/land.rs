@@ -941,6 +941,7 @@ fn new_set(
         status: SetStatus::Queued,
         park: None,
         pr: None,
+        review: None,
         remote: None,
         merged_into: None,
         source: Source {

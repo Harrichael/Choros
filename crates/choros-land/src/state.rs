@@ -283,6 +283,9 @@ pub struct LandingSet {
     pub park: Option<Park>,
     #[serde(default)]
     pub pr: Option<PrRef>,
+    /// The PR's review, as of the last pass that saw it open.
+    #[serde(default)]
+    pub review: Option<crate::forge::PrReview>,
     /// Where `<queue>/landing-N` was on origin when we last pushed or
     /// adopted it; the lease for the next push. `None`: not on origin.
     #[serde(default)]

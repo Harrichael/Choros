@@ -452,7 +452,14 @@ workspaces that need a sync.
 `{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,
 diffbase_park}]}`. Other tools read each set's `n`, `repo`, `state`
 (`queued`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
-`sessions` (`[{source, fork}]`) and `labels`, so those names stay fixed.
+`review`, `sessions` (`[{source, fork}]`) and `labels`, so those names stay
+fixed. `review` is `{draft, unanswered, approved}` for a front set once a
+pass has seen its PR, and null otherwise. `unanswered` means someone besides
+the PR's author commented or reviewed after the author last commented,
+reviewed or wrote a commit; an approval with nothing written in it doesn't
+count. `approved` is GitHub's review decision, or, where the repo requires no
+reviews, that some reviewer's latest verdict approves and none asks for
+changes.
 Dropped sets are left out. Beside `queues`, `instant` lists the instant-mode
 lands in the same scope (by the workspace they came from), each
 `{repo, workspace, commit, pr, labels, sessions}`, with `pr` a number or
