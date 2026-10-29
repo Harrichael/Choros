@@ -828,12 +828,14 @@ enum Least {
 }
 
 /// Where the commits sit on a given start: the sets they depend on, and
-/// why each, grown until they replay whole and clash with nothing beside.
+/// why each, grown until they replay whole; and the sets beside them they
+/// clash with, which they land beside all the same.
 struct Placed {
     why: BTreeMap<u32, String>,
     spec: BaseSpec,
     base: String,
     tip: String,
+    clashes: Vec<(u32, Vec<String>)>,
 }
 
 /// What `place` needs that doesn't change within a round.
@@ -848,7 +850,9 @@ struct Commits<'a> {
 
 /// Land on as little of the queue as the commits need. Start on main and the
 /// workspace's own earlier sets; take in a queued set only when the commits
-/// conflict with it, replaying onto it or merged beside it. Not conflicting
+/// don't replay whole without it. One they merely clash with side by side
+/// isn't needed: either could merge first, so the land goes beside it, and
+/// the merge head holds the pair's resolution (the resync agent's). Not conflicting
 /// isn't the same as not needing (the commits may call what a set adds), so
 /// the result must pass the repo's check too. When it doesn't, look for what
 /// it was missing: each line of skipped work added alone, newest first, and
@@ -902,13 +906,15 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
             }
         };
 
-        let Placed { why, spec, base, tip } = chosen;
+        let Placed { why, spec, base, tip, clashes } = chosen;
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
         let deps_of_set = graph::leaves(&work.st, &deps).into_iter().map(Dep::Set).collect();
-        work.st.sets.insert(n, new_set(n, deps_of_set, spec, base, tip, ws, repo, req));
+        let mut set = new_set(n, deps_of_set, spec, base, tip, ws, repo, req);
+        set.conflicts_with = clashes.iter().map(|(m, _)| *m).collect();
+        work.st.sets.insert(n, set);
         work.publish(n)?;
         work.rebuild_merge_head(repo)?;
         work.save()?;
@@ -919,6 +925,14 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
 
         let mut notes: Vec<String> =
             why.iter().map(|(m, w)| format!("on {}: {w}", crate::state::branch(&q.name, *m))).collect();
+        for (m, files) in &clashes {
+            notes.push(format!(
+                "beside {}: they clash in {}, but either can merge first; the resync agent settles the pair \
+                 in the merge head",
+                crate::state::branch(&q.name, *m),
+                files.join(", ")
+            ));
+        }
         let ahead: Vec<u32> = live.iter().copied().filter(|m| !mine.contains(m)).collect();
         if !ahead.is_empty() {
             notes.push(match checker.check {
@@ -1025,8 +1039,8 @@ enum Probe {
     Run(String),
 }
 
-/// Grow `why` from conflicts until the commits replay onto it whole and
-/// clash with nothing beside it. `Err` when only everything queued will do,
+/// Grow `why` from conflicts until the commits replay onto it whole, and
+/// note what they clash with beside it. `Err` when only everything queued will do,
 /// with why when that's news: needing every set is just where it belongs.
 fn place(
     work: &mut Work,
@@ -1082,14 +1096,8 @@ fn place(
             }
             continue;
         }
-        let clashed = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
-        if !clashed.is_empty() {
-            for (m, files) in clashed {
-                why.insert(m, format!("they conflict side by side ({})", files.join(", ")));
-            }
-            continue;
-        }
-        return Ok(Ok(Placed { why, spec, base, tip }));
+        let clashes = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
+        return Ok(Ok(Placed { why, spec, base, tip, clashes }));
     }
 }
 

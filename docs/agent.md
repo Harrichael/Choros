@@ -46,8 +46,10 @@ dependencies plus your commits. A failing check refuses the land and names
 a log of its output; fix the commits and land again. `--force` skips it,
 for when the check itself is what's broken.
 
-A plain land starts on main, takes in the queued sets your commits conflict
-with, and checks the result. If that fails, it looks for the set the check
+A plain land starts on main, takes in the queued sets your commits can't
+replay without, and checks the result. A set they only clash with side by
+side, it lands beside: either can merge first, and choros's resync agent
+resolves the pair; your PR opens once it has. If that fails, it looks for the set the check
 needs, and lands on the fewest sets it passes with, saying which and why.
 
 The check goes in `<trunk>/.choros-config/repos.toml`; a queued repo

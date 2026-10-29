@@ -88,6 +88,41 @@ fn work_that_undoes_a_set_lands_behind_it() {
     );
 }
 
+/// Two pieces of work that edit the same line, neither built on the other:
+/// either could merge first, so the second lands beside the first, not
+/// behind it. The merge head can't hold both until the pair is resolved, so
+/// the new set waits out of it, its PR unopened, and the daemon's agent
+/// settles the pair; then both are at the front.
+#[test]
+fn work_that_only_clashes_lands_beside() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    w.land_plain(&one).unwrap();
+    w.commit(&two, "README", "two\n");
+
+    let out = w.land_plain(&two).unwrap();
+
+    let st = w.state();
+    assert_eq!(st.sets[&2].deps, []);
+    assert_eq!(st.sets[&2].conflicts_with, [1]);
+    assert!(st.sets[&2].park.is_some() && st.sets[&2].pr.is_none());
+    assert_eq!(
+        out.landed[0].notes[0],
+        "beside appq/landing-1: they clash in README, but either can merge first; the resync agent \
+         settles the pair in the merge head"
+    );
+
+    *w.agent.fix.lock().unwrap() = Some("one and two\n".into());
+    w.daemon_pass();
+    let st = w.state();
+    assert!(st.sets[&2].park.is_none());
+    let mh = st.repos[REPO].merge_head.as_ref().unwrap();
+    assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
+    assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_some(), "both at the front");
+}
+
 /// No conflict doesn't mean no need: these commits use a file a queued set
 /// adds without touching it. The check fails on main alone, so the land
 /// tries each line of queued work in turn, newest first, and takes the one

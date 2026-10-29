@@ -209,8 +209,13 @@ A plain land lands on as little of the queue as the commits need:
    through but changes less than the commits did: removing lines a skipped
    set added is "already done" without it, and that part would be lost. The
    skipped sets that changed those files are added.
-3. Test-merge the result against every other leaf; a set it conflicts with
-   becomes a dependency too, and the replay runs again.
+3. Test-merge the result against every other leaf. A set it clashes with
+   side by side isn't needed — either could merge first — so the land goes
+   beside it, flagging the pair (`conflicts_with`). The new set waits out of
+   the merge head, its PR unopened, until the pair is resolved there: the
+   daemon's resync agent does that on its next pass (*Conflicts*), and
+   whichever PR merges first, the other takes main in with the same
+   resolution. To land behind it instead, pick it with `--deps`.
 4. Check the result. Not conflicting isn't the same as not needing: the
    commits may call what a skipped set adds. If the check fails, search for
    what it needs. Each probe adds a whole line of skipped work — a set with
@@ -410,8 +415,9 @@ resolve <queue>` asks about, every time:
 Without a TTY (from inside a Claude session), `resolve` takes `--agent=trust`
 or prints the parked operation and exits non-zero.
 
-**Forks that conflict in the merge head** are settled at land time (see *Fork
-land*). Once both are public, the only choices are resolving in the merge head
+**Sets that clash side by side** are flagged as a pair: a plain land goes
+beside the set it clashes with, and the daemon resolves the pair in the merge
+head. A fork asks at land time (see *Fork land*). Once both are public, the only choices are resolving in the merge head
 or closing one PR and re-queueing it as a dependent.
 
 **A closed PR** (parked with its subtree): reopen it; drop it (rebase its
