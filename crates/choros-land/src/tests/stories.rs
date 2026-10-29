@@ -1,4 +1,5 @@
 use super::*;
+use crate::land::Deps;
 use crate::state::{ParkOp, SetStatus};
 
 /// Two workspaces land in turn. The first set has nothing ahead of it, so it
@@ -156,6 +157,43 @@ fn conflicting_forks_side_by_side(w: &World) -> u32 {
     assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
     assert_eq!(st.repos[REPO].resolutions.len(), 1);
     *st.sets.keys().max().unwrap()
+}
+
+/// Whoever resolves a clash is told what each side is for: the PR text and
+/// commits of every set whose changes meet in the files, and what the
+/// trunk's context hook says about each label. A label the hook has nothing
+/// for is left out.
+#[test]
+fn a_resolver_is_told_what_each_side_is_for() {
+    let w = World::new();
+    std::fs::write(
+        w.trunk.join(".choros-config/context.toml"),
+        "label = \"test {} != skip/me && echo intent of {}\"\n",
+    )
+    .unwrap();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    let mut req = w.request(&one, Deps::Picked(vec![]), None);
+    req.title = Some("Say one".into());
+    req.body = Some("Because one is right.".into());
+    req.labels = vec!["demo/aaaa".into(), "skip/me".into()];
+    w.land_req(&req, None).unwrap();
+    w.commit(&two, "README", "two\n");
+
+    let mut h = Scripted::default();
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), Some(&mut h)).unwrap();
+
+    let prompt = &h.seen[0].prompt;
+    assert!(
+        prompt.contains(
+            "## appq/landing-1: Say one\n\nBecause one is right.\n\nCommits:\n- write README\n\n\
+             From its label demo/aaaa:\nintent of demo/aaaa\n"
+        ),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("skip/me"), "{prompt}");
+    assert!(prompt.contains("## appq/landing-2: write README\n\nCommits:\n- write README\n"), "{prompt}");
 }
 
 /// When the first of two clashing forks merges, main must be merged into the

@@ -241,7 +241,8 @@ first commit subject (GitHub requires one).
 
 **Labels.** Each `--label` is kept, in order and without repeats, on every
 set the land makes, and shown by `choros status`. Choros never reads them;
-they are for other tools to tie their own records to a set. Instant mode
+they are for other tools to tie their own records to a set, and a trunk's
+context hook can look them up for whoever resolves a conflict (*Conflicts*). Instant mode
 makes no set, so it keeps them on the land's line in its log (below).
 
 **Instant mode.** Fetch, rebase `landed_through..HEAD` onto `origin/main` in
@@ -408,6 +409,18 @@ runs `rerere`, which replays a resolution outright when the same hunks
 conflict again (typically: main merged into the second of two conflicting
 public forks after the first merges); it is a bonus, not the mechanism.
 
+**What each side is for.** Whoever resolves — the agent, or you driving it —
+is told about every queued set whose changes meet in the conflicted files: its
+PR title and body, its commit subjects, and, for each of its labels, what the
+trunk's context hook prints. Choros never reads a label itself; the hook does:
+
+```toml
+# <trunk>/.choros-config/context.toml
+label = "ergon show {} --intent"    # {} is the label, passed as an argument
+```
+
+A label the hook fails on, or prints nothing for, is left out.
+
 **Checks after any resolution** (agent or rerere): no unmerged paths, no
 conflict markers (`git diff --check`). A resolution that fails them stays
 parked.
@@ -425,7 +438,8 @@ Choros mints the session id with `--session-id` on first use, records it in
 `state.json`, and resumes it on later runs. After `agent.rotate_after` runs it
 starts a new session, seeded with a handoff summary; the queue's long-term
 notes live in a `CLAUDE.md` in the sync clone. The canned prompt names the
-operation, conflicted files, both sides' commits and any recorded resolution.
+operation, conflicted files, what each side is for, and any recorded
+resolution.
 Choros, not the agent, pushes. Git in the sync clone runs with
 `core.hooksPath=/dev/null` and `commit.gpgSign=false`. For now there is no
 test gate (a configurable check command is a later addition).

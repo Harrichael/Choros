@@ -14,6 +14,7 @@ pub struct ConflictBrief<'a> {
     pub files: &'a [String],
     /// `git show --remerge-diff` of earlier resolutions touching these files.
     pub recorded: &'a [String],
+    pub sides: &'a [crate::context::Side],
     pub session: &'a AgentSlot,
 }
 
@@ -125,6 +126,24 @@ fn files(brief: &ConflictBrief) -> String {
 }
 
 fn push_context(p: &mut String, brief: &ConflictBrief) {
+    if !brief.sides.is_empty() {
+        p.push_str("\nThe queued sets whose changes meet in these files, and what each is for:\n");
+        for s in brief.sides {
+            p.push_str(&format!("\n## {}: {}\n", s.set, s.title));
+            if let Some(body) = &s.body {
+                p.push_str(&format!("\n{body}\n"));
+            }
+            if !s.commits.is_empty() {
+                p.push_str("\nCommits:\n");
+                for c in &s.commits {
+                    p.push_str(&format!("- {c}\n"));
+                }
+            }
+            for (label, text) in &s.labels {
+                p.push_str(&format!("\nFrom its label {label}:\n{text}\n"));
+            }
+        }
+    }
     if !brief.recorded.is_empty() {
         p.push_str("\nThese files conflicted before; this is how that was resolved:\n\n");
         for r in brief.recorded {

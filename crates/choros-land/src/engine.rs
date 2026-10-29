@@ -47,6 +47,8 @@ pub struct Conflict<'a> {
     pub files: Vec<String>,
     /// Earlier resolutions touching the same files, as remerge diffs.
     pub recorded: Vec<String>,
+    /// The sets whose changes meet in `files`, and what each is for.
+    pub sides: Vec<crate::context::Side>,
     pub slot: &'a AgentSlot,
     pub agent: &'a dyn Agent,
 }
@@ -220,6 +222,7 @@ impl<'q, 'h> Work<'q, 'h> {
         let rs = self.st.repos.get(repo).ok_or_else(|| eyre!("queue {} has nothing in {repo}", self.q.name))?;
         let slot = agent_slot(rs, self.q.config.agent.rotate_after);
         let recorded = recorded_for(&git, rs, &files);
+        let sides = crate::context::sides(self.q, &self.st, repo, &files);
         let handled = handler.resolve(&Conflict {
             queue: &self.q.name,
             repo,
@@ -227,6 +230,7 @@ impl<'q, 'h> Work<'q, 'h> {
             operation: operation.to_string(),
             files: files.clone(),
             recorded,
+            sides,
             slot: &slot,
             agent: self.agent,
         })?;

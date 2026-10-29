@@ -29,7 +29,9 @@ the commits since the last land. Keep working and land again as you go.
                                 dependencies. Landing without one shows the
                                 template to fill
     --label L                   text kept on the set for other tools
-                                (repeatable); choros never reads it
+                                (repeatable); choros never reads it, but a
+                                trunk's context hook may show it to whoever
+                                resolves a conflict
     --session ID                the session to fork into the landing folder;
                                 by default, the one running the land
 

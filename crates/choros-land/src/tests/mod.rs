@@ -265,6 +265,8 @@ pub struct Scripted {
 pub struct SeenConflict {
     pub files: Vec<String>,
     pub recorded: usize,
+    /// What the resync agent would be told.
+    pub prompt: String,
 }
 
 impl ConflictHandler for Scripted {
@@ -277,6 +279,14 @@ impl ConflictHandler for Scripted {
         self.seen.push(SeenConflict {
             files: c.files.clone(),
             recorded: c.recorded.len(),
+            prompt: crate::agent::conflict_prompt(&ConflictBrief {
+                dir: c.dir,
+                operation: &c.operation,
+                files: &c.files,
+                recorded: &c.recorded,
+                sides: &c.sides,
+                session: c.slot,
+            }),
         });
         Ok(Handled::Resolved { used_session: false })
     }

@@ -822,6 +822,7 @@ impl ConflictHandler for Interactive {
             operation: &c.operation,
             files: &c.files,
             recorded: &c.recorded,
+            sides: &c.sides,
             session: c.slot,
         };
         match choice {
