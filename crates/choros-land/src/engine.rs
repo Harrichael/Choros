@@ -34,6 +34,12 @@ pub trait ConflictHandler {
     /// A fork being landed would conflict with queued sets `with` in the
     /// merge head. `None`: no decision can be made here.
     fn fork_conflict(&mut self, fork: u32, with: &[u32]) -> Result<Option<OnConflict>>;
+    /// Whether to try parked operations again though nothing under them
+    /// changed. Someone asking at a terminal, yes; the daemon, which had
+    /// its try when the conflict came up, no.
+    fn retries_parked(&self) -> bool {
+        true
+    }
 }
 
 /// Handlers own what they need; the bound keeps reborrowing one simple.
@@ -51,6 +57,22 @@ pub struct Conflict<'a> {
     pub sides: Vec<crate::context::Side>,
     pub slot: &'a AgentSlot,
     pub agent: &'a dyn Agent,
+    pub settings: &'a crate::state::AgentConfig,
+}
+
+impl Conflict<'_> {
+    pub fn brief(&self) -> crate::agent::ConflictBrief<'_> {
+        crate::agent::ConflictBrief {
+            dir: self.dir,
+            operation: &self.operation,
+            files: &self.files,
+            recorded: &self.recorded,
+            sides: &self.sides,
+            session: self.slot,
+            model: &self.settings.model,
+            timeout: std::time::Duration::from_secs(u64::from(self.settings.timeout_minutes) * 60),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +255,7 @@ impl<'q, 'h> Work<'q, 'h> {
             sides,
             slot: &slot,
             agent: self.agent,
+            settings: &self.q.config.agent,
         })?;
         if let Handled::Resolved { used_session } = handled {
             if used_session {
@@ -380,7 +403,8 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     fn park(&mut self, n: u32, op: ParkOp, files: Vec<String>, on: String) -> Result<bool> {
-        self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on });
+        let tried = self.handler.is_some();
+        self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on, tried });
         Ok(false)
     }
 
@@ -490,6 +514,7 @@ impl<'q, 'h> Work<'q, 'h> {
                         op: ParkOp::PushedMerge,
                         files: Vec::new(),
                         on: r,
+                        tried: false,
                     });
                 }
                 Some(r) => {
@@ -504,6 +529,7 @@ impl<'q, 'h> Work<'q, 'h> {
                             op: ParkOp::Diverged,
                             files: Vec::new(),
                             on: r,
+                            tried: false,
                         });
                     }
                 }
@@ -576,7 +602,7 @@ impl<'q, 'h> Work<'q, 'h> {
         let main = self.root(repo)?;
         let full = self.composition(repo, &main).key();
         for (n, park) in parked_out {
-            if park.on == full && self.handler.is_none() {
+            if park.on == full && !self.retries(&park) {
                 self.st.sets.get_mut(&n).unwrap().park = Some(park);
             }
         }
@@ -600,10 +626,12 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 Err((i, files)) => {
                     let n = self.clash_culprit(repo, &composition, i)?;
+                    let tried = self.handler.is_some();
                     self.st.sets.get_mut(&n).unwrap().park = Some(Park {
                         op: ParkOp::MergeHead,
                         files,
                         on: full.clone(),
+                        tried,
                     });
                 }
             }
@@ -749,7 +777,7 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             let spec = self.desired_base(n)?;
             let set = &self.st.sets[&n];
-            if set.park.as_ref().is_some_and(|p| p.on == spec.key()) && self.handler.is_none() {
+            if set.park.as_ref().is_some_and(|p| p.on == spec.key() && !self.retries(p)) {
                 continue;
             }
             if spec == set.base && set.park.is_none() {
@@ -850,6 +878,16 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     /// Mark every park as worth retrying, for `choros queue resolve`.
+    pub fn retries_parked(&self) -> bool {
+        self.handler.as_deref().is_some_and(|h| h.retries_parked())
+    }
+
+    /// Whether to try `park`'s operation again though its inputs are the
+    /// same: when asked to, or when no one has had a go at it yet.
+    fn retries(&self, park: &Park) -> bool {
+        self.retries_parked() || (self.handler.is_some() && !park.tried)
+    }
+
     pub fn unpark_conflicts(&mut self) {
         for set in self.st.sets.values_mut() {
             if set.park.as_ref().is_some_and(|p| p.op != ParkOp::Diverged) {

@@ -1,7 +1,9 @@
 //! chorosd: runs every landing queue's pass on a timer — notices merged and
 //! closed PRs, re-syncs what is behind them, rebuilds merge heads, opens the
-//! next PRs — and logs instant PRs that merged after their land. Conflicts
-//! park; it never runs Claude and never asks anything.
+//! next PRs — and logs instant PRs that merged after their land. A conflict
+//! goes to the resync agent, within the queue's limits (see
+//! `choros_land::auto_resolve`), and parks when it can't be settled; it never
+//! asks anything.
 
 use std::path::Path;
 use std::time::Duration;
@@ -9,6 +11,7 @@ use std::time::Duration;
 use choros_core::choros::CONFIG_DIR;
 use choros_core::trunks;
 use choros_land::agent::Claude;
+use choros_land::auto_resolve::AutoResolve;
 use choros_land::engine::{Env, PassReport, Work};
 use choros_land::forge::Gh;
 use choros_land::queue::{self, Queue};
@@ -83,15 +86,21 @@ fn pass(trunk: &Path, name: &str) -> Result<()> {
         agent: &claude,
         home: None,
     };
+    let mut auto = AutoResolve::new(trunk.to_path_buf(), name.to_string());
     // Someone is landing or resolving; they will finish the job, and the
     // next tick will see their result.
-    let Some(mut work) = Work::begin(&q, env.agent, None, false)? else {
+    let Some(mut work) = Work::begin(&q, env.agent, Some(&mut auto), false)? else {
         return Ok(());
     };
     let report = work.pass(env.forge);
     work.save()?;
+    let retired = queue::retire_if_orphaned(&q, &work.st)?;
+    drop(work);
+    for note in &auto.notes {
+        log(&format!("{name}: {note}"));
+    }
     describe(name, &report?);
-    if queue::retire_if_orphaned(&q, &work.st)? {
+    if retired {
         log(&format!("{name}: its workspace or branch-space is archived and nothing is open; archived it too"));
     }
     Ok(())

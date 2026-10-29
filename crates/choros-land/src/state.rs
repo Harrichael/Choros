@@ -175,12 +175,48 @@ impl Default for PrConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub rotate_after: u32,
+    /// Always passed to `claude`, so the resync agent never runs on
+    /// whatever model `claude` happens to default to.
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// The daemon hands conflicts to the agent itself, within the limits
+    /// below, rather than parking them for `choros queue resolve`.
+    #[serde(default = "yes")]
+    pub auto_resolve: bool,
+    /// How long one run may take before it's stopped.
+    #[serde(default = "default_timeout")]
+    pub timeout_minutes: u32,
+    /// How many runs the daemon may start in a day (UTC).
+    #[serde(default = "default_daily_runs")]
+    pub daily_runs: u32,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { rotate_after: 10 }
+        Self {
+            rotate_after: 10,
+            model: default_model(),
+            auto_resolve: true,
+            timeout_minutes: default_timeout(),
+            daily_runs: default_daily_runs(),
+        }
     }
+}
+
+fn default_model() -> String {
+    "opus".into()
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn default_timeout() -> u32 {
+    20
+}
+
+fn default_daily_runs() -> u32 {
+    20
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -370,6 +406,10 @@ pub struct Park {
     /// The inputs that conflicted. When they change (a dependency moved,
     /// main moved), the operation is simply tried again.
     pub on: String,
+    /// Someone, or the agent, already had a go at it. One parked where no
+    /// one could (a land, say) still gets the daemon's try.
+    #[serde(default)]
+    pub tried: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

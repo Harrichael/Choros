@@ -3,6 +3,7 @@
 //! work` makes them. GitHub is a fake that performs real merges on origin;
 //! conflicts go to a scripted handler.
 
+mod auto_resolve;
 mod branches;
 mod deps;
 mod diffbase;
@@ -233,15 +234,27 @@ impl Forge for FakeForge {
     }
 }
 
-/// Claude Code, minus Claude: forks are recorded, never run.
+/// Claude Code, minus Claude: forks are recorded, never run. Asked to
+/// resolve, it writes `fix` into each conflicted file, if it has one.
 #[derive(Default)]
 pub struct FakeAgent {
     pub forks: Mutex<Vec<(PathBuf, String, String)>>,
+    pub fix: Mutex<Option<String>>,
+    /// The model each resolve was asked to run on.
+    pub models: Mutex<Vec<String>>,
 }
 
 impl Agent for FakeAgent {
-    fn resolve(&self, _brief: &ConflictBrief) -> Result<()> {
-        Err(eyre!("tests resolve through the handler"))
+    fn resolve(&self, brief: &ConflictBrief) -> Result<()> {
+        self.models.lock().unwrap().push(brief.model.to_string());
+        let Some(fix) = self.fix.lock().unwrap().clone() else {
+            return Err(eyre!("the agent gave up"));
+        };
+        for f in brief.files {
+            std::fs::write(brief.dir.join(f), &fix)?;
+            git(brief.dir, &["add", f]);
+        }
+        Ok(())
     }
 
     fn fork_session(&self, dir: &Path, source: &str, fork: &str, _name: &str, _note: &str) -> Result<()> {
@@ -279,14 +292,7 @@ impl ConflictHandler for Scripted {
         self.seen.push(SeenConflict {
             files: c.files.clone(),
             recorded: c.recorded.len(),
-            prompt: crate::agent::conflict_prompt(&ConflictBrief {
-                dir: c.dir,
-                operation: &c.operation,
-                files: &c.files,
-                recorded: &c.recorded,
-                sides: &c.sides,
-                session: c.slot,
-            }),
+            prompt: crate::agent::conflict_prompt(&c.brief()),
         });
         Ok(Handled::Resolved { used_session: false })
     }
@@ -486,6 +492,19 @@ impl World {
         let r = crate::admin::sync(&self.env(), &self.queue(), None).unwrap();
         self.check();
         r
+    }
+
+    /// One of the daemon's passes: conflicts go to the agent, within the
+    /// queue's limits. What it noted.
+    pub fn daemon_pass(&self) -> Vec<String> {
+        let mut auto = crate::auto_resolve::AutoResolve::new(self.trunk.clone(), QUEUE.into());
+        let q = self.queue();
+        let mut work = crate::engine::Work::begin(&q, &self.agent, Some(&mut auto), true).unwrap().unwrap();
+        work.pass(&self.forge).unwrap();
+        work.save().unwrap();
+        drop(work);
+        self.check();
+        auto.notes
     }
 
     pub fn resolve(&self, handler: &mut Scripted) -> PassReport {

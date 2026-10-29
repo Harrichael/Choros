@@ -165,7 +165,7 @@ impl Work<'_, '_> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        if parked_here.as_deref() == Some(key.as_str()) && self.handler.is_none() {
+        if parked_here.as_deref() == Some(key.as_str()) && !self.retries_parked() {
             return Ok(());
         }
         let tips: Vec<String> = heads.iter().map(|(_, h)| h.clone()).collect();

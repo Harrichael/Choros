@@ -65,6 +65,10 @@ private_sets = true                 # push queued (not yet front) landing branch
 draft = true                        # open front PRs as drafts
 [agent]
 rotate_after = 10                   # resync-agent runs before its session is rotated
+model = "opus"                      # always passed to claude, never its default
+auto_resolve = true                 # the daemon hands conflicts to the agent (see Conflicts)
+timeout_minutes = 20                # a run past this is stopped
+daily_runs = 20                     # the daemon's agent runs per day (UTC)
 ```
 
 Each repo lands on its origin's default branch. Queues made when a queue held
@@ -372,7 +376,8 @@ failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
 `gh` runs with the trunk's account (`GH_CONFIG_DIR=<trunk>/.choros-config/gh`
-when present). The daemon never runs Claude.
+when present). The daemon runs Claude only as the resync agent, for the
+conflicts it settles on its own (*Conflicts*).
 
 Branch cleanup: GitHub deletes merged PR branches itself when the repo setting
 is on. Choros deletes what GitHub never sees as merged: branches of dropped
@@ -381,9 +386,20 @@ sets and the merge head of a deleted queue.
 ## Conflicts
 
 A conflict can arise in a fork land's replay, a daemon re-sync, a
-multi-dependency base, the merge head, or merging main into a public set. The
-daemon parks; `choros status` shows it; `choros queue resolve <queue>` asks,
-every time:
+multi-dependency base, the merge head, or merging main into a public set.
+
+**The daemon resolves on its own** with the resync agent, unless the queue's
+`agent.auto_resolve` is off. It trusts a fix only once the repo's check passes
+on it; otherwise it parks, and keeps the fix and the check's output in
+`<trunk>/.choros-config/queues/<queue>/auto-resolve-<repo>.log`. Limits: one
+try per conflict (a conflict parked at a land, with no one to ask, gets that
+try on the next pass; one already tried waits for its inputs to change);
+`agent.daily_runs` runs a day; `agent.timeout_minutes` a run. The agent and
+its check run under the queue's lock, so lands into the queue wait meanwhile.
+What it did goes to the daemon's log.
+
+What the daemon leaves parked, `choros status` shows, and `choros queue
+resolve <queue>` asks about, every time:
 
 - **a)** Trust the agent: it resolves, Choros checks, then pushes.
 - **b)** The agent resolves, the diff is printed, then you choose push or
@@ -425,11 +441,11 @@ A label the hook fails on, or prints nothing for, is left out.
 conflict markers (`git diff --check`). A resolution that fails them stays
 parked.
 
-**The resync agent** runs only from `choros queue resolve`, in your terminal,
-in `<trunk>/landing/<queue>/_sync/<repo>/`:
+**The resync agent** runs from the daemon or from `choros queue resolve`, in
+`<trunk>/landing/<queue>/_sync/<repo>/`, on the queue's `agent.model`:
 
 ```
-claude -p --resume <id> --permission-mode acceptEdits \
+claude -p --model <model> --resume <id> --permission-mode acceptEdits \
   --allowedTools 'Read,Edit,Write,Bash(git status*),Bash(git diff*),Bash(git add*),Bash(git log*),Bash(git show*),Bash(git cherry-pick --continue*),Bash(git rebase --continue*),Bash(git merge --continue*)' \
   --disallowedTools 'Bash(git push*)' --output-format json "<canned prompt>"
 ```
@@ -441,8 +457,7 @@ notes live in a `CLAUDE.md` in the sync clone. The canned prompt names the
 operation, conflicted files, what each side is for, and any recorded
 resolution.
 Choros, not the agent, pushes. Git in the sync clone runs with
-`core.hooksPath=/dev/null` and `commit.gpgSign=false`. For now there is no
-test gate (a configurable check command is a later addition).
+`core.hooksPath=/dev/null` and `commit.gpgSign=false`.
 
 ## Landings and sessions
 
@@ -692,7 +707,7 @@ Review (Opus 5.5) adopted as defaults, user may veto:
 - Raw-terminal session selection: sessions in scope modified since the previous land.
 - A workspace-scoped queue replaces the root queue for that repo; cross-queue edges are cross-repo ordering only. (Superseded by round 4: one queue takes every repo.)
 - Lands into a queue with parked sets are accepted.
-- The daemon never runs Claude; the agent runs from `choros queue resolve`.
+- The daemon never runs Claude; the agent runs from `choros queue resolve`. (Superseded: the daemon resolves on its own, within limits.)
 - Landing folders from `land continue` are archived on merge too.
 - Sessions are forked eagerly at land time.
 

@@ -572,6 +572,8 @@ fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
         Some(&config.agent.rotate_after.to_string()),
         |a| a.parse().map_err(|_| eyre!("answer a number")),
     )?;
+    config.agent.model = question("the resync agent's model", Some(&config.agent.model), |a| Ok(a.to_string()))?;
+    config.agent.auto_resolve = yes_no("let the daemon resolve conflicts with the agent", config.agent.auto_resolve)?;
     let prs = question("PRs to build on until they merge, as repo#N (app#40,41 for two)", Some("none"), |a| {
         let a = if a == "none" { "" } else { a };
         Ok(parse_pr_list(a, None)?.iter().map(PrSpec::to_string).collect::<Vec<_>>())
@@ -817,14 +819,7 @@ impl ConflictHandler for Interactive {
             .next()
             .unwrap_or('s'),
         };
-        let brief = || ConflictBrief {
-            dir: c.dir,
-            operation: &c.operation,
-            files: &c.files,
-            recorded: &c.recorded,
-            sides: &c.sides,
-            session: c.slot,
-        };
+        let brief = || c.brief();
         match choice {
             'a' => {
                 c.agent.resolve(&brief())?;
@@ -863,7 +858,7 @@ impl ConflictHandler for Interactive {
 /// conflict in progress, and let the user drive.
 fn drive(brief: &ConflictBrief) -> Result<()> {
     let mut cmd = Command::new("claude");
-    cmd.current_dir(brief.dir);
+    cmd.current_dir(brief.dir).args(["--model", brief.model]);
     if brief.session.fresh {
         cmd.args(["--session-id", &brief.session.id]);
     } else {

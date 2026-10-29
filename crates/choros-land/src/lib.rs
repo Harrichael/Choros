@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod agent;
+pub mod auto_resolve;
 pub mod branch;
 pub mod context;
 pub mod diffbase;

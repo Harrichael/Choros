@@ -16,6 +16,9 @@ pub struct ConflictBrief<'a> {
     pub recorded: &'a [String],
     pub sides: &'a [crate::context::Side],
     pub session: &'a AgentSlot,
+    pub model: &'a str,
+    /// Past this the run is stopped and counts as failed.
+    pub timeout: std::time::Duration,
 }
 
 /// The session to use, and whether it has to be created.
@@ -43,7 +46,8 @@ impl Agent for Claude {
     fn resolve(&self, brief: &ConflictBrief) -> Result<()> {
         let prompt = conflict_prompt(brief);
         let mut cmd = Command::new("claude");
-        cmd.current_dir(brief.dir).args(["-p", "--output-format", "json"]);
+        cmd.current_dir(brief.dir)
+            .args(["-p", "--output-format", "json", "--model", brief.model]);
         if brief.session.fresh {
             cmd.args(["--session-id", &brief.session.id]);
         } else {
@@ -58,7 +62,9 @@ impl Agent for Claude {
             "Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
         ]);
         cmd.arg(prompt);
-        let out = cmd.output()?;
+        let out = output_within(cmd, brief.timeout)?.ok_or_else(|| {
+            eyre!("the resync agent ran past {} minutes and was stopped", brief.timeout.as_secs() / 60)
+        })?;
         if !out.status.success() {
             return Err(eyre!(
                 "the resync agent failed:\n{}",
@@ -82,6 +88,42 @@ impl Agent for Claude {
         }
         Ok(())
     }
+}
+
+/// `cmd`'s output, or `None` when it ran past `limit` and was killed.
+pub fn output_within(mut cmd: Command, limit: std::time::Duration) -> Result<Option<std::process::Output>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Drained as it runs, so a chatty child never blocks on a full pipe.
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    Ok(Some(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    }))
 }
 
 pub fn conflict_prompt(brief: &ConflictBrief) -> String {
@@ -159,4 +201,23 @@ fn push_context(p: &mut String, brief: &ConflictBrief) {
          - landing-set (landing-N): one land's commits from one repo; it becomes one PR.\n\
          - front: the sets whose dependencies have all merged; they get PRs.\n",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A run past its limit is stopped; one within it is read whole.
+    #[test]
+    fn a_run_past_its_limit_is_stopped() {
+        let mut slow = Command::new("sh");
+        slow.args(["-c", "sleep 5"]);
+        assert!(output_within(slow, Duration::from_millis(200)).unwrap().is_none());
+
+        let mut quick = Command::new("sh");
+        quick.args(["-c", "echo done"]);
+        let out = output_within(quick, Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
+    }
 }
