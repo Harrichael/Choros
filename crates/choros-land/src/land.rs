@@ -870,15 +870,15 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
         let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
         work.ensure_repo(repo)?;
         let live = graph::live_in(&work.st, repo);
-        if live.is_empty() {
-            return Ok(Least::Fallback(None));
-        }
+        // Parked or not: the commits are on top of it.
         let mut start: BTreeMap<u32, String> = BTreeMap::new();
-        for m in &live {
-            let source = &work.st.sets[m].source;
-            if source.workspace == ws && source.repo == repo {
+        for (m, set) in &work.st.sets {
+            if set.is_open() && set.source.workspace == ws && set.source.repo == repo {
                 start.insert(*m, "this workspace's earlier set".into());
             }
+        }
+        if live.is_empty() && start.is_empty() {
+            return Ok(Least::Fallback(None));
         }
         let sync = work.git(repo);
         sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
@@ -1052,7 +1052,9 @@ fn place(
     loop {
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
-        if c.live.iter().all(|m| mine.contains(m)) {
+        // Needing every live set is landing on the merge head, unless it
+        // also needs a parked one the merge head goes without.
+        if c.live.iter().all(|m| mine.contains(m)) && deps.iter().all(|d| c.live.contains(d)) {
             return Ok(Err(None));
         }
         let main = work.root(c.repo)?;

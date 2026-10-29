@@ -21,6 +21,9 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     pub check: Option<String>,
+    /// Gone (a plain land is what `deps = "auto"` was); read only to say so.
+    #[serde(default)]
+    deps: Option<toml::Value>,
 }
 
 pub fn path(trunk: &Path) -> PathBuf {
@@ -34,5 +37,11 @@ pub fn read(trunk: &Path, repo: &str) -> Result<RepoConfig> {
     }
     let mut all: BTreeMap<String, RepoConfig> = toml::from_str(&std::fs::read_to_string(&path)?)
         .map_err(|e| eyre!("{}: {e}", path.display()))?;
+    if let Some(old) = all.iter().find_map(|(name, c)| c.deps.is_some().then_some(name)) {
+        return Err(eyre!(
+            "{}: drop `deps` under [{old}]; a plain land already lands on as little as it needs",
+            path.display()
+        ));
+    }
     Ok(all.remove(repo).unwrap_or_default())
 }

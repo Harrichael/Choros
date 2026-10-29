@@ -499,7 +499,8 @@ impl World {
     pub fn daemon_pass(&self) -> Vec<String> {
         let mut auto = crate::auto_resolve::AutoResolve::new(self.trunk.clone(), QUEUE.into());
         let q = self.queue();
-        let mut work = crate::engine::Work::begin(&q, &self.agent, Some(&mut auto), true).unwrap().unwrap();
+        let handler: Option<&mut dyn ConflictHandler> = q.config.agent.auto_resolve.then_some(&mut auto as _);
+        let mut work = crate::engine::Work::begin(&q, &self.agent, handler, true).unwrap().unwrap();
         work.pass(&self.forge).unwrap();
         work.save().unwrap();
         drop(work);

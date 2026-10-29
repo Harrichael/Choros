@@ -90,9 +90,9 @@ fn work_that_undoes_a_set_lands_behind_it() {
 
 /// Two pieces of work that edit the same line, neither built on the other:
 /// either could merge first, so the second lands beside the first, not
-/// behind it. The merge head can't hold both until the pair is resolved, so
-/// the new set waits out of it, its PR unopened, and the daemon's agent
-/// settles the pair; then both are at the front.
+/// behind it. Both PRs open at once. The merge head can't hold both until
+/// the pair is resolved, so the new set waits out of it until the daemon's
+/// agent settles the pair.
 #[test]
 fn work_that_only_clashes_lands_beside() {
     let w = World::new();
@@ -107,7 +107,8 @@ fn work_that_only_clashes_lands_beside() {
     let st = w.state();
     assert_eq!(st.sets[&2].deps, []);
     assert_eq!(st.sets[&2].conflicts_with, [1]);
-    assert!(st.sets[&2].park.is_some() && st.sets[&2].pr.is_none());
+    assert!(st.sets[&2].park.is_some());
+    assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_some(), "both at the front");
     assert_eq!(
         out.landed[0].notes[0],
         "beside appq/landing-1: they clash in README, but either can merge first; the resync agent \
@@ -120,7 +121,6 @@ fn work_that_only_clashes_lands_beside() {
     assert!(st.sets[&2].park.is_none());
     let mh = st.repos[REPO].merge_head.as_ref().unwrap();
     assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
-    assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_some(), "both at the front");
 }
 
 /// No conflict doesn't mean no need: these commits use a file a queued set
@@ -253,4 +253,26 @@ fn the_check_runs_with_the_queue_let_go() {
     w.land_plain(&one).unwrap();
 
     assert_eq!(w.state().sets.len(), 1);
+}
+
+/// A workspace's earlier set is parked out of the merge head, and its next
+/// commits build on that set's lines. They land on it, not on a merge head
+/// that goes without it.
+#[test]
+fn a_land_goes_on_its_own_parked_set() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    w.land_plain(&one).unwrap();
+    w.commit(&two, "README", "two\n");
+    w.land_plain(&two).unwrap();
+    assert!(w.state().sets[&2].park.is_some());
+    w.commit(&two, "README", "two, more\n");
+
+    w.land_plain(&two).unwrap();
+
+    let st = w.state();
+    assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
+    assert_eq!(w.file_at(&st.sets[&3].tip, "README").as_deref(), Some("two, more\n"));
 }

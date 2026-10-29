@@ -211,8 +211,8 @@ A plain land lands on as little of the queue as the commits need:
    skipped sets that changed those files are added.
 3. Test-merge the result against every other leaf. A set it clashes with
    side by side isn't needed — either could merge first — so the land goes
-   beside it, flagging the pair (`conflicts_with`). The new set waits out of
-   the merge head, its PR unopened, until the pair is resolved there: the
+   beside it, flagging the pair (`conflicts_with`). Both PRs open; the new
+   set waits out of the merge head until the pair is resolved there: the
    daemon's resync agent does that on its next pass (*Conflicts*), and
    whichever PR merges first, the other takes main in with the same
    resolution. To land behind it instead, pick it with `--deps`.
@@ -397,8 +397,9 @@ multi-dependency base, the merge head, or merging main into a public set.
 `agent.auto_resolve` is off. It trusts a fix only once the repo's check passes
 on it; otherwise it parks, and keeps the fix and the check's output in
 `<trunk>/.choros-config/queues/<queue>/auto-resolve-<repo>.log`. Limits: one
-try per conflict (a conflict parked at a land, with no one to ask, gets that
-try on the next pass; one already tried waits for its inputs to change);
+try per conflict, meaning the same operation on the same commits (a conflict
+parked with no one to ask, or past the day's runs, gets that try on a later
+pass; one already tried waits for its inputs to change);
 `agent.daily_runs` runs a day; `agent.timeout_minutes` a run. The agent and
 its check run under the queue's lock, so lands into the queue wait meanwhile.
 What it did goes to the daemon's log.

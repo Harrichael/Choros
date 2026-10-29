@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::state::{Dep, LandingSet, QueueState, SetStatus};
+use crate::state::{Dep, LandingSet, ParkOp, QueueState, SetStatus};
 
 /// Every same-queue dependency of a set, whatever its repo.
 pub fn set_deps(set: &LandingSet) -> impl Iterator<Item = u32> + '_ {
@@ -163,11 +163,18 @@ pub fn has_cycle(state: &QueueState) -> bool {
     state.sets.keys().any(|n| ancestors_any_repo(state, *n).contains(n))
 }
 
-/// Queued, unblocked sets whose dependencies have all merged. `cross_merged`
-/// answers for dependencies in other queues.
+/// Queued sets whose dependencies have all merged and that aren't parked.
+/// `cross_merged` answers for dependencies in other queues. A set parked
+/// only out of the merge head is at the front all the same: its own branch
+/// is fine, and either of a clashing pair can merge first, the other then
+/// taking main in.
 pub fn front(state: &QueueState, cross_merged: &dyn Fn(&str, u32) -> bool) -> Vec<u32> {
-    live(state)
+    topo(state)
         .into_iter()
+        .filter(|n| {
+            let set = &state.sets[n];
+            set.is_open() && set.park.as_ref().is_none_or(|p| p.op == ParkOp::MergeHead)
+        })
         .filter(|n| {
             state.sets[n].deps.iter().all(|d| match d {
                 Dep::Set(m) => state.sets.get(m).is_none_or(|s| s.status == SetStatus::Merged),

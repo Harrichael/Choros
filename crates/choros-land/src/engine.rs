@@ -80,7 +80,10 @@ pub enum Handled {
     /// `used_session`: the resync agent's session was started or resumed
     /// (by the agent, or by you driving it), so it now exists to resume.
     Resolved { used_session: bool },
+    /// It had its go and left the conflict as it was.
     Declined,
+    /// It didn't look at it this time; the park waits for a later go.
+    Deferred,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +120,9 @@ pub struct Work<'q, 'h> {
     pub st: QueueState,
     pub agent: &'q dyn Agent,
     pub handler: Handler<'h>,
+    /// Whether the handler had a go at the conflict the last build or
+    /// replay stopped on: what a park made from it records.
+    conflict_tried: bool,
     _lock: QueueLock,
 }
 
@@ -153,6 +159,7 @@ impl<'q, 'h> Work<'q, 'h> {
             st,
             agent,
             handler,
+            conflict_tried: false,
             _lock: lock,
         };
         work.settle_pending_pushes()?;
@@ -237,6 +244,7 @@ impl<'q, 'h> Work<'q, 'h> {
             self.record_resolution(repo, &files)?;
             return Ok(None);
         }
+        self.conflict_tried = false;
         let Some(handler) = self.handler.as_deref_mut() else {
             git.abort_in_progress()?;
             return Ok(Some(files));
@@ -269,6 +277,7 @@ impl<'q, 'h> Work<'q, 'h> {
             self.record_resolution(repo, &files)?;
             return Ok(None);
         }
+        self.conflict_tried = handled == Handled::Declined;
         git.abort_in_progress()?;
         Ok(Some(files))
     }
@@ -403,7 +412,7 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     fn park(&mut self, n: u32, op: ParkOp, files: Vec<String>, on: String) -> Result<bool> {
-        let tried = self.handler.is_some();
+        let tried = self.conflict_tried;
         self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on, tried });
         Ok(false)
     }
@@ -626,12 +635,11 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 Err((i, files)) => {
                     let n = self.clash_culprit(repo, &composition, i)?;
-                    let tried = self.handler.is_some();
                     self.st.sets.get_mut(&n).unwrap().park = Some(Park {
                         op: ParkOp::MergeHead,
                         files,
                         on: full.clone(),
-                        tried,
+                        tried: self.conflict_tried,
                     });
                 }
             }
@@ -756,7 +764,9 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.is_public() {
                 let repo = set.repo().to_string();
                 if set.park.as_ref().is_some_and(|p| {
-                    p.op == ParkOp::MainIntoPublic && p.on == self.main_sha(&repo).unwrap_or_default()
+                    p.op == ParkOp::MainIntoPublic
+                        && p.on == self.main_sha(&repo).unwrap_or_default()
+                        && !self.retries(p)
                 }) {
                     continue;
                 }

@@ -4,10 +4,13 @@
 //! with no handler, for `choros queue resolve`.
 //!
 //! The limits, from the queue's `[agent]` settings: `auto_resolve` turns it
-//! on; one try per conflict (the same operation on the same two commits);
-//! `daily_runs` agent runs a day; `timeout_minutes` a run. The agent and the
+//! on (the daemon attaches no handler otherwise); one try per conflict (the
+//! same operation on the same two commits); `daily_runs` agent runs a day;
+//! `timeout_minutes` a run. A conflict met past the day's runs is deferred,
+//! not declined, so it gets its try once the day turns. The agent and the
 //! check run under the queue's lock, so lands into the queue wait meanwhile.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use color_eyre::eyre::Result;
@@ -26,6 +29,10 @@ pub struct AutoResolve {
     pub queue: String,
     /// What happened, a line each, for the daemon's log.
     pub notes: Vec<String>,
+    /// Fixes that passed the check this pass, as trees by conflict. A merge
+    /// head rebuilt after a later clash meets an earlier one again, and
+    /// rerere can't replay every kind of fix (a delete against an edit).
+    settled: BTreeMap<String, String>,
 }
 
 /// What the daemon has already spent, in `auto-resolve.json` beside the
@@ -36,6 +43,9 @@ struct Ledger {
     runs: u32,
     /// Conflicts already handed over, newest last.
     tried: Vec<String>,
+    /// The day's runs ran out and the log said so; once is enough.
+    #[serde(default)]
+    spent_noted: bool,
 }
 
 /// Enough to stop a conflict that keeps coming back from being tried
@@ -48,6 +58,7 @@ impl AutoResolve {
             trunk,
             queue,
             notes: Vec::new(),
+            settled: BTreeMap::new(),
         }
     }
 
@@ -76,23 +87,34 @@ impl AutoResolve {
         if ledger.day != today {
             ledger.day = today;
             ledger.runs = 0;
+            ledger.spent_noted = false;
+        }
+        if let Some(tree) = self.settled.get(&key) {
+            git.run(&["read-tree", "--reset", "-u", tree])?;
+            return Ok(Handled::Resolved { used_session: false });
         }
         if ledger.tried.contains(&key) {
+            self.notes
+                .push(format!("left {what} parked: the agent already had its try at it"));
             return Ok(Handled::Declined);
         }
         if ledger.runs >= q.config.agent.daily_runs {
-            self.notes.push(format!(
-                "left {what} parked: the agent already ran {} times today",
-                ledger.runs
-            ));
-            return Ok(Handled::Declined);
+            if !ledger.spent_noted {
+                self.notes.push(format!(
+                    "left {what} parked until tomorrow (UTC): the agent already ran {} times today",
+                    ledger.runs
+                ));
+                ledger.spent_noted = true;
+                save(&path, &ledger)?;
+            }
+            return Ok(Handled::Deferred);
         }
         // Spent before the run, so a crash midway can't buy another try.
         ledger.runs += 1;
-        ledger.tried.push(key);
+        ledger.tried.push(key.clone());
         let drop = ledger.tried.len().saturating_sub(TRIED_KEPT);
         ledger.tried.drain(..drop);
-        std::fs::write(&path, serde_json::to_string_pretty(&ledger)?)?;
+        save(&path, &ledger)?;
 
         let log = q.dir().join(format!("auto-resolve-{}.log", c.repo));
         if let Err(e) = c.agent.resolve(&c.brief()) {
@@ -134,18 +156,20 @@ impl AutoResolve {
             ));
             return Ok(Handled::Declined);
         }
+        self.settled.insert(key, tree);
         self.notes
             .push(format!("the agent settled {what}; `{check}` passed"));
         Ok(Handled::Resolved { used_session: true })
     }
 }
 
+fn save(path: &std::path::Path, ledger: &Ledger) -> Result<()> {
+    crate::state::write_atomic(path, serde_json::to_string_pretty(ledger)?.as_bytes())
+}
+
 impl ConflictHandler for AutoResolve {
     fn resolve(&mut self, c: &Conflict) -> Result<Handled> {
         let q = Queue::open(&self.trunk, &self.queue)?;
-        if !q.config.agent.auto_resolve {
-            return Ok(Handled::Declined);
-        }
         self.try_resolve(&q, c)
     }
 
