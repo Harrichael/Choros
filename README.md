@@ -265,7 +265,8 @@ choros repo sync                   # catch up when the prompt shows ⇣sync
 choros land archive                # land, then archive the workspace
 choros land continue -i            # land beside the queue (pick dependencies)
 choros land continue --deps auto   # on only what the commits need; needs a check in repos.toml
-choros status                      # queues, sets, PRs, parked conflicts
+choros status                      # queues, sets as a graph, PRs, parked conflicts
+choros queue appq --landing        # just appq's sets
 choros queue resolve appq          # settle parked conflicts (a/b/c)
 choros landing open 3              # resume the session forked at landing-3; review fixes go here
 choros queue base add appq app#41  # build on app's PR #41 while it's in review

@@ -51,6 +51,10 @@ pub struct SetLine {
     pub branch: String,
     pub state: &'static str,
     pub title: Option<String>,
+    /// What the text view calls an open set; `title` stays what was given
+    /// at land, as the JSON contract has it.
+    #[serde(skip)]
+    pub pr_title: Option<String>,
     pub pr: Option<PrRef>,
     /// The open PR's review, once a pass has seen it.
     pub review: Option<PrReview>,
@@ -176,6 +180,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             branch: set.branch(name),
             state,
             title: set.title.clone(),
+            pr_title: set.is_open().then(|| q.pr_title(set).ok()).flatten(),
             pr: set.pr.clone(),
             review: set.review.clone().filter(|_| set.is_open()),
             sessions: set.sessions.clone(),

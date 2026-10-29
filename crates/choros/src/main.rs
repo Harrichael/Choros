@@ -4,6 +4,7 @@ mod here;
 mod land_cli;
 mod ls;
 mod queue_tui;
+mod set_graph;
 mod settings_tui;
 mod tui;
 mod ui;

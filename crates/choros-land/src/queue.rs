@@ -8,7 +8,7 @@ use choros_core::{git as core_git, registry};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::git::Git;
-use crate::state::{self, QueueConfig, QueueState, RepoState, Scope, SetStatus};
+use crate::state::{self, LandingSet, QueueConfig, QueueState, RepoState, Scope, SetStatus};
 
 pub struct Queue {
     pub trunk: PathBuf,
@@ -184,6 +184,21 @@ impl Queue {
 
     pub fn git(&self, repo: &str) -> Git {
         Git::owned(&self.sync_dir(repo))
+    }
+
+    /// The title `set`'s PR opens with: the one given at land, else its
+    /// first commit's subject.
+    pub fn pr_title(&self, set: &LandingSet) -> Result<String> {
+        if let Some(t) = &set.title {
+            return Ok(t.clone());
+        }
+        let git = self.git(set.repo());
+        let first = git
+            .commits(&set.base_sha, &set.tip)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| eyre!("{} has no commits of its own", set.branch(&self.name)))?;
+        git.subject(&first)
     }
 
     pub fn landing_dir(&self, n: u32) -> PathBuf {

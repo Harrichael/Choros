@@ -444,9 +444,16 @@ reviews.
 `choros status`: inside a workspace, the queues it is bound to; in a
 branch-space, the queues scoped to it or below and those its workspaces are
 bound to; at the trunk (or with `--all`), every queue there; outside any
-trunk, every queue of every registered trunk. Per queue: each set's state (queued / front with PR link / merged / parked
-and why), deps, flagged conflicting forks, dirty landing folders, and
-workspaces that need a sync.
+trunk, every queue of every registered trunk. Per queue, the open sets are
+drawn as `git log --graph` draws commits: each set above the sets it lands
+after, and those after nothing in the queue above main. Each set's line
+gives its number, state (queued / front / closed), PR title, repo, PR
+number and review; lines under it say what's wrong (parked and why, waiting
+on a parked or closed set, flagged conflicting forks, a dirty landing
+folder) or name a set in another queue it waits for. Merged sets are
+counted, not drawn. Then come the diffbase and the workspaces that need a
+sync; `--landing` leaves those out, as does `choros queue NAME --landing`,
+which shows one queue.
 
 `choros status --json` is the same report for tools, merged sets included:
 `{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,

@@ -655,17 +655,7 @@ impl<'q, 'h> Work<'q, 'h> {
             git.push_lease("origin", &set.tip, &branch, set.remote.as_deref())?;
             self.st.sets.get_mut(&n).unwrap().remote = Some(set.tip.clone());
         }
-        let title = match &set.title {
-            Some(t) => t.clone(),
-            None => {
-                let first = git
-                    .commits(&set.base_sha, &set.tip)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| eyre!("{branch} has no commits of its own"))?;
-                git.subject(&first)?
-            }
-        };
+        let title = self.q.pr_title(&set)?;
         // A PR opened by a pass that died before saving is still there; GitHub
         // would refuse a second one for the same branch.
         if let Some(pr) = forge.find_open_pr(git.dir(), &branch)? {

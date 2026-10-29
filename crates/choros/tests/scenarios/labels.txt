@@ -13,7 +13,8 @@ $ choros land continue --label tasks/xJ77 --label "b, c" --label tasks/xJ77
 ...
 $ choros status
 appq (app) @ $ROOT/trunk
-  front    appq/landing-1 (app)  https://github.test/pull/1  [tasks/xJ77, b, c]
+* landing-1  front   write a (app)  #1  [tasks/xJ77, b, c]
+* main
 $ choros status --json | grep -A3 '"labels"'
           "labels": [
             "tasks/xJ77",

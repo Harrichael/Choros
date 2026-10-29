@@ -1,6 +1,7 @@
 //! `choros land`, `sync`, `status`, `queue …` and `landing open`: the CLI
 //! over the landing queue engine.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,7 @@ use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::choros;
+use crate::set_graph;
 use choros_core::space;
 
 /// What the engine needs, owned, so an `Env` can borrow it.
@@ -262,12 +264,13 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         print!("{}", status::prompt_token(&cwd));
         return Ok(());
     }
-    let (mut all, mut json) = (false, false);
+    let (mut all, mut json, mut landings_only) = (false, false, false);
     for a in &args {
         match a.as_str() {
             "--all" => all = true,
             "--json" => json = true,
-            _ => usage("choros status [--prompt | --all] [--json]"),
+            "--landing" => landings_only = true,
+            _ => usage("choros status [--prompt | --all] [--json | --landing]"),
         }
     }
     let config = choros_core::trunks::config_home();
@@ -288,51 +291,88 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         return Ok(());
     }
     for q in report {
-        print_queue_status(&q);
+        print_queue_status(&q, landings_only);
     }
     Ok(())
 }
 
-/// A queue, its open sets and what needs doing about them, for `status` and
-/// `queue NAME`.
-fn print_queue_status(q: &status::QueueStatus) {
+/// A queue, its open sets drawn as a graph of what lands after what, and
+/// what needs doing about them, for `status` and `queue NAME`. With
+/// `landings_only`, just the sets.
+fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
     let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
     println!("{} ({repos}) @ {}", q.name, q.trunk.display());
-    // A merged dependency no longer holds anything back; JSON keeps it.
-    let merged: Vec<String> =
-        q.sets.iter().filter(|s| s.state == "merged").map(|s| format!("landing-{}", s.n)).collect();
-    for s in &q.sets {
-        if s.state == "merged" {
-            continue;
-        }
-        let mut line = format!("  {:<8} {} ({})", s.state, s.branch, s.repo);
-        let waiting: Vec<&str> = s.deps.iter().filter(|d| !merged.contains(d)).map(String::as_str).collect();
-        if !waiting.is_empty() {
-            line.push_str(&format!("  after {}", waiting.join(", ")));
-        }
+    // A merged set no longer holds anything back; JSON keeps it.
+    let open: BTreeMap<u32, &status::SetLine> =
+        q.sets.iter().filter(|s| s.state != "merged").map(|s| (s.n, s)).collect();
+    let after: BTreeMap<u32, Vec<u32>> = open
+        .iter()
+        .map(|(n, s)| (*n, s.deps.iter().filter_map(|d| d.strip_prefix("landing-")?.parse().ok()).collect()))
+        .collect();
+    let width = open.keys().map(|n| format!("landing-{n}").len()).max().unwrap_or(0);
+    for row in set_graph::draw(&after) {
+        let (n, graph, under) = match row {
+            set_graph::Row::Edges(graph) => {
+                println!("{graph}");
+                continue;
+            }
+            set_graph::Row::Main(graph) => {
+                println!("{graph}main");
+                continue;
+            }
+            set_graph::Row::Set { n, graph, under } => (n, graph, under),
+        };
+        let s = open[&n];
+        let mut line = format!(
+            "{graph}{:<width$}  {:<6}  {} ({})",
+            format!("landing-{n}"),
+            s.state,
+            s.pr_title.as_deref().unwrap_or(""),
+            s.repo
+        );
         if let Some(pr) = &s.pr {
-            line.push_str(&format!("  {}", pr.url));
+            line.push_str(&format!("  #{}", pr.number));
+        }
+        if let Some(r) = &s.review {
+            for (on, word) in [(r.draft, "draft"), (r.unanswered, "unanswered"), (r.approved, "approved")] {
+                if on {
+                    line.push_str(&format!(" {word}"));
+                }
+            }
         }
         if !s.labels.is_empty() {
             line.push_str(&format!("  [{}]", s.labels.join(", ")));
         }
+        println!("{line}");
+        // Sets in this queue are lanes in the graph; one in another queue
+        // can only be named.
+        let elsewhere: Vec<&str> = s.deps.iter().filter(|d| d.contains('/')).map(String::as_str).collect();
+        let mut notes = Vec::new();
+        if !elsewhere.is_empty() {
+            notes.push(format!("after {}", elsewhere.join(", ")));
+        }
         if let Some(p) = &s.park {
-            line.push_str(&format!("  ! parked ({:?}) {}", p.op, p.files.join(", ")));
+            notes.push(format!("! parked ({:?}) {}", p.op, p.files.join(", ")));
         } else if s.blocked {
-            line.push_str("  (waiting on a parked or closed set)");
+            notes.push("waiting on a parked or closed set".into());
         }
         if !s.conflicts_with.is_empty() {
             let with: Vec<String> = s.conflicts_with.iter().map(|n| format!("landing-{n}")).collect();
-            line.push_str(&format!("  clashes with {}", with.join(", ")));
+            notes.push(format!("clashes with {}", with.join(", ")));
         }
         if s.landing_dirty {
-            line.push_str("  (landing folder has uncommitted changes)");
+            notes.push("landing folder has uncommitted changes".into());
         }
-        println!("{line}");
+        for note in notes {
+            println!("{under}  {note}");
+        }
     }
-    let merged = q.sets.iter().filter(|s| s.state == "merged").count();
+    let merged = q.sets.len() - open.len();
     if merged > 0 {
         println!("  ({merged} merged)");
+    }
+    if landings_only {
+        return;
     }
     print_diffbase(q);
     for ns in &q.needs_sync {
@@ -453,12 +493,12 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        [name] if !name.starts_with('-') => {
-            print_queue_status(&status::queue_status(&trunk, name)?);
+        [name] | [name, "--landing"] | ["--landing", name] if !name.starts_with('-') => {
+            print_queue_status(&status::queue_status(&trunk, name)?, a.contains(&"--landing"));
             Ok(())
         }
         _ => usage(
-            "choros queue NAME | queue -i [NAME] | queue ls [--all] \
+            "choros queue NAME [--landing] | queue -i [NAME] | queue ls [--all] \
              | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
              | queue base NAME | queue base add|rm NAME REPO#N[,N…]…",
         ),

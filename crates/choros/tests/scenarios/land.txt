@@ -15,7 +15,8 @@ app → appq/landing-1, at the front: https://github.test/pull/1
     landing: $ROOT/trunk/landing/appq/landing-1
 $ choros status
 appq (app) @ $ROOT/trunk
-  front    appq/landing-1 (app)  https://github.test/pull/1
+* landing-1  front   write a (app)  #1
+* main
 
 # Landing again makes a new set, and says where changes to the open one go.
 $ echo "a, reviewed" > a.txt && git commit -qam "review a"
@@ -23,6 +24,14 @@ $ choros land continue
 app → appq/landing-2, queued
     landing: $ROOT/trunk/landing/appq/landing-2
     appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
+
+# Status draws the sets as git log --graph draws commits, each above the
+# set it lands after.
+$ choros status
+appq (app) @ $ROOT/trunk
+* landing-2  queued  review a (app)
+* landing-1  front   write a (app)  #1
+* main
 
 # Once the front merges, the next set opens its PR.
 $ gh pr merge 1 --squash
@@ -32,6 +41,14 @@ appq: re-synced landing-2
 appq: opened PRs for landing-2
 $ choros status
 appq (app) @ $ROOT/trunk
-  front    appq/landing-2 (app)  https://github.test/pull/2
+* landing-2  front   review a (app)  #2
+* main
   (1 merged)
   ⇣ $ROOT/trunk/ws (app) needs `choros repo sync`
+
+# --landing shows the sets alone.
+$ choros queue appq --landing
+appq (app) @ $ROOT/trunk
+* landing-2  front   review a (app)  #2
+* main
+  (1 merged)
