@@ -1,4 +1,5 @@
-//! A queue on disk: where its files live, its lock, and its sync clone.
+//! A queue on disk: where its files live, its lock, its sync clone, and the
+//! worktree its checks run in.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ pub struct Queue {
 /// Held for the duration of one short step; dropping it unlocks.
 pub struct QueueLock(#[allow(dead_code)] File);
 
-const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "merge-head", crate::workspace::NO_QUEUE];
+const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "_check", "merge-head", crate::workspace::NO_QUEUE];
 
 pub fn queues_dir(trunk: &Path) -> PathBuf {
     trunk.join(QUEUES_REL)
@@ -186,6 +187,50 @@ impl Queue {
         Git::owned(&self.sync_dir(repo))
     }
 
+    /// Run `check` on `tip`: `Err` with its output when it fails. It runs in
+    /// a worktree of the sync clone kept at one path, so build output carries
+    /// over between runs, and under a lock of its own rather than the
+    /// queue's: a slow check holds up only other checks of the repo.
+    pub fn check(&self, repo: &str, tip: &str, check: &str) -> Result<std::result::Result<(), String>> {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir().join(format!("check-{repo}.lock")))?;
+        lock.lock()?;
+        let dir = self.trunk.join(LANDING_DIR).join(&self.name).join("_check").join(repo);
+        let wt = Git::owned(&dir);
+        // A sync clone made again, or a trunk moved, leaves the worktree
+        // pointing nowhere; it holds only build output, so start over.
+        let linked = || -> Result<bool> {
+            let top = wt.run(&["rev-parse", "--show-toplevel"]).ok().map(PathBuf::from);
+            Ok(top.is_some() && top == Some(dir.canonicalize()?))
+        };
+        if dir.exists() && !linked()? {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        if !dir.exists() {
+            let sync = self.git(repo);
+            sync.run(&["worktree", "prune"])?;
+            sync.run(&["worktree", "add", "--quiet", "--detach", dir.to_str().unwrap(), tip])?;
+        }
+        wt.run(&["checkout", "--quiet", "--force", "--detach", tip])?;
+        let out = std::process::Command::new("sh")
+            .args(["-c", check])
+            .current_dir(&dir)
+            .output()
+            .map_err(|e| eyre!("running `{check}`: {e}"))?;
+        wt.reset_hard(tip)?;
+        if out.status.success() {
+            return Ok(Ok(()));
+        }
+        Ok(Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )))
+    }
+
     /// The title `set`'s PR opens with: the one given at land, else its
     /// first commit's subject.
     pub fn pr_title(&self, set: &LandingSet) -> Result<String> {
@@ -291,6 +336,11 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
         return Err(eyre!("{} already holds an archived queue named {name}", dst.display()));
     }
     let landing = trunk.join(LANDING_DIR).join(name);
+    // Only build output, and a worktree of the sync clone that moving it
+    // would orphan.
+    if landing.join("_check").exists() {
+        std::fs::remove_dir_all(landing.join("_check"))?;
+    }
     if landing.join("_sync").exists() {
         std::fs::rename(landing.join("_sync"), dst.join("_sync"))?;
     }

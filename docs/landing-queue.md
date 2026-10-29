@@ -115,22 +115,47 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--deps SET,...|none|auto | -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
-choros land archive  [--deps SET,...|none|auto | -i] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land continue [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land archive  [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
 unlanded commits, each as its own landing-set with its own number. Repos
 landed together are not linked; a dependency across repos is added by hand
-(`--deps` or `-i`, or the queue TUI). A new set depends on what is queued in
-its own repo. Multiple queues are locked one at a time in name order.
+(`--deps` or `-i`, or the queue TUI). A new set depends on the queued sets
+of its own repo its commits need (*Plain land*). Multiple queues are locked
+one at a time in name order.
 
 **What is landed.** `rev-list --reverse landed_through..HEAD`, after the sync
 below. Refused if `landed_through` is not an ancestor of `HEAD` (landed
 commits were rewritten), if the tree is dirty, or if the range contains merge
 commits.
 
-### Normal land (lands on the merge head)
+### The check
+
+Every land into a queue runs the repo's `check` on the new set's tip — its
+dependencies plus its commits — whichever kind of land it is. A failing
+check refuses the land and keeps the output in
+`<trunk>/.choros-config/queues/<queue>/check-<repo>.log`; `--force` skips the
+check. A queued repo needs one, set in `<trunk>/.choros-config/repos.toml`;
+without it a land is refused before anything lands, short of `--force`:
+
+```toml
+[app]
+check = "cargo check --workspace"
+```
+
+The check runs with the queue let go, so a slow one holds up no one else's
+land. It runs in `landing/<queue>/_check/<repo>`, a worktree of the sync
+clone kept at one path so build output carries over, under a lock of its
+own. After it the land takes the queue again and rebuilds the tip; if the
+queue moved meanwhile, the new tip is checked in turn. Verdicts are kept by
+tree, so a tip rebuilt the same isn't checked twice.
+
+Only the set's own tip is checked, not the merge head: sets that pass alone
+and break together are left for CI to catch, in merge order.
+
+### Head land (`--deps HEAD`: on the merge head)
 
 1. **Sync the workspace first**, in place: if the queue's merge head has moved
    past `base`, rebase `landed_through..HEAD` onto it (this is `choros repo sync`).
@@ -142,7 +167,9 @@ commits.
 3. The landing-set's deps are every queued, unparked set in the queue; its
    base is the merge head; its tip is `HEAD`. No replay is needed: the
    workspace already sits on the base.
-4. Push `<queue>/landing-N` (if `push.private_sets` or the set is at the
+4. Check `HEAD` (*The check*); a check that ran with the queue let go
+   starts again from step 1.
+5. Push `<queue>/landing-N` (if `push.private_sets` or the set is at the
    front), record the set, rebuild the merge head (now a fast-forward to the
    new tip), set `base = landed_through = HEAD`.
 
@@ -163,20 +190,14 @@ a fork never loses commits it builds on.
    conflicts with what is queued, ask (TTY) or require
    `--on-conflict=merge-head|depend`: resolve in the merge head only (the pair
    is flagged), or make this fork depend on the sets it conflicts with.
-4. Push, record, rebuild the merge head. `landed_through = HEAD`; `base` is
+4. Check the tip (*The check*): a failure refuses the land, naming no sets to
+   add — they were picked.
+5. Push, record, rebuild the merge head. `landed_through = HEAD`; `base` is
    unchanged (the workspace still sits on the merge head).
 
-### Auto land
+### Plain land (no `--deps`: on what the commits need)
 
-`--deps auto`, or every plain land into a repo with `deps = "auto"` in
-`<trunk>/.choros-config/repos.toml`, lands on as little of the queue as the
-commits need:
-
-```toml
-[app]
-check = "cargo check --workspace"
-deps = "auto"
-```
+A plain land lands on as little of the queue as the commits need:
 
 1. Start on main plus the workspace's own earlier sets.
 2. Replay the commits there. A conflict adds the queued sets that changed the
@@ -186,17 +207,23 @@ deps = "auto"
    skipped sets that changed those files are added.
 3. Test-merge the result against every other leaf; a set it conflicts with
    becomes a dependency too, and the replay runs again.
-4. Run the repo's `check` in the sync clone on the result. Not conflicting
-   isn't the same as not needing: the commits may call what a skipped set
-   adds. Auto is refused for a repo with no `check`.
+4. Check the result. Not conflicting isn't the same as not needing: the
+   commits may call what a skipped set adds. If the check fails, search for
+   what it needs. Each probe adds a whole line of skipped work — a set with
+   what it builds on, since a set can't land without its base. Each line is
+   tried alone, newest first; more sets are taken to only help a check pass,
+   so along the first line that passes, halving finds the shortest prefix
+   that still passes, which ends at the set the commits were missing. The
+   land goes on that set's line.
 
-The land reports each dependency and why, and the sets it went ahead of. When
-nothing short of the whole queue works (its commits need every set, a
-conflict with main itself, or the check fails), it warns why and lands on the
-merge head as a normal land does. The check runs under the queue lock, so a
-slow one holds up other lands meanwhile.
+The land reports each dependency and why, and the sets it went ahead of.
+When nothing short of the whole queue works — its commits need every set,
+the sets they need conflict with each other, they conflict with main itself,
+or no line passes the check alone — it lands on the merge head as a head
+land does, checked there too, and warns why unless the commits simply need
+every set.
 
-### Both kinds, after recording
+### Every kind, after recording
 
 - **Sessions** (see *Landings and sessions*) are forked into the new landing
   folder right away.
@@ -218,7 +245,7 @@ they are for other tools to tie their own records to a set. Instant mode
 makes no set, so it keeps them on the land's line in its log (below).
 
 **Instant mode.** Fetch, rebase `landed_through..HEAD` onto `origin/main` in
-the workspace (conflicts stop the land as in a normal land), then push to main
+the workspace (conflicts stop the land as in a head land), then push to main
 or open a PR and merge it with the first method the repo allows. No landing
 folder. The land isn't done until the PR merges: one that can't merge yet (a
 review due, checks running) is recorded in the workspace, and the next land

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use choros_core::space;
 use choros_land::queue::Queue;
-use choros_land::repos::{self, DepsDefault};
+use choros_land::repos;
 use choros_land::workspace;
 use color_eyre::eyre::{Result, eyre};
 
@@ -88,17 +88,15 @@ pub fn run() -> Result<()> {
             Some(q) => format!("into {q}"),
             None => "straight to main".to_string(),
         };
-        let deps = match repos::read(&trunk, repo) {
-            Ok(c) => match (c.check, c.deps) {
-                (Some(check), DepsDefault::Auto) => format!("check `{check}`; a plain land uses --deps auto"),
-                (Some(check), DepsDefault::Queue) => {
-                    format!("check `{check}`, so --deps auto works; a plain land goes on everything queued")
-                }
-                (None, _) => "no check, so no --deps auto".to_string(),
+        let check = match repos::read(&trunk, repo) {
+            Ok(c) => match (c.check, queue) {
+                (Some(check), _) => format!("check `{check}`"),
+                (None, Some(_)) => "no check, so lands need --force".to_string(),
+                (None, None) => "no check".to_string(),
             },
             Err(e) => e.to_string(),
         };
-        println!("  {repo}: {into}; {deps}");
+        println!("  {repo}: {into}; {check}");
     }
     let queues: BTreeSet<String> = repos.into_iter().filter_map(|(_, q)| q).collect();
     print_queue_state(&trunk, &queues)?;

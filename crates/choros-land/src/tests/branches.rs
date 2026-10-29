@@ -29,7 +29,7 @@ fn a_branch_space_queue_lives_and_retires_with_its_space() {
     assert_eq!(seen(&w.trunk), [QUEUE, "epicq"]);
 
     w.commit(&login, "a.txt", "a\n");
-    w.land(&login).unwrap();
+    w.land_on_head(&login).unwrap();
     let epicq = Queue::open(&w.trunk, "epicq").unwrap();
     let pr = epicq.read_state().unwrap().sets[&1].pr.as_ref().unwrap().number;
 
@@ -63,7 +63,8 @@ fn land_archive_retires_the_workspace_it_ran_in() {
     let req = LandRequest {
         cwd: in_epic.join(REPO),
         mode: LandMode::Archive,
-        fork: None,
+        deps: crate::land::Deps::Head,
+        force: false,
         on_conflict: None,
         title: None,
         body: None,

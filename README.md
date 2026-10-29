@@ -252,8 +252,10 @@ on origin.
 A queue takes landed work from workspaces, keeps it in a private dependency
 graph on top of a *merge head* (main plus everything queued), and sends only
 the front — sets whose dependencies have merged — to GitHub as draft PRs.
-`chorosd` notices merges and re-syncs what is behind them. Repos not bound to
-a queue land straight to main. Full design: [docs/landing-queue.md](docs/landing-queue.md).
+`chorosd` notices merges and re-syncs what is behind them. A land goes on
+only the queued sets its commits need, and must pass the repo's `check` (set in
+`.choros-config/repos.toml`) on that tip. Repos not bound to a queue land
+straight to main. Full design: [docs/landing-queue.md](docs/landing-queue.md).
 
 ```bash
 choros queue new appq              # a queue for every repo of the trunk
@@ -264,7 +266,7 @@ choros land continue               # land, keep working here
 choros repo sync                   # catch up when the prompt shows ⇣sync
 choros land archive                # land, then archive the workspace
 choros land continue -i            # land beside the queue (pick dependencies)
-choros land continue --deps auto   # on only what the commits need; needs a check in repos.toml
+choros land continue --deps HEAD   # on everything queued, not just what the commits need
 choros status                      # queues, sets as a graph, PRs, parked conflicts
 choros queue appq --landing        # just appq's sets
 choros queue resolve appq          # settle parked conflicts (a/b/c)

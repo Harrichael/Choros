@@ -24,14 +24,15 @@ $ cd trunk/ws/app
 $ choros repo bind app appq
 app now lands into appq
 $ echo b > b.txt && git add b.txt && git commit -qm "write b"
-$ choros land continue
+$ choros land continue --deps HEAD
 app → appq/landing-2, queued
     landing: $ROOT/trunk/landing/appq/landing-2
 $ choros queue drop appq 2
 its commits go back to $ROOT/trunk/ws/app: its next land or `choros repo sync` brings them back, unlanded
 $ choros land continue
-app → appq/landing-3, queued
+app → appq/landing-3, at the front: https://github.test/pull/2
     landing: $ROOT/trunk/landing/appq/landing-3
+    ahead of appq/landing-1; `true` passed without them
 $ git log --format=%s
 write b
 write a

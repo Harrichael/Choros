@@ -82,7 +82,7 @@ fn work_built_on_a_pr_in_review_goes_to_main_after_it() {
     );
 
     w.commit(&ws, "uses.txt", "uses lib\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let st = w.state();
     assert!(st.sets[&1].pr.is_none(), "waits for the PR it builds on");
     assert_eq!(
@@ -161,7 +161,7 @@ fn other_repos_prs_hold_the_queue_until_they_merge() {
 
     let ws = w.workspace("ws");
     w.commit(&ws, "mine.txt", "mine\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let st = w.state();
     assert!(
         diffbase_of(&st, REPO).is_none(),
@@ -191,7 +191,7 @@ fn a_closed_pr_leaves_the_base_until_reopened() {
     diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{dropped}")).unwrap();
     let ws = w.workspace("ws");
     w.commit(&ws, "mine.txt", "mine\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     assert!(w.state().sets[&1].pr.is_none(), "waits for the PR");
 
     w.forge.close(dropped);
@@ -265,9 +265,9 @@ fn a_set_merging_under_a_diffbase_moves_it_to_the_new_main() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let lib = w.outside_pr("lib", "lib.txt", "lib\n");
     diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{lib}")).unwrap();
     let before = diffbase_of(&w.state(), REPO).unwrap();

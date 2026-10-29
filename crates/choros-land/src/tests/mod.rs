@@ -3,8 +3,8 @@
 //! work` makes them. GitHub is a fake that performs real merges on origin;
 //! conflicts go to a scripted handler.
 
-mod auto;
 mod branches;
+mod deps;
 mod diffbase;
 mod invariants;
 mod regressions;
@@ -21,7 +21,7 @@ use color_eyre::eyre::{Result, eyre};
 use crate::agent::{Agent, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings};
-use crate::land::{ForkDeps, LandOutcome, LandRequest};
+use crate::land::{Deps, LandOutcome, LandRequest};
 use crate::queue::Queue;
 use crate::state::{Dep, LandMode, PrRef, QueueConfig, QueueState, Scope};
 
@@ -318,6 +318,9 @@ impl World {
         std::fs::create_dir_all(&registry).unwrap();
         git(&registry, &["clone", "--quiet", origin.to_str().unwrap(), REPO]);
         Queue::create(&trunk, QUEUE, QueueConfig::new(Scope::Trunk)).unwrap();
+        // Every queued land is checked; one that always passes keeps stories
+        // about something else free of it.
+        std::fs::write(trunk.join(".choros-config/repos.toml"), format!("[{REPO}]\ncheck = \"true\"\n")).unwrap();
         World {
             _tmp: tmp,
             forge: FakeForge {
@@ -364,6 +367,9 @@ impl World {
             &self.trunk.join(".choros-config/registry"),
             &["clone", "--quiet", origin.to_str().unwrap(), name],
         );
+        let toml = self.trunk.join(".choros-config/repos.toml");
+        let before = std::fs::read_to_string(&toml).unwrap_or_default();
+        std::fs::write(&toml, format!("{before}[{name}]\ncheck = \"true\"\n")).unwrap();
         origin
     }
 
@@ -388,20 +394,23 @@ impl World {
         git(&repo, &["rev-parse", "HEAD"])
     }
 
-    pub fn land(&self, ws: &Path) -> Result<LandOutcome> {
+    /// `choros land continue --deps HEAD`: on everything queued, which most
+    /// stories about the queue's own workings build on.
+    pub fn land_on_head(&self, ws: &Path) -> Result<LandOutcome> {
         self.land_with(ws, None, None, None)
     }
 
-    /// `choros land continue --deps auto`.
-    pub fn land_auto(&self, ws: &Path) -> Result<LandOutcome> {
-        self.land_req(&self.request(ws, Some(ForkDeps::Auto), None), None)
+    /// `choros land continue`: on as little as the commits need.
+    pub fn land_plain(&self, ws: &Path) -> Result<LandOutcome> {
+        self.land_req(&self.request(ws, Deps::Least, None), None)
     }
 
-    pub fn request(&self, ws: &Path, fork: Option<ForkDeps>, on_conflict: Option<OnConflict>) -> LandRequest {
+    pub fn request(&self, ws: &Path, deps: Deps, on_conflict: Option<OnConflict>) -> LandRequest {
         LandRequest {
             cwd: ws.join(REPO),
             mode: LandMode::Continue,
-            fork,
+            deps,
+            force: false,
             on_conflict,
             title: None,
             body: None,
@@ -453,7 +462,7 @@ impl World {
         on_conflict: Option<OnConflict>,
         handler: Option<&mut Scripted>,
     ) -> Result<LandOutcome> {
-        self.land_req(&self.request(ws, fork.map(ForkDeps::Picked), on_conflict), handler)
+        self.land_req(&self.request(ws, fork.map_or(Deps::Head, Deps::Picked), on_conflict), handler)
     }
 
     /// `choros queue drop`.

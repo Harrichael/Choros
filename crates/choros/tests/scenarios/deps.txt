@@ -1,8 +1,7 @@
-# --deps auto lands on only what the commits need. Work that takes back
+# A plain land lands on only what the commits need. Work that takes back
 # what a queued set added needs that set: without it, the removal would
 # quietly vanish.
 
-$ printf '[app]\ncheck = "true"\n' > .choros-config/repos.toml
 $ choros work one app
 $ROOT/trunk/one/app
 mkdir $ROOT/trunk/one
@@ -26,8 +25,9 @@ $ choros repo bind app appq
 app now lands into appq
 $ echo c > c.txt && git add c.txt && git commit -qm "write c"
 $ choros land continue
-app → appq/landing-2, queued
+app → appq/landing-2, at the front: https://github.test/pull/2
     landing: $ROOT/trunk/landing/appq/landing-2
+    ahead of appq/landing-1; `true` passed without them
 
 $ cd trunk
 $ choros work two app
@@ -42,9 +42,9 @@ $ git rm -q a.txt && echo instead > b.txt && git add b.txt && git commit -qm "re
 
 # Picking deps that leave that set out is refused, naming it.
 $ choros land continue --deps none
-choros: appq/landing-3 would lose part of what its commits change in a.txt: they change what appq/landing-1 wrote; add it to --deps, or use --deps auto
+choros: appq/landing-3 would lose part of what its commits change in a.txt: they change what appq/landing-1 wrote; add it to --deps, or land without --deps
 [exit 1]
-$ choros land continue --deps auto
+$ choros land continue
 app → appq/landing-3, queued
     landing: $ROOT/trunk/landing/appq/landing-3
     on appq/landing-1: its commits change what it wrote (a.txt)

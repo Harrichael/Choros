@@ -9,7 +9,7 @@ use std::process::Command;
 use choros_land::agent::{Claude, ConflictBrief};
 use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use choros_land::forge::Gh;
-use choros_land::land::{self, ForkDeps, LandRequest};
+use choros_land::land::{self, Deps, LandRequest};
 use choros_land::queue::{self, Queue};
 use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
@@ -75,10 +75,11 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--deps SET,…|none|auto | -i] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
+        _ => usage("choros land continue|archive [--deps SET,…|none|HEAD | -i] [--force] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
     };
     let mut pick = false;
-    let mut deps: Option<ForkDeps> = None;
+    let mut deps: Option<Deps> = None;
+    let mut force = false;
     let mut on_conflict = None;
     let mut title = None;
     let mut body = None;
@@ -89,10 +90,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
             "-i" | "--interactive" => pick = true,
             "--deps" => {
                 deps = Some(match it.next().unwrap_or_default().as_str() {
-                    "auto" => ForkDeps::Auto,
-                    list => ForkDeps::Picked(parse_deps(list)?),
+                    "HEAD" => Deps::Head,
+                    "auto" => return Err(eyre!("a plain land already lands on as little as it needs; drop --deps auto")),
+                    list => Deps::Picked(parse_deps(list)?),
                 })
             }
+            "--force" => force = true,
             "--on-conflict" => {
                 on_conflict = Some(match it.next().as_deref() {
                     Some("depend") => OnConflict::Depend,
@@ -118,12 +121,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     }
     let cwd = std::env::current_dir()?;
     let (trunk, ws) = choros::find_workspace(&cwd)?;
-    let fork = match (deps, pick) {
-        (None, false) => None,
+    let deps = match (deps, pick) {
+        (None, false) => Deps::Least,
         (Some(_), true) => return Err(eyre!("pass --deps or -i, not both")),
-        (Some(d), false) => Some(d),
-        (None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none|auto")),
-        (None, true) => Some(ForkDeps::Picked(pick_fork_deps(&trunk, &ws, &cwd)?)),
+        (Some(d), false) => d,
+        (None, true) if !interactive() => return Err(eyre!("no terminal to pick in; pass --deps SET,…|none|HEAD")),
+        (None, true) => Deps::Picked(pick_fork_deps(&trunk, &ws, &cwd)?),
     };
 
     let tools = Tools::for_trunk(&trunk);
@@ -131,7 +134,8 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let req = LandRequest {
         cwd,
         mode,
-        fork,
+        deps,
+        force,
         on_conflict,
         title,
         body,

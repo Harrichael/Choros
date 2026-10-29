@@ -97,11 +97,12 @@ INSIDE A WORKSPACE
                                     is scoped to the workspace
     choros land continue|archive    land this repo (or, at the workspace root, each repo as its own
                                     set) into its queue, or straight to main when it has none; `archive` then
-                                    archives the workspace. --deps SET,…|none (or -i to pick
-                                    them) lands beside the queue instead of on top; --deps auto on only
-                                    what the commits need, if repos.toml gives the repo a check;
-                                    --title/--body-file set the PR text. Each land is a new set;
-                                    change an open one from its landing folder
+                                    archives the workspace. It lands on only what the commits
+                                    need; --deps SET,…|none (or -i to pick them) on those sets
+                                    instead, --deps HEAD on everything queued. Each set must pass
+                                    the repo's check from repos.toml on its own tip; --force skips
+                                    it. --title/--body-file set the PR text. Each land is a new
+                                    set; change an open one from its landing folder
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
 
@@ -136,7 +137,7 @@ AGENTS
     choros here                     what this folder is, where a land from it goes, whether each
                                     repo has a check, and where queue state lives
     choros help agent               for an agent: making workspaces, landing and its flags,
-                                    --deps auto, and changing a landed set
+                                    the check, and changing a landed set
     choros agent ls                 resumable claude / cursor sessions under the current directory
     choros agent save settings      TUI: promote this workspace's claude settings to the template
 

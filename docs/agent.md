@@ -13,11 +13,12 @@ Inside a repo it lands that repo; at the workspace root, each repo with
 unlanded commits. Each land makes a new landing-set, and so a new PR, from
 the commits since the last land. Keep working and land again as you go.
 
-    (no --deps)                 on top of everything queued in the repo
-    --deps SET,…|none           beside the queue, on only these sets (3,
-                                landing-3, otherq/3); none: on main. This
-                                workspace's own earlier sets are always kept
-    --deps auto                 on only what the commits need (below)
+    (no --deps)                 on only what the commits need (below)
+    --deps SET,…|none           on only these sets (3, landing-3, otherq/3);
+                                none: on main. This workspace's own earlier
+                                sets are always kept
+    --deps HEAD                 on top of everything queued in the repo
+    --force                     land without running the check
     --on-conflict depend|merge-head
                                 when a --deps land clashes with a set it
                                 left out: land behind it, or resolve
@@ -36,18 +37,22 @@ the commits since the last land. Keep working and land again as you go.
 `.choros-config/archive/`. Don't run it, or `choros archive`, on the
 workspace your own session runs in.
 
-## --deps auto
+## The check
 
-Needs a `check` for the repo. If the check fails without the sets it left
-out, the land goes on top of everything queued instead, and names those sets
-and a log of the check's output. The check isn't rerun there, so the
-commits may need those sets or may be broken: run it yourself to tell.
+Every land into a queue runs the repo's check on the new set's tip: its
+dependencies plus your commits. A failing check refuses the land and names
+a log of its output; fix the commits and land again. `--force` skips it,
+for when the check itself is what's broken.
 
-A check goes in `<trunk>/.choros-config/repos.toml`:
+A plain land starts on main, takes in the queued sets your commits conflict
+with, and checks the result. If that fails, it looks for the set the check
+needs, and lands on the fewest sets it passes with, saying which and why.
+
+The check goes in `<trunk>/.choros-config/repos.toml`; a queued repo
+without one can't land short of `--force`:
 
     [app]
     check = "cargo check --workspace"   # run at the repo root
-    deps = "auto"                       # optional: plain lands use auto
 
 ## After landing
 

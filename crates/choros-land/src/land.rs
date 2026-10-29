@@ -17,7 +17,7 @@ use crate::forge::{PrRequest, PrState};
 use crate::git::Git;
 use crate::graph;
 use crate::queue::Queue;
-use crate::repos::{self, DepsDefault};
+use crate::repos;
 use crate::state::{BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
 use crate::workspace::{self, InstantPr, LandingOf, RepoLanding};
 
@@ -26,9 +26,9 @@ pub struct LandRequest {
     /// (land every repo with something to land).
     pub cwd: PathBuf,
     pub mode: LandMode,
-    /// What to land on instead of everything queued; `None` follows the
-    /// repo's `deps` setting.
-    pub fork: Option<ForkDeps>,
+    pub deps: Deps,
+    /// Land without running the repo's check.
+    pub force: bool,
     pub on_conflict: Option<OnConflict>,
     pub title: Option<String>,
     pub body: Option<String>,
@@ -42,12 +42,17 @@ pub struct LandRequest {
     pub env_session: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ForkDeps {
+/// What a land builds on. Whichever it is, the set must pass the repo's
+/// check on its own tip unless the land is forced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Deps {
+    /// As few queued sets as the commits need: see [`land_least`].
+    #[default]
+    Least,
     /// These sets (plus the workspace's own earlier ones); empty is main.
     Picked(Vec<Dep>),
-    /// As few as the commits need: see [`land_auto`].
-    Auto,
+    /// Everything queued: the merge head.
+    Head,
 }
 
 #[derive(Debug)]
@@ -90,21 +95,16 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
     // the whole land rather than half of it.
     let mut checks = BTreeMap::new();
     for repo in &scope {
-        if queues[repo].is_none() {
+        if queues[repo].is_none() || req.force {
             continue;
         }
-        let config = repos::read(&trunk, repo)?;
-        let auto = match &req.fork {
-            Some(ForkDeps::Auto) => true,
-            Some(ForkDeps::Picked(_)) => false,
-            None => config.deps == DepsDefault::Auto,
-        };
-        if auto {
-            let check = config.check.ok_or_else(|| {
-                eyre!("--deps auto needs a check for {repo}: set one under [{repo}] in .choros-config/repos.toml")
-            })?;
-            checks.insert(repo.clone(), check);
-        }
+        let check = repos::read(&trunk, repo)?.check.ok_or_else(|| {
+            eyre!(
+                "{repo} has no check to land with: set one under [{repo}] in .choros-config/repos.toml, \
+                 or pass --force to land unchecked"
+            )
+        })?;
+        checks.insert(repo.clone(), check);
     }
 
     if req.body.is_none() && req.env_session.as_ref().is_some_and(|s| !s.is_empty()) {
@@ -424,15 +424,15 @@ fn return_onto(env: &Env, q: &Queue, repo: &str, mh: &str, returned: &[workspace
     Ok(tip)
 }
 
-/// `auto_check` is set when the land picks its own dependencies: the repo's
-/// check, which the result must pass.
+/// `check` is the repo's, unless the land was forced: every set must pass
+/// it on its own tip, its dependencies plus itself.
 fn land_queued(
     env: &Env,
     q: &Queue,
     ws: &Path,
     repo: &str,
     req: &LandRequest,
-    auto_check: Option<&String>,
+    check: Option<&String>,
     handler: Handler<'_>,
 ) -> Result<Landed> {
     let mut warnings = Vec::new();
@@ -443,19 +443,20 @@ fn land_queued(
     if !returned(ws, repo)?.is_empty() {
         sync_to_merge_head(env, q, ws, repo)?;
     }
-    let n = match (&req.fork, auto_check) {
-        (_, Some(check)) => match land_auto(env, q, ws, repo, check, req)? {
-            Auto::Landed(n, why) => {
+    let mut checker = Checker::new(q, repo, check);
+    let n = match &req.deps {
+        Deps::Head => land_normal(env, q, ws, repo, req, &mut checker)?,
+        Deps::Picked(deps) => land_fork(env, q, ws, repo, deps, req, &mut checker, handler)?,
+        Deps::Least => match land_least(env, q, ws, repo, req, &mut checker)? {
+            Least::Landed(n, why) => {
                 notes = why;
                 n
             }
-            Auto::Fallback(why) => {
-                warnings.push(why);
-                land_normal(env, q, ws, repo, req)?
+            Least::Fallback(why) => {
+                warnings.extend(why);
+                land_normal(env, q, ws, repo, req, &mut checker)?
             }
         },
-        (Some(ForkDeps::Picked(deps)), None) => land_fork(env, q, ws, repo, deps, req, handler)?,
-        (_, None) => land_normal(env, q, ws, repo, req)?,
     };
 
     // Settle the rest of the queue now — the new set may already be at the
@@ -496,21 +497,79 @@ fn land_queued(
     })
 }
 
+/// The repo's check, run on a would-be set's tip with the queue let go, so
+/// a slow check holds up no one else's land. Verdicts are kept by tree: the
+/// land takes the queue again and builds the tip again, and when nothing
+/// moved meanwhile it's the same tree, already judged. When something did,
+/// the new tree is checked in turn.
+struct Checker<'a> {
+    q: &'a Queue,
+    repo: &'a str,
+    check: Option<&'a String>,
+    verdicts: BTreeMap<String, std::result::Result<(), String>>,
+}
+
+enum Verdict {
+    Pass,
+    Fail(String),
+    /// Not run on this tree yet.
+    Unknown,
+}
+
+impl<'a> Checker<'a> {
+    fn new(q: &'a Queue, repo: &'a str, check: Option<&'a String>) -> Self {
+        Checker { q, repo, check, verdicts: BTreeMap::new() }
+    }
+
+    fn verdict(&self, sync: &Git, tip: &str) -> Result<Verdict> {
+        if self.check.is_none() {
+            return Ok(Verdict::Pass);
+        }
+        Ok(match self.verdicts.get(&tree(sync, tip)?) {
+            None => Verdict::Unknown,
+            Some(Ok(())) => Verdict::Pass,
+            Some(Err(out)) => Verdict::Fail(out.clone()),
+        })
+    }
+
+    /// Call with the queue let go.
+    fn run(&mut self, tip: &str) -> Result<()> {
+        let check = self.check.expect("a verdict is unknown only with a check");
+        let tree = tree(&self.q.git(self.repo), tip)?;
+        let verdict = self.q.check(self.repo, tip, check)?;
+        self.verdicts.insert(tree, verdict);
+        Ok(())
+    }
+
+    /// The refusal for a set whose tip failed, its full output kept in the
+    /// queue's folder.
+    fn refusal(&self, on: &str, output: &str) -> Result<color_eyre::Report> {
+        let log = self.q.dir().join(format!("check-{}.log", self.repo));
+        std::fs::write(&log, output)?;
+        Ok(eyre!(
+            "`{}` failed on {}'s commits {on}, so they didn't land; full output: {}. \
+             Fix it, or pass --force to land without the check",
+            self.check.map_or("", |c| c.as_str()),
+            self.repo,
+            log.display()
+        ))
+    }
+}
+
+fn tree(git: &Git, commit: &str) -> Result<String> {
+    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
+}
+
 /// Land on the merge head: the workspace is first synced onto it (so any
 /// conflict is resolved here, by whoever wrote the code), after which the
 /// landing-set is simply the workspace's tip.
-fn land_normal(
-    env: &Env,
-    q: &Queue,
-    ws: &Path,
-    repo: &str,
-    req: &LandRequest,
-) -> Result<u32> {
+fn land_normal(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, checker: &mut Checker) -> Result<u32> {
     let repo_dir = ws.join(repo);
     let git = Git::new(&repo_dir);
-    // Each round either lands or moves the workspace onto a newer merge head;
-    // the merge head only moves when someone else lands meanwhile.
-    for _ in 0..5 {
+    // Each round lands, checks, or moves the workspace onto a newer merge
+    // head; the merge head only moves when someone else lands meanwhile.
+    let mut moves = 0;
+    loop {
         let mh = sync_to_merge_head(env, q, ws, repo)?;
         let head = git.head()?;
         if head == mh.sha {
@@ -523,7 +582,22 @@ fn land_normal(
         work.rebuild_merge_head(repo)?;
         let now = work.st.repos[repo].merge_head.clone().unwrap();
         if now.composition != mh.composition {
+            moves += 1;
+            if moves == 5 {
+                return Err(eyre!("the merge head kept moving while landing; try again"));
+            }
             continue;
+        }
+        let sync = work.git(repo);
+        sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
+        match checker.verdict(&sync, &head)? {
+            Verdict::Pass => {}
+            Verdict::Fail(out) => return Err(checker.refusal("on the merge head", &out)?),
+            Verdict::Unknown => {
+                drop(work);
+                checker.run(&head)?;
+                continue;
+            }
         }
 
         let n = work.st.next_n.max(1);
@@ -533,8 +607,6 @@ fn land_normal(
             main: Some(now.composition.main.clone()),
             deps: now.composition.sets.clone(),
         };
-        work.git(repo)
-            .fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
         work.st.sets.insert(
             n,
             new_set(n, deps, base, now.sha.clone(), head.clone(), ws, repo, req),
@@ -550,12 +622,12 @@ fn land_normal(
         })?;
         return Ok(n);
     }
-    Err(eyre!("the merge head kept moving while landing; try again"))
 }
 
 /// Land beside the queue rather than on top of it: on main, or on the
 /// dependencies picked. The workspace's own earlier sets always come along.
 /// Picked sets in other repos are only waited for.
+#[allow(clippy::too_many_arguments)]
 fn land_fork(
     env: &Env,
     q: &Queue,
@@ -563,259 +635,276 @@ fn land_fork(
     repo: &str,
     picked: &[Dep],
     req: &LandRequest,
-    handler: Handler<'_>,
+    checker: &mut Checker,
+    mut handler: Handler<'_>,
 ) -> Result<u32> {
     let repo_dir = ws.join(repo);
     let git = Git::new(&repo_dir);
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
     let head = git.head()?;
-    let mut work = Work::begin(q, env.agent, handler, true)?.unwrap();
-    work.ensure_repo(repo)?;
     let mut deps: Vec<Dep> = picked.to_vec();
-    let moved_onto = workspace::read(ws)?.repo.get(repo).map(|r| r.fork_deps.clone()).unwrap_or_default();
-    deps.extend(moved_onto.into_iter().map(Dep::Set));
-    for (m, set) in &work.st.sets {
-        if set.is_open() && set.source.workspace == ws && set.source.repo == repo && !deps.contains(&Dep::Set(*m)) {
-            deps.push(Dep::Set(*m));
+    // Asked once: a round that let the queue go for the check comes back to
+    // the same clash.
+    let mut decision = req.on_conflict;
+    let mut rounds = 0;
+    'round: loop {
+        let mut work = Work::begin(q, env.agent, handler.as_deref_mut(), true)?.unwrap();
+        work.ensure_repo(repo)?;
+        // A set picked may have merged while the check ran: it's in main now.
+        if rounds > 0 {
+            deps.retain(|d| !matches!(d, Dep::Set(m) if work.st.sets.get(m).is_some_and(|s| s.status == SetStatus::Merged)));
         }
-    }
-    for d in &deps {
-        if let Dep::Set(m) = d
-            && !work.st.sets.get(m).is_some_and(|s| s.is_open())
-        {
-            return Err(eyre!("{} is not a queued landing-set", crate::state::branch(&q.name, *m)));
+        rounds += 1;
+        let moved_onto = workspace::read(ws)?.repo.get(repo).map(|r| r.fork_deps.clone()).unwrap_or_default();
+        deps.extend(moved_onto.into_iter().map(Dep::Set));
+        for (m, set) in &work.st.sets {
+            if set.is_open() && set.source.workspace == ws && set.source.repo == repo && !deps.contains(&Dep::Set(*m)) {
+                deps.push(Dep::Set(*m));
+            }
         }
-    }
-    let sync = work.git(repo);
-    sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
-    let own = sync.commits(&through, &head)?;
-    let n = work.st.next_n.max(1);
-    work.st.next_n = n + 1;
+        for d in &deps {
+            if let Dep::Set(m) = d
+                && !work.st.sets.get(m).is_some_and(|s| s.is_open())
+            {
+                return Err(eyre!("{} is not a queued landing-set", crate::state::branch(&q.name, *m)));
+            }
+        }
+        let sync = work.git(repo);
+        sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
+        let own = sync.commits(&through, &head)?;
+        let n = work.st.next_n.max(1);
+        work.st.next_n = n + 1;
 
-    loop {
-        deps.sort();
-        deps.dedup();
-        // What the fork builds on: its dependencies in this repo.
-        let set_deps: Vec<u32> = deps
-            .iter()
-            .filter_map(|d| if let Dep::Set(m) = d { Some(*m) } else { None })
-            .filter(|m| work.st.sets[m].repo() == repo)
-            .collect();
-        let leaves = graph::leaves(&work.st, &set_deps);
-        let main = work.root(repo)?;
-        let spec = BaseSpec {
-            main: Some(main.clone()),
-            deps: leaves.iter().map(|d| (*d, work.st.sets[d].tip.clone())).collect(),
-        };
-        let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
-        let what = crate::state::branch(&q.name, n);
-        let base = work
-            .build(repo, &main, &tips, &format!("the base of {what}"))?
-            .map_err(|(_, files)| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
-        let tip = match work.replay(repo, &base, &own, &what)? {
-            Ok(t) => t,
-            // No one here to resolve in the sync clone (a land from inside a
-            // session): move the workspace onto the base instead, so the
-            // session that wrote the commits resolves them where they live.
-            Err(_) if work.handler.is_none() => {
-                sync.run(&["update-ref", "refs/choros/fork-base", &base])?;
-                drop(work);
-                update_repo(ws, repo, |rl| rl.fork_deps = set_deps.clone())?;
-                let onto = format!("{what}'s dependencies");
-                rebase_workspace(q, ws, repo, &git, "refs/choros/fork-base", &base, None, &onto)?;
-                return land_fork(env, q, ws, repo, &deps, req, None);
-            }
-            Err(files) => {
-                return Err(eyre!("{what} does not apply onto its dependencies; conflicts in: {}", files.join(", ")));
-            }
-        };
-        let mine = graph::ancestors_of_deps(&work.st, &set_deps);
-        let live = graph::live_in(&work.st, repo);
-        // As in an auto land, a clean replay can still lose what the commits
-        // change; here the dependencies were picked, so say which are missing.
-        let lost = lost_changes(&sync, (&through, &head), (&base, &tip))?;
-        let missing = owners(&work.st, &sync, &live, &mine, &mut BTreeMap::new(), &lost)?;
-        if !missing.is_empty() {
-            let names: Vec<String> = missing.iter().map(|m| crate::state::branch(&q.name, *m)).collect();
-            return Err(eyre!(
-                "{what} would lose part of what its commits change in {}: they change what {} wrote; \
-                 add {} to --deps, or use --deps auto",
-                lost.join(", "),
-                names.join(", "),
-                if missing.len() == 1 { "it" } else { "them" }
-            ));
-        }
-
-        // Settle the fork's place before anything about it is public: check it
-        // against every other leaf of the merge head it would sit beside.
-        let mut clashes = Vec::new();
-        for leaf in graph::leaves(&work.st, &live) {
-            if mine.contains(&leaf) {
-                continue;
-            }
-            if !sync.merge_conflicts(&work.st.sets[&leaf].tip, &tip)?.is_empty() {
-                clashes.push(leaf);
-            }
-        }
-        if !clashes.is_empty() {
-            let decision = match req.on_conflict {
-                Some(d) => Some(d),
-                None => match work.handler.as_deref_mut() {
-                    Some(h) => h.fork_conflict(n, &clashes)?,
-                    None => None,
-                },
+        loop {
+            deps.sort();
+            deps.dedup();
+            // What the fork builds on: its dependencies in this repo.
+            let set_deps: Vec<u32> = deps
+                .iter()
+                .filter_map(|d| if let Dep::Set(m) = d { Some(*m) } else { None })
+                .filter(|m| work.st.sets[m].repo() == repo)
+                .collect();
+            let leaves = graph::leaves(&work.st, &set_deps);
+            let main = work.root(repo)?;
+            let spec = BaseSpec {
+                main: Some(main.clone()),
+                deps: leaves.iter().map(|d| (*d, work.st.sets[d].tip.clone())).collect(),
             };
-            match decision {
-                Some(OnConflict::Depend) => {
-                    deps.extend(clashes.into_iter().map(Dep::Set));
-                    continue;
+            let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
+            let what = crate::state::branch(&q.name, n);
+            let base = work
+                .build(repo, &main, &tips, &format!("the base of {what}"))?
+                .map_err(|(_, files)| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
+            let tip = match work.replay(repo, &base, &own, &what)? {
+                Ok(t) => t,
+                // No one here to resolve in the sync clone (a land from inside a
+                // session): move the workspace onto the base instead, so the
+                // session that wrote the commits resolves them where they live.
+                Err(_) if work.handler.is_none() => {
+                    sync.run(&["update-ref", "refs/choros/fork-base", &base])?;
+                    drop(work);
+                    update_repo(ws, repo, |rl| rl.fork_deps = set_deps.clone())?;
+                    let onto = format!("{what}'s dependencies");
+                    rebase_workspace(q, ws, repo, &git, "refs/choros/fork-base", &base, None, &onto)?;
+                    return land_fork(env, q, ws, repo, &deps, req, checker, None);
                 }
-                Some(OnConflict::MergeHead) => {}
-                None => {
-                    return Err(eyre!(
-                        "{what} conflicts with {} in the merge head; pass --on-conflict=depend \
-                         (land behind them) or --on-conflict=merge-head (resolve beside them)",
-                        clashes
-                            .iter()
-                            .map(|c| crate::state::branch(&q.name, *c))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
+                Err(files) => {
+                    return Err(eyre!("{what} does not apply onto its dependencies; conflicts in: {}", files.join(", ")));
+                }
+            };
+            let mine = graph::ancestors_of_deps(&work.st, &set_deps);
+            let live = graph::live_in(&work.st, repo);
+            // As in a plain land, a clean replay can still lose what the commits
+            // change; here the dependencies were picked, so say which are missing.
+            let lost = lost_changes(&sync, (&through, &head), (&base, &tip))?;
+            let missing = owners(&work.st, &sync, &live, &mine, &mut BTreeMap::new(), &lost)?;
+            if !missing.is_empty() {
+                let names: Vec<String> = missing.iter().map(|m| crate::state::branch(&q.name, *m)).collect();
+                return Err(eyre!(
+                    "{what} would lose part of what its commits change in {}: they change what {} wrote; \
+                     add {} to --deps, or land without --deps",
+                    lost.join(", "),
+                    names.join(", "),
+                    if missing.len() == 1 { "it" } else { "them" }
+                ));
+            }
+
+            // Settle the fork's place before anything about it is public: check it
+            // against every other set of the merge head it would sit beside.
+            let clashes: Vec<u32> = clashes(&work.st, &sync, &live, &mine, &tip)?.into_iter().map(|(m, _)| m).collect();
+            if !clashes.is_empty() {
+                if decision.is_none()
+                    && let Some(h) = work.handler.as_deref_mut()
+                {
+                    decision = h.fork_conflict(n, &clashes)?;
+                }
+                match decision {
+                    Some(OnConflict::Depend) => {
+                        deps.extend(clashes.into_iter().map(Dep::Set));
+                        continue;
+                    }
+                    Some(OnConflict::MergeHead) => {}
+                    None => {
+                        return Err(eyre!(
+                            "{what} conflicts with {} in the merge head; pass --on-conflict=depend \
+                             (land behind them) or --on-conflict=merge-head (resolve beside them)",
+                            clashes
+                                .iter()
+                                .map(|c| crate::state::branch(&q.name, *c))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
                 }
             }
-        }
 
-        let mut set = new_set(n, graph::reduce(&work.st, &deps), spec, base, tip, ws, repo, req);
-        set.conflicts_with = clashes;
-        work.st.sets.insert(n, set);
-        work.publish(n)?;
-        // A clash kept beside may park the merge head; `choros queue resolve`
-        // settles it, and status says so.
-        work.rebuild_merge_head(repo)?;
-        work.save()?;
-        update_repo(ws, repo, |rl| {
-            rl.landed_through = Some(head.clone());
-            rl.fork_deps.clear();
-        })?;
-        return Ok(n);
+            match checker.verdict(&sync, &tip)? {
+                Verdict::Pass => {}
+                Verdict::Fail(out) => {
+                    let on = if set_deps.is_empty() {
+                        "on main".to_string()
+                    } else {
+                        format!("on {}", names(q, &set_deps))
+                    };
+                    return Err(checker.refusal(&on, &out)?);
+                }
+                Verdict::Unknown => {
+                    drop(work);
+                    checker.run(&tip)?;
+                    continue 'round;
+                }
+            }
+
+            let mut set = new_set(n, graph::reduce(&work.st, &deps), spec, base, tip, ws, repo, req);
+            set.conflicts_with = clashes;
+            work.st.sets.insert(n, set);
+            work.publish(n)?;
+            // A clash kept beside may park the merge head; `choros queue resolve`
+            // settles it, and status says so.
+            work.rebuild_merge_head(repo)?;
+            work.save()?;
+            update_repo(ws, repo, |rl| {
+                rl.landed_through = Some(head.clone());
+                rl.fork_deps.clear();
+            })?;
+            return Ok(n);
+        }
     }
 }
 
-enum Auto {
+fn names(q: &Queue, sets: &[u32]) -> String {
+    sets.iter().map(|m| crate::state::branch(&q.name, *m)).collect::<Vec<_>>().join(", ")
+}
+
+/// The leaves beside `mine` that `tip` conflicts with, merged side by
+/// side, and in which files.
+fn clashes(
+    st: &crate::state::QueueState,
+    sync: &Git,
+    live: &[u32],
+    mine: &BTreeSet<u32>,
+    tip: &str,
+) -> Result<Vec<(u32, Vec<String>)>> {
+    let mut out = Vec::new();
+    for leaf in graph::leaves(st, live) {
+        if mine.contains(&leaf) {
+            continue;
+        }
+        let files = sync.merge_conflicts(&st.sets[&leaf].tip, tip)?;
+        if !files.is_empty() {
+            out.push((leaf, files));
+        }
+    }
+    Ok(out)
+}
+
+enum Least {
     /// The set, and what it depends on and why.
     Landed(u32, Vec<String>),
-    /// It lands on everything queued after all; the line saying why.
-    Fallback(String),
+    /// It lands on everything queued after all; the line saying why, when
+    /// the queue holds anything to skip.
+    Fallback(Option<String>),
+}
+
+/// Where the commits sit on a given start: the sets they depend on, and
+/// why each, grown until they replay whole and clash with nothing beside.
+struct Placed {
+    why: BTreeMap<u32, String>,
+    spec: BaseSpec,
+    base: String,
+    tip: String,
+}
+
+/// What `place` needs that doesn't change within a round.
+struct Commits<'a> {
+    repo: &'a str,
+    sync: &'a Git,
+    live: &'a [u32],
+    through: &'a str,
+    head: &'a str,
+    own: &'a [String],
 }
 
 /// Land on as little of the queue as the commits need. Start on main and the
 /// workspace's own earlier sets; take in a queued set only when the commits
 /// conflict with it, replaying onto it or merged beside it. Not conflicting
 /// isn't the same as not needing (the commits may call what a set adds), so
-/// the result must also pass the repo's `check` without the rest. Anything
-/// short of that falls back to landing on everything queued.
-fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &LandRequest) -> Result<Auto> {
+/// the result must pass the repo's check too. When it doesn't, look for what
+/// it was missing: each line of skipped work added alone, newest first, and
+/// the line that passes narrowed to where it starts passing. Anything short
+/// of that falls back to everything queued, where the check runs again.
+fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, checker: &mut Checker) -> Result<Least> {
     let repo_dir = ws.join(repo);
     let git = Git::new(&repo_dir);
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
     let head = git.head()?;
-    // No handler: a conflict here says what the commits need; it isn't
-    // there to be resolved.
-    let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
-    work.ensure_repo(repo)?;
-    let live = graph::live_in(&work.st, repo);
-    let mut why: BTreeMap<u32, String> = BTreeMap::new();
-    for m in &live {
-        let source = &work.st.sets[m].source;
-        if source.workspace == ws && source.repo == repo {
-            why.insert(*m, "this workspace's earlier set".into());
-        }
-    }
-    let sync = work.git(repo);
-    sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
-    let own = sync.commits(&through, &head)?;
-    let what = format!("{repo}'s auto land");
-    let mut touched: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-
     loop {
+        // No handler: a conflict here says what the commits need; it isn't
+        // there to be resolved.
+        let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+        work.ensure_repo(repo)?;
+        let live = graph::live_in(&work.st, repo);
+        if live.is_empty() {
+            return Ok(Least::Fallback(None));
+        }
+        let mut start: BTreeMap<u32, String> = BTreeMap::new();
+        for m in &live {
+            let source = &work.st.sets[m].source;
+            if source.workspace == ws && source.repo == repo {
+                start.insert(*m, "this workspace's earlier set".into());
+            }
+        }
+        let sync = work.git(repo);
+        sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
+        let own = sync.commits(&through, &head)?;
+        let c = Commits { repo, sync: &sync, live: &live, through: &through, head: &head, own: &own };
+        let mut touched = BTreeMap::new();
+
+        let first = match place(&mut work, &c, start.clone(), &mut touched)? {
+            Ok(p) => p,
+            Err(why) => return Ok(Least::Fallback(why)),
+        };
+        let chosen = match search(&mut work, &c, checker, &first, &mut touched)? {
+            Search::Found(p) => p,
+            Search::Run(tip) => {
+                drop(work);
+                checker.run(&tip)?;
+                continue;
+            }
+            Search::Exhausted => {
+                return Ok(Least::Fallback(Some(format!(
+                    "`{}` failed on the fewest sets its commits need, and with each line of the \
+                     rest added alone; landing on everything queued",
+                    checker.check.map_or("", |s| s.as_str())
+                ))));
+            }
+        };
+
+        let Placed { why, spec, base, tip } = chosen;
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
-        if live.iter().all(|m| mine.contains(m)) {
-            return Ok(Auto::Fallback("landed on everything queued: its commits need every queued set".into()));
-        }
-        let main = work.root(repo)?;
-        let spec = BaseSpec {
-            main: Some(main.clone()),
-            deps: graph::leaves(&work.st, &deps)
-                .into_iter()
-                .map(|d| (d, work.st.sets[&d].tip.clone()))
-                .collect(),
-        };
-        let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
-        let Ok(base) = work.build(repo, &main, &tips, &what)? else {
-            return Ok(Auto::Fallback(
-                "landed on everything queued: the sets its commits need conflict with each other".into(),
-            ));
-        };
-        let tip = match work.replay(repo, &base, &own, &what)? {
-            Ok(tip) => tip,
-            Err(files) => {
-                let owners = owners(&work.st, &sync, &live, &mine, &mut touched, &files)?;
-                if owners.is_empty() {
-                    return Ok(Auto::Fallback(format!(
-                        "landed on everything queued: its commits conflict with main itself in {}",
-                        files.join(", ")
-                    )));
-                }
-                for m in owners {
-                    why.insert(m, format!("its commits build on it ({})", files.join(", ")));
-                }
-                continue;
-            }
-        };
-        // A replay can go through clean and still lose changes: deleting or
-        // re-deleting lines a skipped set added is "already done" without
-        // that set, so the hunk vanishes. Such commits need the set.
-        let lost = lost_changes(&sync, (&through, &head), (&base, &tip))?;
-        let owners = owners(&work.st, &sync, &live, &mine, &mut touched, &lost)?;
-        if !owners.is_empty() {
-            for m in owners {
-                why.insert(m, format!("its commits change what it wrote ({})", lost.join(", ")));
-            }
-            continue;
-        }
-        let mut clashed = false;
-        for leaf in graph::leaves(&work.st, &live) {
-            if mine.contains(&leaf) {
-                continue;
-            }
-            let files = sync.merge_conflicts(&work.st.sets[&leaf].tip, &tip)?;
-            if !files.is_empty() {
-                why.insert(leaf, format!("they conflict side by side ({})", files.join(", ")));
-                clashed = true;
-            }
-        }
-        if clashed {
-            continue;
-        }
-        if let Err(output) = run_check(&sync, &tip, check)? {
-            let left_out: Vec<String> = live
-                .iter()
-                .filter(|m| !mine.contains(m))
-                .map(|m| crate::state::branch(&q.name, *m))
-                .collect();
-            let log = q.dir().join(format!("check-{repo}.log"));
-            std::fs::write(&log, output)?;
-            return Ok(Auto::Fallback(format!(
-                "`{check}` failed without {}; landed after {}; full output: {}",
-                left_out.join(", "),
-                if left_out.len() == 1 { "it" } else { "them" },
-                log.display()
-            )));
-        }
-
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
         let deps_of_set = graph::leaves(&work.st, &deps).into_iter().map(Dep::Set).collect();
@@ -828,13 +917,179 @@ fn land_auto(env: &Env, q: &Queue, ws: &Path, repo: &str, check: &str, req: &Lan
             rl.fork_deps.clear();
         })?;
 
-        let name = |m: u32| crate::state::branch(&q.name, m);
-        let mut notes: Vec<String> = why.iter().map(|(m, w)| format!("on {}: {w}", name(*m))).collect();
-        let ahead: Vec<String> = live.iter().filter(|m| !mine.contains(m)).map(|m| name(*m)).collect();
+        let mut notes: Vec<String> =
+            why.iter().map(|(m, w)| format!("on {}: {w}", crate::state::branch(&q.name, *m))).collect();
+        let ahead: Vec<u32> = live.iter().copied().filter(|m| !mine.contains(m)).collect();
         if !ahead.is_empty() {
-            notes.push(format!("ahead of {}; `{check}` passed without them", ahead.join(", ")));
+            notes.push(match checker.check {
+                Some(check) => format!("ahead of {}; `{check}` passed without them", names(q, &ahead)),
+                None => format!("ahead of {}; not checked (--force)", names(q, &ahead)),
+            });
         }
-        return Ok(Auto::Landed(n, notes));
+        return Ok(Least::Landed(n, notes));
+    }
+}
+
+enum Search {
+    Found(Placed),
+    /// This tip must be checked before the search can go on.
+    Run(String),
+    Exhausted,
+}
+
+/// What the check needs beyond `first`. Every probe adds whole lines of
+/// work — a set with what it builds on — since a set can't land without
+/// its own base. More sets can only help a check pass, so a line that fails
+/// rules out everything below it too, and along the line that passes the
+/// first passing prefix ends at the set the commits were missing.
+fn search(
+    work: &mut Work,
+    c: &Commits,
+    checker: &Checker,
+    first: &Placed,
+    touched: &mut BTreeMap<u32, BTreeSet<String>>,
+) -> Result<Search> {
+    let mut probe = |work: &mut Work, extra: &[u32]| -> Result<Probe> {
+        let mut start = first.why.clone();
+        for m in graph::leaves(&work.st, extra) {
+            start.entry(m).or_insert_with(|| "the check fails without it".into());
+        }
+        let Ok(p) = place(work, c, start, touched)? else {
+            return Ok(Probe::Fail);
+        };
+        Ok(match checker.verdict(c.sync, &p.tip)? {
+            Verdict::Pass => Probe::Pass(p),
+            Verdict::Fail(_) => Probe::Fail,
+            Verdict::Unknown => Probe::Run(p.tip),
+        })
+    };
+    macro_rules! probe {
+        ($extra:expr) => {
+            match probe(work, $extra)? {
+                Probe::Run(tip) => return Ok(Search::Run(tip)),
+                Probe::Pass(p) => Some(p),
+                Probe::Fail => None,
+            }
+        };
+    }
+    if let Some(p) = probe!(&[]) {
+        return Ok(Search::Found(p));
+    }
+
+    let mine = graph::ancestors_of_deps(&work.st, &first.why.keys().copied().collect::<Vec<_>>());
+    let skipped: Vec<u32> = c.live.iter().copied().filter(|m| !mine.contains(m)).collect();
+    let line = |st: &crate::state::QueueState, top: u32| -> Vec<u32> {
+        let below = graph::ancestors(st, top);
+        graph::topo(st).into_iter().filter(|m| *m == top || (below.contains(m) && skipped.contains(m))).collect()
+    };
+    let mut leaves = graph::leaves(&work.st, &skipped);
+    leaves.reverse();
+    for leaf in leaves {
+        let whole = line(&work.st, leaf);
+        // A line holding all that was skipped is everything queued, which
+        // the fallback lands on and checks; only its prefixes are worth a
+        // probe here.
+        let mut best = None;
+        if whole.len() < skipped.len() {
+            match probe!(&whole) {
+                Some(p) => best = Some(p),
+                None => continue,
+            }
+        }
+        // The shortest prefix of the line that passes; every prefix of a
+        // line in dependency order carries its own bases.
+        let (mut lo, mut hi) = (0, whole.len());
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            match probe!(&whole[..mid]) {
+                Some(p) => (hi, best) = (mid, Some(p)),
+                None => lo = mid,
+            }
+        }
+        let Some(mut best) = best else { break };
+        // The prefix may carry sets beside the one that made it pass.
+        let needed = line(&work.st, whole[hi - 1]);
+        if needed.len() < hi
+            && let Some(p) = probe!(&needed)
+        {
+            best = p;
+        }
+        return Ok(Search::Found(best));
+    }
+    Ok(Search::Exhausted)
+}
+
+enum Probe {
+    Pass(Placed),
+    Fail,
+    Run(String),
+}
+
+/// Grow `why` from conflicts until the commits replay onto it whole and
+/// clash with nothing beside it. `Err` when only everything queued will do,
+/// with why when that's news: needing every set is just where it belongs.
+fn place(
+    work: &mut Work,
+    c: &Commits,
+    mut why: BTreeMap<u32, String>,
+    touched: &mut BTreeMap<u32, BTreeSet<String>>,
+) -> Result<std::result::Result<Placed, Option<String>>> {
+    let what = format!("{}'s land", c.repo);
+    loop {
+        let deps: Vec<u32> = why.keys().copied().collect();
+        let mine = graph::ancestors_of_deps(&work.st, &deps);
+        if c.live.iter().all(|m| mine.contains(m)) {
+            return Ok(Err(None));
+        }
+        let main = work.root(c.repo)?;
+        let spec = BaseSpec {
+            main: Some(main.clone()),
+            deps: graph::leaves(&work.st, &deps)
+                .into_iter()
+                .map(|d| (d, work.st.sets[&d].tip.clone()))
+                .collect(),
+        };
+        let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
+        let Ok(base) = work.build(c.repo, &main, &tips, &what)? else {
+            return Ok(Err(Some(
+                "landed on everything queued: the sets its commits need conflict with each other".into(),
+            )));
+        };
+        let tip = match work.replay(c.repo, &base, c.own, &what)? {
+            Ok(tip) => tip,
+            Err(files) => {
+                let owners = owners(&work.st, c.sync, c.live, &mine, touched, &files)?;
+                if owners.is_empty() {
+                    return Ok(Err(Some(format!(
+                        "landed on everything queued: its commits conflict with main itself in {}",
+                        files.join(", ")
+                    ))));
+                }
+                for m in owners {
+                    why.insert(m, format!("its commits build on it ({})", files.join(", ")));
+                }
+                continue;
+            }
+        };
+        // A replay can go through clean and still lose changes: deleting or
+        // re-deleting lines a skipped set added is "already done" without
+        // that set, so the hunk vanishes. Such commits need the set.
+        let lost = lost_changes(c.sync, (c.through, c.head), (&base, &tip))?;
+        let owners = owners(&work.st, c.sync, c.live, &mine, touched, &lost)?;
+        if !owners.is_empty() {
+            for m in owners {
+                why.insert(m, format!("its commits change what it wrote ({})", lost.join(", ")));
+            }
+            continue;
+        }
+        let clashed = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
+        if !clashed.is_empty() {
+            for (m, files) in clashed {
+                why.insert(m, format!("they conflict side by side ({})", files.join(", ")));
+            }
+            continue;
+        }
+        return Ok(Ok(Placed { why, spec, base, tip }));
     }
 }
 
@@ -898,27 +1153,6 @@ pub(crate) fn changed_lines(git: &Git, (from, to): (&str, &str)) -> Result<BTree
         lines.sort();
     }
     Ok(out)
-}
-
-/// Run `check` in the sync clone at `tip`: `Err` with its output when it
-/// fails. Tracked files are put back after, so the next step starts
-/// clean; build output is left for the next run to reuse.
-fn run_check(sync: &Git, tip: &str, check: &str) -> Result<std::result::Result<(), String>> {
-    sync.checkout_detached(tip)?;
-    let out = std::process::Command::new("sh")
-        .args(["-c", check])
-        .current_dir(sync.dir())
-        .output()
-        .map_err(|e| eyre!("running `{check}`: {e}"))?;
-    sync.reset_hard(tip)?;
-    if out.status.success() {
-        return Ok(Ok(()));
-    }
-    Ok(Err(format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )))
 }
 
 #[allow(clippy::too_many_arguments)]

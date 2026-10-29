@@ -22,7 +22,8 @@
 //!
 //! Every scenario starts in `$ROOT/trunk`, a trunk (`choros init`) whose
 //! registry holds `app`, cloned from `$ROOT/app.git` with one commit on
-//! main, and a queue `appq` for it. Git's config and clock are fixed, so
+//! main, and a queue `appq` for it, whose lands are checked with `true`
+//! (in `.choros-config/repos.toml`). Git's config and clock are fixed, so
 //! commit hashes are the same on every run. `gh` is a fake that keeps PRs in
 //! files and really merges them into the origin (`gh pr merge N --squash`,
 //! `gh pr close N`); `claude` does nothing.
@@ -201,6 +202,7 @@ impl Sandbox {
             "rm -rf seed && mkdir trunk",
             "cd trunk && choros init >/dev/null 2>&1 && git clone -q ../app.git .choros-config/registry/app",
             "cd trunk && choros queue new appq >/dev/null 2>&1",
+            r#"cd trunk && printf '[app]\ncheck = "true"\n' > .choros-config/repos.toml"#,
         ] {
             let out = self.shell(cmd);
             assert!(out.is_empty(), "setup `{cmd}`: {out:?}");

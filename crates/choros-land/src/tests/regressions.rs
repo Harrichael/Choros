@@ -23,19 +23,19 @@ fn a_sync_conflict_resolved_by_hand_then_lands() {
     let ws = w.workspace("ws");
     let repo = ws.join(REPO);
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
     w.pass();
     w.push_to_main("b.txt", "main-b\n");
     w.commit(&ws, "b.txt", "mine-b\n");
 
-    let err = w.land(&ws).unwrap_err();
+    let err = w.land_on_head(&ws).unwrap_err();
     assert!(err.to_string().contains("rebase --continue"), "{err}");
     std::fs::write(repo.join("b.txt"), "merged\n").unwrap();
     git(&repo, &["add", "b.txt"]);
     rebase_continue(&repo);
 
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let st = w.state();
     assert_eq!(w.own_commits(2), 1);
     assert_eq!(w.file_at(&st.sets[&2].tip, "b.txt").as_deref(), Some("merged\n"));
@@ -48,7 +48,7 @@ fn landing_from_a_landing_folder_is_refused() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    let landing = w.land(&ws).unwrap().landed[0].landing.clone().unwrap();
+    let landing = w.land_on_head(&ws).unwrap().landed[0].landing.clone().unwrap();
     let lrepo = landing.join(REPO);
     std::fs::write(lrepo.join("a.txt"), "a, reviewed\n").unwrap();
     git(&lrepo, &["commit", "--quiet", "-am", "review fix"]);
@@ -56,7 +56,8 @@ fn landing_from_a_landing_folder_is_refused() {
     let req = LandRequest {
         cwd: lrepo,
         mode: LandMode::Continue,
-        fork: None,
+        deps: crate::land::Deps::Head,
+        force: false,
         on_conflict: None,
         title: None,
         body: None,
@@ -76,12 +77,12 @@ fn landing_after_ones_own_set_closed_leaves_its_commits_out() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.forge.close(w.state().sets[&1].pr.as_ref().unwrap().number);
     w.pass();
 
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let st = w.state();
     assert_eq!(w.own_commits(2), 1);
     assert_eq!(w.file_at(&st.sets[&2].tip, "a.txt"), None);
@@ -96,9 +97,9 @@ fn a_crash_after_a_push_keeps_the_pushed_tip() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
     {
         let env = w.env();
@@ -126,7 +127,7 @@ fn a_refused_push_holds_back_one_set_only() {
     let ws = w.workspace("ws");
     for f in ["a", "b", "c"] {
         w.commit(&ws, &format!("{f}.txt"), &format!("{f}\n"));
-        w.land(&ws).unwrap();
+        w.land_on_head(&ws).unwrap();
     }
     let hook = w.origin.join("hooks/pre-receive");
     std::fs::write(
@@ -156,9 +157,9 @@ fn a_merge_pushed_to_a_private_set_parks_it() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    let second = w.land(&ws).unwrap().landed[0].landing.clone().unwrap().join(REPO);
+    let second = w.land_on_head(&ws).unwrap().landed[0].landing.clone().unwrap().join(REPO);
     w.push_to_main("c.txt", "c\n");
     git(&second, &["fetch", "--quiet", "origin"]);
     git(&second, &["merge", "--quiet", "--no-edit", "origin/main"]);
@@ -186,7 +187,7 @@ fn declining_a_resolution_records_no_agent_session() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "mine\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.push_to_main("a.txt", "theirs\n");
     w.pass();
     crate::admin::sync(&w.env(), &w.queue(), Some(&mut Declines)).unwrap();
@@ -228,7 +229,7 @@ fn the_prompt_flags_a_closed_pr() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.forge.close(w.state().sets[&1].pr.as_ref().unwrap().number);
     w.pass();
     assert_eq!(crate::status::prompt_token(&ws.join(REPO)), "!resolve");
@@ -255,9 +256,9 @@ fn a_reopened_pr_brings_its_subtree_back() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let pr = w.state().sets[&1].pr.as_ref().unwrap().number;
     w.forge.close(pr);
     w.pass();
@@ -275,7 +276,7 @@ fn a_chain_of_three_squash_merges_cleanly() {
     let ws = w.workspace("ws");
     for f in ["a", "b", "c"] {
         w.commit(&ws, &format!("{f}.txt"), &format!("{f}\n"));
-        w.land(&ws).unwrap();
+        w.land_on_head(&ws).unwrap();
     }
     for n in 1..=3 {
         let pr = w.state().sets[&n].pr.as_ref().expect("at the front").number;
@@ -299,9 +300,9 @@ fn a_crash_after_opening_a_pr_adopts_it() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
     {
         let q = w.queue();
@@ -323,14 +324,14 @@ fn a_crash_between_the_two_saves_does_not_land_twice() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let file = ws.join(crate::workspace::LANDING_FILE);
     let before = std::fs::read_to_string(&file).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     std::fs::write(&file, before).unwrap();
 
-    let _ = w.land(&ws);
+    let _ = w.land_on_head(&ws);
     assert_eq!(w.state().sets.len(), 2);
 }
 
@@ -341,9 +342,9 @@ fn main_moving_alone_rewrites_no_private_set() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     w.push_to_main("x.txt", "x\n");
     assert!(w.pass().resynced.is_empty());
 }
@@ -358,7 +359,7 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     let two = w.workspace("two");
     let three = w.workspace("three");
     w.commit(&one, "README", "one\n");
-    w.land(&one).unwrap();
+    w.land_on_head(&one).unwrap();
     w.commit(&two, "README", "two\n");
     w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
     let st = w.state();
@@ -366,7 +367,7 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     assert_eq!(st.sets[&fork].park.as_ref().map(|p| p.op), Some(ParkOp::MergeHead));
 
     w.commit(&three, "c.txt", "c\n");
-    w.land(&three).unwrap();
+    w.land_on_head(&three).unwrap();
     let st = w.state();
     let mh = &st.repos[REPO].merge_head.as_ref().unwrap().sha;
     assert_eq!(w.file_at(mh, "README").as_deref(), Some("one\n"));

@@ -20,7 +20,8 @@ fn landing_two_repos_makes_a_set_in_each() {
     let req = LandRequest {
         cwd: ws.clone(),
         mode: LandMode::Continue,
-        fork: None,
+        deps: crate::land::Deps::Head,
+        force: false,
         on_conflict: None,
         title: None,
         body: None,
@@ -64,7 +65,8 @@ fn a_dependency_across_repos_orders_the_prs() {
     let lib_req = LandRequest {
         cwd: ws.join("lib"),
         mode: LandMode::Continue,
-        fork: None,
+        deps: crate::land::Deps::Head,
+        force: false,
         on_conflict: None,
         title: None,
         body: None,
@@ -94,7 +96,7 @@ fn a_one_repo_queue_from_before_is_read_into_its_repo() {
     let w = World::new();
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     let mh = w.state().repos[REPO].merge_head.clone().unwrap();
 
     let dir = w.queue().dir();
@@ -114,6 +116,6 @@ fn a_one_repo_queue_from_before_is_read_into_its_repo() {
     assert_eq!(st.repos[REPO].main, "main");
     assert_eq!(st.repos[REPO].merge_head.as_ref().unwrap().sha, mh.sha);
     w.commit(&ws, "b.txt", "b\n");
-    w.land(&ws).unwrap();
+    w.land_on_head(&ws).unwrap();
     assert_eq!(w.state().sets[&2].deps, [Dep::Set(1)]);
 }
