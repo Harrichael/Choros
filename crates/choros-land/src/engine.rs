@@ -102,6 +102,12 @@ pub struct PassReport {
     pub resynced: Vec<u32>,
     pub updated_public: Vec<u32>,
     pub opened: Vec<u32>,
+    /// Opened as stacked PRs, behind the front.
+    pub stacked: Vec<u32>,
+    /// Stacked sets whose branch GitHub rebased after a merge, taken as is.
+    pub adopted: Vec<u32>,
+    /// Stacked sets left empty by a replay, folded into the set below.
+    pub folded: Vec<u32>,
     /// Merged without a PR: every change in them was already on main.
     pub already_on_main: Vec<u32>,
     pub parked: Vec<u32>,
@@ -123,6 +129,9 @@ pub struct Work<'q, 'h> {
     /// Whether the handler had a go at the conflict the last build or
     /// replay stopped on: what a park made from it records.
     conflict_tried: bool,
+    /// Stacked sets the last replay left with nothing of their own; see
+    /// `fold_into_below`.
+    emptied: BTreeSet<u32>,
     _lock: QueueLock,
 }
 
@@ -160,6 +169,7 @@ impl<'q, 'h> Work<'q, 'h> {
             agent,
             handler,
             conflict_tried: false,
+            emptied: BTreeSet::new(),
             _lock: lock,
         };
         work.settle_pending_pushes()?;
@@ -401,6 +411,12 @@ impl<'q, 'h> Work<'q, 'h> {
             Ok(t) => t,
             Err(files) => return self.park(n, ParkOp::Resync, files, spec.key()),
         };
+        // GitHub closes a PR left with nothing of its own, and won't merge a
+        // stack through a closed PR; so the empty branch is never pushed.
+        if tip == base && graph::stacked(&self.st, n) {
+            self.emptied.insert(n);
+            return Ok(false);
+        }
         let set = self.st.sets.get_mut(&n).unwrap();
         set.pending = Some(PendingPush {
             old_tip: std::mem::replace(&mut set.tip, tip),
@@ -500,11 +516,12 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     /// Commits pushed to a set's branch from elsewhere — review fixes from
-    /// its landing folder — become part of the set. A rewrite does not.
-    pub fn observe_pushes(&mut self) -> Result<()> {
+    /// its landing folder — become part of the set. A rewrite does not,
+    /// unless it is GitHub rebasing a stack after a merge. Dependencies
+    /// first, so a set sees the tip adopted under it.
+    pub fn observe_pushes(&mut self, report: &mut PassReport) -> Result<()> {
         let name = self.q.name.clone();
-        let ids: Vec<u32> = self.st.sets.keys().copied().collect();
-        for n in ids {
+        for n in graph::topo(&self.st) {
             let set = &self.st.sets[&n];
             if !set.is_open() {
                 continue;
@@ -512,13 +529,30 @@ impl<'q, 'h> Work<'q, 'h> {
             let Some(seen) = set.remote.clone() else { continue };
             let git = self.set_git(n);
             let remote = git.rev_parse(&format!("refs/remotes/origin/{}", branch(&name, n)))?;
+            let public = graph::public(&self.st, n);
+            if let Some(r) = &remote
+                && *r != seen
+                && !git.is_ancestor(&self.st.sets[&n].tip, r)?
+                && let Some((base, base_sha)) = self.rebased_by_github(n, r)?
+            {
+                let set = self.st.sets.get_mut(&n).unwrap();
+                set.base = base;
+                set.base_sha = base_sha;
+                set.tip = r.clone();
+                set.remote = Some(r.clone());
+                if set.park.as_ref().is_some_and(|p| p.op == ParkOp::Diverged) {
+                    set.park = None;
+                }
+                report.adopted.push(n);
+                continue;
+            }
             let set = self.st.sets.get_mut(&n).unwrap();
             match remote {
                 None => set.remote = None,
                 Some(r) if r == seen => {}
                 // A merge commit cannot be replayed with its set; public sets
-                // are never replayed, so only a private one has to stop.
-                Some(r) if set.pr.is_none() && git.is_ancestor(&set.tip, &r)? && git.has_merges(&set.tip, &r)? => {
+                // are never replayed, so only the others have to stop.
+                Some(r) if !public && git.is_ancestor(&set.tip, &r)? && git.has_merges(&set.tip, &r)? => {
                     set.park = Some(Park {
                         op: ParkOp::PushedMerge,
                         files: Vec::new(),
@@ -541,6 +575,87 @@ impl<'q, 'h> Work<'q, 'h> {
                             tried: false,
                         });
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// When a set merges, GitHub rebases the linked branches above it onto
+    /// what is left, dropping the merged commits. `r`, the branch's new tip,
+    /// is taken as that rebase when it sits where the graph says the set
+    /// now sits, and that is somewhere new. The base to record is what
+    /// `desired_base` would give, so the next pass leaves the PR alone.
+    fn rebased_by_github(&self, n: u32, r: &str) -> Result<Option<(BaseSpec, String)>> {
+        let set = &self.st.sets[&n];
+        if set.pr.is_none() || set.stack.is_none() {
+            return Ok(None);
+        }
+        let git = self.set_git(n);
+        match graph::unmerged_deps(&self.st, n).as_slice() {
+            // The set it sat on merged: GitHub moved it onto main.
+            [] => {
+                let main = self.main_sha(set.repo())?;
+                let x = git.run(&["merge-base", r, &main])?;
+                let moved_on = match &set.base.main {
+                    Some(m) => *m != x && git.is_ancestor(m, &x)?,
+                    None => x != set.base_sha,
+                };
+                // A merge commit leaves the merged set's commits on main, so
+                // still holding them is fine; holding them off main is not.
+                let mut dropped_merged = true;
+                for (_, t) in &set.base.deps {
+                    dropped_merged &= !git.is_ancestor(t, r)? || git.is_ancestor(t, &x)?;
+                }
+                Ok((moved_on && dropped_merged).then(|| {
+                    let base = BaseSpec {
+                        main: Some(x.clone()),
+                        deps: Vec::new(),
+                    };
+                    (base, x)
+                }))
+            }
+            // A set further down merged: GitHub moved the one under it too.
+            // A rebase onto it from a landing folder passes as well; it is
+            // what a re-sync would have done.
+            [p] => {
+                let under = self.st.sets[p].tip.clone();
+                let was = set.base.deps.iter().find(|(d, _)| d == p).map(|(_, t)| t.as_str());
+                let moved = was != Some(under.as_str()) && git.is_ancestor(&under, r)?;
+                Ok(moved.then(|| {
+                    let base = BaseSpec {
+                        main: set.base.main.clone(),
+                        deps: vec![(*p, under.clone())],
+                    };
+                    (base, under)
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Which GitHub stack each PR is in, and what its PR is based on. A
+    /// linked PR is pointed at main by GitHub when the set below merges.
+    pub fn observe_stacks(&mut self, forge: &dyn Forge) -> Result<()> {
+        let repos: BTreeSet<String> = self
+            .st
+            .sets
+            .values()
+            .filter(|s| s.is_open() && s.pr.is_some())
+            .filter(|s| self.q.config.stack.enabled || s.pr_base.is_some() || s.stack.is_some())
+            .map(|s| s.repo().to_string())
+            .collect();
+        for repo in repos {
+            let stacks = forge.stacks(self.git(&repo).dir())?;
+            let main = self.main_branch(&repo)?;
+            for set in self.st.sets.values_mut().filter(|s| s.is_open() && s.repo() == repo) {
+                let Some(pr) = &set.pr else { continue };
+                let found = stacks
+                    .iter()
+                    .find_map(|s| s.prs.iter().find(|(p, _)| *p == pr.number).map(|(_, base)| (s.number, base)));
+                set.stack = found.map(|(s, _)| s);
+                if let Some((_, base)) = found {
+                    set.pr_base = (*base != main).then(|| base.clone());
                 }
             }
         }
@@ -685,7 +800,9 @@ impl<'q, 'h> Work<'q, 'h> {
         }
     }
 
-    pub fn open_pr(&mut self, n: u32, forge: &dyn Forge) -> Result<()> {
+    /// Open `n`'s PR on main, or, for a stacked PR, on the branch of the
+    /// set `on` it sits on.
+    pub fn open_pr(&mut self, n: u32, on: Option<u32>, forge: &dyn Forge) -> Result<()> {
         let set = self.st.sets[&n].clone();
         let git = self.git(set.repo());
         let branch = set.branch(&self.q.name);
@@ -698,8 +815,11 @@ impl<'q, 'h> Work<'q, 'h> {
         let title = self.q.pr_title(&set)?;
         // A PR opened by a pass that died before saving is still there; GitHub
         // would refuse a second one for the same branch.
+        let pr_base = on.map(|p| self.st.sets[&p].branch(&self.q.name));
         if let Some(pr) = forge.find_open_pr(git.dir(), &branch)? {
-            self.st.sets.get_mut(&n).unwrap().pr = Some(pr);
+            let set = self.st.sets.get_mut(&n).unwrap();
+            set.pr = Some(pr);
+            set.pr_base = pr_base;
             return Ok(());
         }
         let main = self.main_branch(set.repo())?;
@@ -712,14 +832,309 @@ impl<'q, 'h> Work<'q, 'h> {
             git.dir(),
             &PrRequest {
                 head: &branch,
-                base: &main,
+                base: pr_base.as_deref().unwrap_or(&main),
                 title: &title,
                 body: &body,
                 draft: self.q.config.pr.draft,
             },
         )?;
-        self.st.sets.get_mut(&n).unwrap().pr = Some(pr);
+        let set = self.st.sets.get_mut(&n).unwrap();
+        set.pr = Some(pr);
+        set.pr_base = pr_base;
         Ok(())
+    }
+
+    /// Open stacked PRs while the cap allows, the longest line first, and
+    /// link each into its stack. Errors are reported, never fatal: a PR
+    /// left unlinked is linked by a later pass.
+    fn open_stacked(&mut self, forge: &dyn Forge, report: &mut PassReport) {
+        let mut tried = BTreeSet::new();
+        let mut ready: BTreeMap<String, bool> = BTreeMap::new();
+        loop {
+            let pick = self
+                .stack_candidates()
+                .into_iter()
+                .filter(|(n, _, _)| !tried.contains(n))
+                .max_by_key(|(n, _, line)| (*line, std::cmp::Reverse(*n)));
+            let Some((n, p, _)) = pick else { break };
+            tried.insert(n);
+            let repo = self.st.sets[&n].repo().to_string();
+            let dir = self.git(&repo).dir().to_path_buf();
+            let ok = *ready.entry(repo.clone()).or_insert_with(|| match forge.stacks_ready(&dir) {
+                Ok(()) => true,
+                Err(e) => {
+                    report.errors.push(format!("{repo}: no stacked PRs: {e}"));
+                    false
+                }
+            });
+            if !ok {
+                continue;
+            }
+            if let Err(e) = self.open_pr(n, Some(p), forge) {
+                report.errors.push(format!("landing-{n}: opening its stacked PR failed: {e}"));
+                continue;
+            }
+            report.stacked.push(n);
+            if let Err(e) = self.link(n, p, forge) {
+                report.errors.push(format!("landing-{n}: linking its PR into a stack failed: {e}"));
+            }
+        }
+    }
+
+    /// Put `n`'s PR on top of the stack `p`'s is in, or start one with them.
+    fn link(&mut self, n: u32, p: u32, forge: &dyn Forge) -> Result<()> {
+        let (under, top) = (&self.st.sets[&p], &self.st.sets[&n]);
+        let (Some(under_pr), Some(pr)) = (&under.pr, &top.pr) else {
+            return Ok(());
+        };
+        let dir = self.git(top.repo()).dir().to_path_buf();
+        let stack = match under.stack {
+            Some(s) => forge.link_stack(&dir, Some(s), &[pr.number])?,
+            None => forge.link_stack(&dir, None, &[under_pr.number, pr.number])?,
+        };
+        self.st.sets.get_mut(&p).unwrap().stack = Some(stack);
+        self.st.sets.get_mut(&n).unwrap().stack = Some(stack);
+        Ok(())
+    }
+
+    /// A stacked PR that never got linked (a pass died, or `gh stack`
+    /// failed) is linked now, if the set it sits on still has its PR.
+    fn link_unlinked(&mut self, forge: &dyn Forge, report: &mut PassReport) {
+        let name = self.q.name.clone();
+        for n in graph::topo(&self.st) {
+            let set = &self.st.sets[&n];
+            if !graph::stacked(&self.st, n) || set.stack.is_some() {
+                continue;
+            }
+            let under = self
+                .st
+                .sets
+                .values()
+                .find(|s| s.is_open() && s.pr.is_some() && set.pr_base.as_deref() == Some(s.branch(&name).as_str()))
+                .map(|s| s.n);
+            // As for a new stacked PR: under an unlinked one, linking would
+            // start a second stack.
+            let under = under.filter(|p| graph::public(&self.st, *p) || self.st.sets[p].stack.is_some());
+            if let Some(p) = under
+                && let Err(e) = self.link(n, p, forge)
+            {
+                report.errors.push(format!("landing-{n}: linking its PR into a stack failed: {e}"));
+            }
+        }
+    }
+
+    /// Sets that may get a stacked PR now, each with the set it would sit
+    /// on and the length of its line: the stack under it, itself, and the
+    /// longest chain of sets built on it.
+    fn stack_candidates(&self) -> Vec<(u32, u32, usize)> {
+        let name = &self.q.name;
+        let cross = |queue: &str, m: u32| self.cross_merged()(queue, m);
+        let open_prs = |repo: &str| {
+            self.st
+                .sets
+                .values()
+                .filter(|s| s.is_open() && s.pr.is_some() && s.repo() == repo)
+                .count()
+        };
+        let mut out = Vec::new();
+        for n in graph::live(&self.st) {
+            let set = &self.st.sets[&n];
+            if set.pr.is_some() || set.tip == set.base_sha {
+                continue;
+            }
+            let waiting: Vec<&Dep> = set
+                .deps
+                .iter()
+                .filter(|d| match d {
+                    Dep::Set(m) => self.st.sets.get(m).is_some_and(|s| s.status != SetStatus::Merged),
+                    Dep::Cross { queue, n } => !cross(queue, *n),
+                })
+                .collect();
+            let [Dep::Set(p)] = waiting.as_slice() else { continue };
+            let under = &self.st.sets[p];
+            // A closed child is still in GitHub's stack until it is dropped.
+            let has_child = self.st.sets.values().any(|s| {
+                matches!(s.status, SetStatus::Queued | SetStatus::Closed)
+                    && s.pr_base.as_deref() == Some(under.branch(name).as_str())
+            });
+            // Under an unlinked stacked PR, linking would start a second
+            // stack and strand that PR's own link.
+            if under.repo() != set.repo()
+                || under.pr.is_none()
+                || !(graph::public(&self.st, *p) || under.stack.is_some())
+                || has_child
+                || set.base.deps != [(*p, under.tip.clone())]
+                || open_prs(set.repo()) >= self.q.config.stack.max_open as usize
+            {
+                continue;
+            }
+            let below = graph::ancestors(&self.st, n)
+                .into_iter()
+                .filter(|a| self.st.sets[a].is_open())
+                .count();
+            out.push((n, *p, below + 1 + self.longest_chain_on(n)));
+        }
+        out
+    }
+
+    /// How many open sets, one on another, build on `n` at most.
+    fn longest_chain_on(&self, n: u32) -> usize {
+        let repo = self.st.sets[&n].repo();
+        self.st
+            .sets
+            .values()
+            .filter(|s| s.is_open() && s.repo() == repo && s.deps.contains(&Dep::Set(n)))
+            .map(|s| 1 + self.longest_chain_on(s.n))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// GitHub won't move an unlinked PR when the set below merges; once its
+    /// set has been replayed onto main, point the PR there.
+    fn retarget_unlinked(&mut self, forge: &dyn Forge, report: &mut PassReport) {
+        for n in graph::topo(&self.st) {
+            let set = &self.st.sets[&n];
+            if !graph::stacked(&self.st, n)
+                || set.stack.is_some()
+                || set.park.is_some()
+                || !graph::unmerged_deps(&self.st, n).is_empty()
+                || !set.base.deps.is_empty()
+            {
+                continue;
+            }
+            let repo = set.repo().to_string();
+            let number = set.pr.as_ref().unwrap().number;
+            let main = match self.main_branch(&repo) {
+                Ok(m) => m,
+                Err(e) => {
+                    report.errors.push(format!("landing-{n}: {e}"));
+                    continue;
+                }
+            };
+            match forge.set_pr_base(self.git(&repo).dir(), number, &main) {
+                Ok(()) => self.st.sets.get_mut(&n).unwrap().pr_base = None,
+                Err(e) => report.errors.push(format!("landing-{n}: pointing its PR at {main} failed: {e}")),
+            }
+        }
+    }
+
+    /// A stacked set whose replay left it with nothing of its own. Its
+    /// change is all in the set it sits on (a fix there did the same), so
+    /// it leaves the queue and its tasks go with that set: its labels and
+    /// sessions, which are how other tools find a set's tasks, are added
+    /// there. With nothing under it, its change is already on main, and it
+    /// is merged. Either way its PR is closed, and the PRs on it move down;
+    /// GitHub won't change a stacked PR's base, so the stack is dissolved
+    /// first and linked again later in the pass.
+    fn fold_into_below(&mut self, n: u32, forge: &dyn Forge, report: &mut PassReport) {
+        let name = self.q.name.clone();
+        let p = match graph::unmerged_deps(&self.st, n)[..] {
+            [p] => Some(p),
+            _ => None,
+        };
+        let set = &self.st.sets[&n];
+        let repo = set.repo().to_string();
+        let dir = self.git(&repo).dir().to_path_buf();
+        let fail = |report: &mut PassReport, e: color_eyre::Report| {
+            report.errors.push(format!("landing-{n}: closing its emptied PR failed: {e}"));
+        };
+        if let Some(stack) = set.stack {
+            if let Err(e) = forge.unstack(&dir, stack) {
+                return fail(report, e);
+            }
+            for s in self.st.sets.values_mut().filter(|s| s.stack == Some(stack)) {
+                s.stack = None;
+            }
+        }
+        let note = match p {
+            Some(p) => {
+                // Onto main instead, the pass moves them once replayed.
+                let below = self.st.sets[&p].branch(&name);
+                let mine = self.st.sets[&n].branch(&name);
+                let on_it: Vec<u32> = self
+                    .st
+                    .sets
+                    .values()
+                    .filter(|s| s.is_open() && s.pr_base.as_deref() == Some(mine.as_str()))
+                    .map(|s| s.n)
+                    .collect();
+                for m in on_it {
+                    let pr = self.st.sets[&m].pr.as_ref().unwrap().number;
+                    if let Err(e) = forge.set_pr_base(&dir, pr, &below) {
+                        return fail(report, e);
+                    }
+                    self.st.sets.get_mut(&m).unwrap().pr_base = Some(below.clone());
+                }
+                match &self.st.sets[&p].pr {
+                    Some(b) => format!("Everything here is now in #{}, which this sat on.", b.number),
+                    None => format!("Everything here is now in {below}, which this sat on."),
+                }
+            }
+            None => "Everything here is already on main.".to_string(),
+        };
+        let pr = self.st.sets[&n].pr.as_ref().unwrap().number;
+        if let Err(e) = forge.close_pr(&dir, pr, &note) {
+            return fail(report, e);
+        }
+        let Some(p) = p else {
+            let main = match self.main_sha(&repo) {
+                Ok(m) => m,
+                Err(e) => return fail(report, e),
+            };
+            let set = self.st.sets.get_mut(&n).unwrap();
+            set.status = SetStatus::Merged;
+            set.merged_into = Some(main);
+            report.merged.push(n);
+            report.already_on_main.push(n);
+            return;
+        };
+        let (labels, sessions) = (self.st.sets[&n].labels.clone(), self.st.sets[&n].sessions.clone());
+        let under = self.st.sets.get_mut(&p).unwrap();
+        for l in labels {
+            if !under.labels.contains(&l) {
+                under.labels.push(l);
+            }
+        }
+        for s in sessions {
+            if !under.sessions.iter().any(|u| u.source == s.source) {
+                under.sessions.push(s);
+            }
+        }
+        graph::splice_out(&mut self.st, n);
+        let set = self.st.sets.get_mut(&n).unwrap();
+        set.status = SetStatus::Dropped;
+        set.park = None;
+        report.folded.push(n);
+    }
+
+    /// A dropped set's branch goes once no open PR is based on it: GitHub
+    /// closes a PR whose base branch is deleted.
+    fn prune_dropped(&mut self, report: &mut PassReport) {
+        let name = self.q.name.clone();
+        let gone: Vec<u32> = self
+            .st
+            .sets
+            .values()
+            .filter(|s| s.status == SetStatus::Dropped && s.remote.is_some())
+            .filter(|d| {
+                let b = d.branch(&name);
+                !self.st.sets.values().any(|s| s.is_open() && s.pr_base.as_deref() == Some(b.as_str()))
+            })
+            .map(|s| s.n)
+            .collect();
+        for n in gone {
+            let git = self.set_git(n);
+            let b = branch(&name, n);
+            let on_origin = git.rev_parse(&format!("refs/remotes/origin/{b}")).ok().flatten().is_some();
+            if !on_origin {
+                self.st.sets.get_mut(&n).unwrap().remote = None;
+                continue;
+            }
+            match git.delete_remote_branch("origin", &b) {
+                Ok(()) => self.st.sets.get_mut(&n).unwrap().remote = None,
+                Err(e) => report.errors.push(format!("landing-{n}: deleting its dropped branch failed: {e}")),
+            }
+        }
     }
 
     /// Whether a dependency in another queue has merged.
@@ -737,7 +1152,10 @@ impl<'q, 'h> Work<'q, 'h> {
     pub fn pass(&mut self, forge: &dyn Forge) -> Result<PassReport> {
         let mut report = PassReport::default();
         self.observe_prs(forge, &mut report)?;
-        self.observe_pushes()?;
+        if let Err(e) = self.observe_stacks(forge) {
+            report.errors.push(format!("reading GitHub's stacks failed: {e}"));
+        }
+        self.observe_pushes(&mut report)?;
         // GitHub unreachable: build on what was last seen.
         if let Err(e) = self.observe_diffbase(forge) {
             report.errors.push(format!("checking the diffbase's PRs failed: {e}"));
@@ -751,6 +1169,15 @@ impl<'q, 'h> Work<'q, 'h> {
 
         let mut settings: BTreeMap<String, RepoSettings> = BTreeMap::new();
         for n in graph::topo(&self.st) {
+            // A closed PR holds what builds on it until it is reopened or
+            // dropped: replaying them now would take its work, and what it
+            // sat on, out from under them.
+            if graph::ancestors(&self.st, n)
+                .iter()
+                .any(|a| self.st.sets.get(a).is_some_and(|s| s.status == SetStatus::Closed))
+            {
+                continue;
+            }
             if graph::ancestors(&self.st, n)
                 .into_iter()
                 .any(|a| self.st.sets.get(&a).is_some_and(|s| s.is_open()) && graph::blocked(&self.st, a))
@@ -761,7 +1188,13 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.status != SetStatus::Queued {
                 continue;
             }
-            if set.is_public() {
+            // GitHub is rebasing the linked line above a merge; give it a
+            // pass. That covers a PR GitHub has already put on main but not
+            // yet rebased, which would otherwise count as public.
+            if set.stack.is_some() && graph::ancestors(&self.st, n).iter().any(|a| report.merged.contains(a)) {
+                continue;
+            }
+            if graph::public(&self.st, n) {
                 let repo = set.repo().to_string();
                 if set.park.as_ref().is_some_and(|p| {
                     p.op == ParkOp::MainIntoPublic
@@ -795,6 +1228,8 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             if self.resync(n, spec)? {
                 report.resynced.push(n);
+            } else if self.emptied.remove(&n) {
+                self.fold_into_below(n, forge, &mut report);
             } else if self.st.sets[&n].park.is_some() {
                 report.parked.push(n);
             } else {
@@ -842,11 +1277,19 @@ impl<'q, 'h> Work<'q, 'h> {
                 report.already_on_main.push(n);
                 continue;
             }
-            match self.open_pr(n, forge) {
+            match self.open_pr(n, None, forge) {
                 Ok(()) => report.opened.push(n),
                 Err(e) => report.errors.push(format!("landing-{n}: opening its PR failed: {e}")),
             }
         }
+        self.retarget_unlinked(forge, &mut report);
+        if self.q.config.stack.enabled && !waiting {
+            self.open_stacked(forge, &mut report);
+        }
+        if self.q.config.stack.enabled {
+            self.link_unlinked(forge, &mut report);
+        }
+        self.prune_dropped(&mut report);
         self.tend_landings(&report);
         Ok(report)
     }
@@ -856,7 +1299,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// folders are left alone (status flags them). Best-effort: a landing
     /// folder is a convenience, never a reason to fail a pass.
     fn tend_landings(&self, report: &PassReport) {
-        for n in report.resynced.iter().chain(&report.updated_public) {
+        for n in report.resynced.iter().chain(&report.updated_public).chain(&report.adopted) {
             let repo = self.st.sets[n].repo();
             let dir = self.q.landing_dir(*n).join(repo);
             if !dir.exists() {

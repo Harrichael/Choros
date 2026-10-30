@@ -65,6 +65,8 @@ pub struct SetLine {
     pub blocked: bool,
     pub conflicts_with: Vec<u32>,
     pub landing_dirty: bool,
+    /// A stacked PR not yet linked into a GitHub stack.
+    pub unlinked: bool,
 }
 
 /// The queues a command run at `cwd` is about. Inside a workspace: the ones
@@ -167,6 +169,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             SetStatus::Merged => "merged",
             SetStatus::Closed => "closed",
             SetStatus::Dropped => "dropped",
+            SetStatus::Queued if graph::stacked(&st, *n) => "stacked",
             SetStatus::Queued if set.pr.is_some() => "front",
             SetStatus::Queued => "queued",
         };
@@ -197,6 +200,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             blocked: set.is_open() && set.park.is_none() && graph::blocked(&st, *n),
             conflicts_with: set.conflicts_with.clone(),
             landing_dirty,
+            unlinked: graph::stacked(&st, *n) && set.stack.is_none(),
         });
     }
     let mut needs_sync = Vec::new();

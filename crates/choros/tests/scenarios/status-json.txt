@@ -47,7 +47,8 @@ $ choros status --json
           "park": null,
           "blocked": false,
           "conflicts_with": [],
-          "landing_dirty": false
+          "landing_dirty": false,
+          "unlinked": false
         },
         {
           "n": 2,
@@ -72,7 +73,8 @@ $ choros status --json
           "park": null,
           "blocked": false,
           "conflicts_with": [],
-          "landing_dirty": false
+          "landing_dirty": false,
+          "unlinked": false
         }
       ],
       "needs_sync": [

@@ -42,6 +42,14 @@ pub struct PrReview {
     pub approved: bool,
 }
 
+/// An open GitHub stack: its PRs bottom to top, merged and closed ones
+/// included, each with the branch it is based on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stack {
+    pub number: u64,
+    pub prs: Vec<(u64, String)>,
+}
+
 pub struct PrRequest<'a> {
     pub head: &'a str,
     pub base: &'a str,
@@ -60,16 +68,37 @@ pub trait Forge {
     fn merge_pr(&self, repo: &Path, number: u64, method: MergeMethod) -> Result<()>;
     /// The repo's PR template, the org's default included.
     fn pr_template(&self, repo: &Path) -> Result<Option<String>>;
+    fn close_pr(&self, repo: &Path, number: u64, comment: &str) -> Result<()>;
+    /// GitHub refuses this for a PR in a stack.
+    fn set_pr_base(&self, repo: &Path, number: u64, base: &str) -> Result<()>;
+    /// Err when stacks can't be made from here (`gh stack` missing).
+    fn stacks_ready(&self, repo: &Path) -> Result<()>;
+    fn stacks(&self, repo: &Path) -> Result<Vec<Stack>>;
+    /// Put `prs`, bottom to top, on top of `stack`, or into a new stack
+    /// when `None`. GitHub refuses a link that would leave out a member of
+    /// a stack already holding one of them. Returns the stack's number.
+    fn link_stack(&self, repo: &Path, stack: Option<u64>, prs: &[u64]) -> Result<u64>;
+    /// Dissolve the stack; its PRs stay open.
+    fn unstack(&self, repo: &Path, stack: u64) -> Result<()>;
 }
 
 pub struct Gh {
     /// `<trunk>/.choros-config/gh` when the trunk has its own account.
     pub config_dir: Option<PathBuf>,
+    /// Tests swap in a stand-in that answers as GitHub did.
+    bin: PathBuf,
 }
 
 impl Gh {
+    pub fn new(config_dir: Option<PathBuf>) -> Gh {
+        Gh {
+            config_dir,
+            bin: "gh".into(),
+        }
+    }
+
     fn run(&self, repo: &Path, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new("gh");
+        let mut cmd = Command::new(&self.bin);
         cmd.current_dir(repo).args(args);
         if let Some(dir) = &self.config_dir {
             cmd.env("GH_CONFIG_DIR", dir);
@@ -83,6 +112,23 @@ impl Gh {
             ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// `gh stack` is an extension, and it can't read a token kept in the
+    /// keychain under `GH_CONFIG_DIR`; hand it one.
+    fn run_stack(&self, repo: &Path, args: &[&str]) -> Result<String> {
+        let token = self.run(repo, &["auth", "token"])?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.current_dir(repo).arg("stack").args(args).env("GH_TOKEN", token);
+        if let Some(dir) = &self.config_dir {
+            cmd.env("GH_CONFIG_DIR", dir);
+        }
+        let out = cmd.output()?;
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if !out.status.success() {
+            return Err(eyre!("gh stack {} failed:\n{}", args.join(" "), text.trim()));
+        }
+        Ok(text)
     }
 }
 
@@ -177,6 +223,63 @@ impl Forge for Gh {
         })
     }
 
+    fn close_pr(&self, repo: &Path, number: u64, comment: &str) -> Result<()> {
+        self.run(repo, &["pr", "close", &number.to_string(), "--comment", comment])?;
+        Ok(())
+    }
+
+    fn set_pr_base(&self, repo: &Path, number: u64, base: &str) -> Result<()> {
+        self.run(repo, &["pr", "edit", &number.to_string(), "--base", base])?;
+        Ok(())
+    }
+
+    fn stacks_ready(&self, repo: &Path) -> Result<()> {
+        self.run(repo, &["stack", "--help"])
+            .map(|_| ())
+            .map_err(|_| eyre!("`gh stack` is missing; install it with `gh extension install github/gh-stack`"))
+    }
+
+    fn stacks(&self, repo: &Path) -> Result<Vec<Stack>> {
+        // The listing leaves out each PR's base; only one stack's own page has it.
+        let v: Value = serde_json::from_str(&self.run(repo, &["api", "--paginate", "--slurp", "repos/{owner}/{repo}/stacks"])?)?;
+        let open: Vec<u64> = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|page| page.as_array().into_iter().flatten())
+            .filter(|s| s["open"].as_bool() == Some(true))
+            .filter_map(|s| s["number"].as_u64())
+            .collect();
+        let mut out = Vec::new();
+        for n in open {
+            let v: Value = serde_json::from_str(&self.run(repo, &["api", &format!("repos/{{owner}}/{{repo}}/stacks/{n}")])?)?;
+            out.extend(parse_stack(&v));
+        }
+        Ok(out)
+    }
+
+    fn link_stack(&self, repo: &Path, stack: Option<u64>, prs: &[u64]) -> Result<u64> {
+        let mut args: Vec<String> = vec!["link".into()];
+        args.extend(stack.map(|s| s.to_string()));
+        args.extend(prs.iter().map(u64::to_string));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.run_stack(repo, &args)?;
+        if let Some(n) = stack {
+            return Ok(n);
+        }
+        // "✓ Created stack with 2 PRs (stack #16 (https://…))"
+        out.split("stack #")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| eyre!("could not read a stack number from `gh stack link`:\n{}", out.trim()))
+    }
+
+    fn unstack(&self, repo: &Path, stack: u64) -> Result<()> {
+        self.run_stack(repo, &["unstack", &stack.to_string()])?;
+        Ok(())
+    }
+
     fn merge_pr(&self, repo: &Path, number: u64, method: MergeMethod) -> Result<()> {
         let flag = match method {
             MergeMethod::Merge => "--merge",
@@ -186,6 +289,17 @@ impl Forge for Gh {
         self.run(repo, &["pr", "merge", &number.to_string(), flag])?;
         Ok(())
     }
+}
+
+fn parse_stack(v: &Value) -> Option<Stack> {
+    Some(Stack {
+        number: v["number"].as_u64()?,
+        prs: v["pull_requests"]
+            .as_array()?
+            .iter()
+            .filter_map(|p| Some((p["number"].as_u64()?, p["base"]["ref"].as_str()?.to_string())))
+            .collect(),
+    })
 }
 
 /// Commits count by when they were written, not committed: a rebase, like a
@@ -297,6 +411,59 @@ mod tests {
             vec!["2026-10-01T00:00:00Z"],
         );
         assert!(!unanswered(&approved), "a bare approval needs no answer");
+    }
+
+    /// `gh` as GitHub answered it when tried (trimmed): the stack listing
+    /// leaves out each PR's base, which only a stack's own page gives. A
+    /// closed PR in the middle keeps its place, and the PR above it stays
+    /// on its branch.
+    #[test]
+    fn gh_reads_each_prs_base_from_its_stacks_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gh");
+        let pr = |n: u64, state: &str, head: &str| {
+            json!({"number": n, "state": state, "draft": false, "merged_at": null,
+                   "head": {"ref": head, "sha": "48ded4b775619006d72e4b9e005c18788dc0df11"}})
+        };
+        let listing = json!([[
+            {"number": 15, "open": true, "base": {"ref": "main"},
+             "pull_requests": [pr(12, "open", "q/landing-1"), pr(13, "closed", "q/landing-2"), pr(14, "open", "q/landing-3")]},
+            {"number": 11, "open": false, "base": {"ref": "main"}, "pull_requests": []},
+        ]]);
+        let with_base = |n: u64, state: &str, head: &str, base: &str| {
+            let mut p = pr(n, state, head);
+            p["base"] = json!({"ref": base, "sha": "d55dd64e52154092b0ea0f40f8b5d33782a41f60"});
+            p
+        };
+        let page = json!({"number": 15, "open": true, "base": {"ref": "main"}, "pull_requests": [
+            with_base(12, "open", "q/landing-1", "main"),
+            with_base(13, "closed", "q/landing-2", "q/landing-1"),
+            with_base(14, "open", "q/landing-3", "q/landing-2"),
+        ]});
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n\
+                 'auth token') echo tok ;;\n\
+                 'api --paginate --slurp repos/{{owner}}/{{repo}}/stacks') echo '{listing}' ;;\n\
+                 'api repos/{{owner}}/{{repo}}/stacks/15') echo '{page}' ;;\n\
+                 'stack link 12 14') [ \"$GH_TOKEN\" = tok ] || exit 4\n\
+                   echo '\u{2713} Created stack with 2 PRs (stack #16 (https://github.com/o/r/stack/16))' ;;\n\
+                 *) echo \"unexpected: $*\" >&2; exit 1 ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let gh = Gh { config_dir: None, bin };
+
+        assert_eq!(
+            gh.stacks(dir.path()).unwrap(),
+            [Stack {
+                number: 15,
+                prs: vec![(12, "main".into()), (13, "q/landing-1".into()), (14, "q/landing-2".into())],
+            }]
+        );
+        assert_eq!(gh.link_stack(dir.path(), None, &[12, 14]).unwrap(), 16);
     }
 
     /// Without required reviews GitHub gives no decision, so each

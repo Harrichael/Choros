@@ -29,9 +29,7 @@ impl Tools {
     fn for_trunk(trunk: &Path) -> Tools {
         let gh_dir = trunk.join(choros::CONFIG_DIR).join("gh");
         Tools {
-            gh: Gh {
-                config_dir: gh_dir.exists().then_some(gh_dir),
-            },
+            gh: Gh::new(gh_dir.exists().then_some(gh_dir)),
             claude: Claude,
         }
     }
@@ -151,6 +149,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
             (Some(q), Some(n)) => {
                 let st = Queue::open(&trunk, q)?.read_state()?;
                 let where_ = match st.sets.get(&n).and_then(|s| s.pr.as_ref()) {
+                    Some(pr) if choros_land::graph::stacked(&st, n) => format!("stacked: {}", pr.url),
                     Some(pr) => format!("at the front: {}", pr.url),
                     None => "queued".to_string(),
                 };
@@ -340,6 +339,7 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         .map(|(n, s)| (*n, s.deps.iter().filter_map(|d| d.strip_prefix("landing-")?.parse().ok()).collect()))
         .collect();
     let width = open.keys().map(|n| format!("landing-{n}").len()).max().unwrap_or(0);
+    let state_width = open.values().map(|s| s.state.len()).max().unwrap_or(0).max("queued".len());
     let columns = columns();
     let fit = |line: &str| match columns {
         Some(c) => ellipsize(line, c),
@@ -358,7 +358,7 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
             set_graph::Row::Set { n, graph, under } => (n, graph, under),
         };
         let s = open[&n];
-        let head = format!("{graph}{:<width$}  {:<6}  ", format!("landing-{n}"), s.state);
+        let head = format!("{graph}{:<width$}  {:<state_width$}  ", format!("landing-{n}"), s.state);
         let mut line = format!(" ({})", s.repo);
         if let Some(pr) = &s.pr {
             line.push_str(&format!("  #{}", pr.number));
@@ -401,6 +401,9 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         }
         if s.landing_dirty {
             notes.push("landing folder has uncommitted changes".into());
+        }
+        if s.unlinked {
+            notes.push("not linked into a GitHub stack yet".into());
         }
         for note in notes {
             println!("{}", fit(&format!("{under}  {note}")));
@@ -602,6 +605,14 @@ fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
         config.push.private_sets,
     )?;
     config.pr.draft = yes_no("open PRs as drafts", config.pr.draft)?;
+    config.stack.enabled = yes_no("open PRs behind the front as GitHub stacked PRs", config.stack.enabled)?;
+    if config.stack.enabled {
+        config.stack.max_open = question(
+            "open PRs per repo before stacking stops",
+            Some(&config.stack.max_open.to_string()),
+            |a| a.parse().map_err(|_| eyre!("answer a number")),
+        )?;
+    }
     config.agent.rotate_after = question(
         "resync-agent runs before it starts a fresh session",
         Some(&config.agent.rotate_after.to_string()),
@@ -760,6 +771,9 @@ fn print_report(name: &str, r: &PassReport) {
         ("re-synced", &r.resynced),
         ("took main in", &r.updated_public),
         ("opened PRs for", &r.opened),
+        ("opened stacked PRs for", &r.stacked),
+        ("took GitHub's rebase of", &r.adopted),
+        ("folded into the set below, as they were left empty,", &r.folded),
         ("found everything already on main, so no PR, for", &r.already_on_main),
         ("parked", &r.parked),
     ] {

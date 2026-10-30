@@ -184,6 +184,20 @@ pub fn front(state: &QueueState, cross_merged: &dyn Fn(&str, u32) -> bool) -> Ve
         .collect()
 }
 
+/// A set whose PR sits on another set's branch: replayed like a private
+/// set, since GitHub rewrites stacks too. It stays stacked until its PR is
+/// on main, which GitHub does for a linked PR when the set below merges.
+pub fn stacked(state: &QueueState, n: u32) -> bool {
+    let set = &state.sets[&n];
+    set.pr.is_some() && set.is_open() && set.pr_base.is_some()
+}
+
+/// A set whose PR is on main: it only ever gains commits.
+pub fn public(state: &QueueState, n: u32) -> bool {
+    let set = &state.sets[&n];
+    set.pr.is_some() && set.is_open() && !stacked(state, n)
+}
+
 /// Dependencies `n` builds on that are still queued.
 pub fn unmerged_deps(state: &QueueState, n: u32) -> Vec<u32> {
     base_deps(state, &state.sets[&n])

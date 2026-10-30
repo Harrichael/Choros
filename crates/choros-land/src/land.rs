@@ -1186,6 +1186,8 @@ fn new_set(
         park: None,
         pr: None,
         review: None,
+        pr_base: None,
+        stack: None,
         remote: None,
         merged_into: None,
         source: Source {
@@ -1446,7 +1448,7 @@ fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
             "This is a Choros landing: {repo} on `{branch}`, which becomes a PR once \
              everything it depends on has merged.\n\n\
              Choros may move this branch (re-syncing it onto new dependencies, or \
-             merging main into it once the PR is open). Run `git pull` before working.\n\
+             merging main into it once the PR is open). Run `git pull --rebase` before working.\n\
              Answer review feedback with new commits pushed to `{branch}`; never \
              rewrite or force-push it.{}\n",
             if q.config.push.private_sets {

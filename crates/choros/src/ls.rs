@@ -160,6 +160,8 @@ fn landings_by_space(space: &Path) -> Vec<(std::path::PathBuf, String)> {
             let ws = set.source.workspace.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let state = if set.park.is_some() {
                 "parked"
+            } else if set.pr_base.is_some() {
+                "stacked"
             } else if set.pr.is_some() {
                 "front"
             } else {

@@ -25,6 +25,8 @@ pub struct QueueConfig {
     pub pr: PrConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub stack: StackConfig,
     /// PRs the queue builds on before they reach main, as `repo#N`. Empty:
     /// the queue builds on main.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -89,6 +91,7 @@ impl QueueConfig {
             push: Default::default(),
             pr: Default::default(),
             agent: Default::default(),
+            stack: Default::default(),
             diffbase: Vec::new(),
         }
     }
@@ -169,6 +172,25 @@ pub struct PrConfig {
 impl Default for PrConfig {
     fn default() -> Self {
         Self { draft: true }
+    }
+}
+
+/// GitHub stacked PRs for sets behind the front (see the design doc's
+/// *Stacked PRs*).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackConfig {
+    pub enabled: bool,
+    /// Stacking stops once a repo has this many open PRs in the queue;
+    /// front PRs open regardless.
+    pub max_open: u32,
+}
+
+impl Default for StackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_open: 5,
+        }
     }
 }
 
@@ -322,6 +344,13 @@ pub struct LandingSet {
     /// The PR's review, as of the last pass that saw it open.
     #[serde(default)]
     pub review: Option<crate::forge::PrReview>,
+    /// The branch the PR is based on, when not main: the set below it in a
+    /// stack. Cleared once the PR is on main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_base: Option<String>,
+    /// The GitHub stack its PR is in, as of the last pass that looked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<u64>,
     /// Where `<queue>/landing-N` was on origin when we last pushed or
     /// adopted it; the lease for the next push. `None`: not on origin.
     #[serde(default)]
@@ -510,10 +539,6 @@ impl LandingSet {
 
     pub fn is_open(&self) -> bool {
         self.status == SetStatus::Queued
-    }
-
-    pub fn is_public(&self) -> bool {
-        self.pr.is_some() && self.is_open()
     }
 }
 

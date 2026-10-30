@@ -61,9 +61,7 @@ fn tick() -> Result<()> {
 
 fn log_instant_merges(trunk: &Path) -> Result<()> {
     let gh_dir = trunk.join(CONFIG_DIR).join("gh");
-    let gh = Gh {
-        config_dir: gh_dir.exists().then_some(gh_dir),
-    };
+    let gh = Gh::new(gh_dir.exists().then_some(gh_dir));
     let report = choros_land::instant::log_merged(trunk, &gh)?;
     for l in &report.logged {
         let pr = l.pr.map(|n| format!("PR #{n}")).unwrap_or_default();
@@ -77,9 +75,7 @@ fn log_instant_merges(trunk: &Path) -> Result<()> {
 
 fn pass(trunk: &Path, name: &str) -> Result<()> {
     let q = Queue::open(trunk, name)?;
-    let gh = Gh {
-        config_dir: q.gh_config_dir(),
-    };
+    let gh = Gh::new(q.gh_config_dir());
     let claude = Claude;
     let env = Env {
         forge: &gh,
@@ -115,6 +111,9 @@ fn describe(name: &str, r: &PassReport) {
         ("re-synced", &r.resynced),
         ("took main in", &r.updated_public),
         ("opened PRs for", &r.opened),
+        ("opened stacked PRs for", &r.stacked),
+        ("took GitHub's rebase of", &r.adopted),
+        ("folded into the set below, as they were left empty,", &r.folded),
         ("found everything already on main, so no PR, for", &r.already_on_main),
         ("parked", &r.parked),
     ] {

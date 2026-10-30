@@ -69,6 +69,9 @@ model = "opus"                      # always passed to claude, never its default
 auto_resolve = true                 # the daemon hands conflicts to the agent (see Conflicts)
 timeout_minutes = 20                # a run past this is stopped
 daily_runs = 20                     # the daemon's agent runs per day (UTC)
+[stack]
+enabled = false                     # open PRs behind the front as GitHub stacked PRs (see Stacked PRs)
+max_open = 5                        # stacking stops once a repo has this many open PRs in the queue
 ```
 
 Each repo lands on its origin's default branch. Queues made when a queue held
@@ -466,6 +469,155 @@ resolution.
 Choros, not the agent, pushes. Git in the sync clone runs with
 `core.hooksPath=/dev/null` and `commit.gpgSign=false`.
 
+## Stacked PRs
+
+With `stack.enabled`, review doesn't wait for the front. A queued set behind
+the front gets its PR early, as a GitHub stacked PR: its base is the branch
+of the set it sits on, and GitHub links the chain into a native stack. A
+stacked PR is an ordinary PR (a draft only if `pr.draft` says so), so people
+review it; what stops it merging early is GitHub's stack rule: merging a PR
+merges every PR under it with it, bottom up, under main's branch rules.
+Nothing merges out of order.
+
+**A stack is one straight line in one repo.** GitHub allows nothing else. So
+a set is *stackable* when:
+
+- it is queued and not blocked (neither it nor anything it builds on is
+  parked or closed), and not at the front;
+- it has exactly one unmerged dependency, a set in the same repo and queue
+  (merged ones are on main and don't count; an unmerged set in another repo
+  or queue means it can't stack);
+- that set has a PR (at the front, or stacked) and no stacked child yet;
+- the queue's diffbase isn't holding PRs back (*Diffbase*: nothing opens
+  early).
+
+A second child of a set, a set on two others, and a set waiting on another
+repo or queue stay private until they reach the front, as without stacks.
+
+**The longest line goes first.** A candidate's *line* is the longest
+straight run of open sets through it: the stack it would join, itself, and
+the longest chain of sets that build on it, one after another, in its repo.
+When a set has several stackable children, the one with the longest line
+continues the stack, since that line is the critical path; a tie goes to the
+lower landing number. Once a PR is in a stack it stays there, even when a
+longer line grows elsewhere later: unlinking a PR under review isn't worth
+it.
+
+**The cap.** Front PRs always open, as without stacks. Stacked PRs open only
+while the repo has fewer than `stack.max_open` open PRs in the queue, front
+and stacked together. So with a cap of 5, seven front sets means seven PRs
+and no stacks; two front sets leave room for three stacked. Free slots go
+the same way: the candidate with the longest line first. Candidates are
+worked out again after each PR opens, so a whole line can stack in one pass.
+
+**Opening one.** The pass opens a stacked PR like a front one (title, body,
+`pr.draft`), with base `<queue>/landing-P` for the set P it sits on, then
+links it: `gh stack link <stack> <its PR>` adds it to the top of the stack
+P is in, or `gh stack link <P's PR> <its PR>` starts one. (Naming P's PR
+alone would not do once the stack holds others: a link that leaves out a
+member is refused.) GitHub is the source of truth for links, as for PR state:
+each pass reads the repo's stacks (`GET repos/{owner}/{repo}/stacks`) and
+links any stacked set's PR that isn't in one, so a pass that died between
+opening and linking heals. Until then `choros status` shows the PR as
+unlinked. An unlinked PR gets no help from GitHub after a merge (it is only
+pointed at main, and only if the repo deletes merged branches), so when the
+set under it merges, Choros replays it onto main at once and points its PR
+at main itself. `gh stack` is the `github/gh-stack` extension; a queue with
+`stack.enabled` whose `gh` lacks it opens no stacked PRs and says so in the
+pass's errors. The extension can't read a token kept in the keychain under
+`GH_CONFIG_DIR`, so Choros passes `GH_TOKEN` from `gh auth token`.
+
+**Which PRs may be rewritten.** Without stacks, a set with a PR is public
+and only ever gains commits. With stacks, "has a PR" splits in two, both
+worked out from the graph, never stored:
+
+- **stacked**: it has a PR and an unmerged dependency in its repo. It is
+  re-synced like a private set: replayed onto its dependency's new tip and
+  force-pushed with a lease. GitHub does the same to stacks itself. This is
+  how a review fix lower down reaches the PRs above it, and how a stack
+  stays the straight line GitHub needs to merge it. A merge commit pushed
+  onto it parks it (`pushed-merge`), as on a private set; so the landing
+  folder's `CLAUDE.md` says `git pull --rebase`, and GitHub's "Update
+  branch" button on a stacked PR leads to a park;
+- **public**: it has a PR and every dependency in its repo has merged (the
+  bottom of a stack, or a plain front set). As before: main is merged in
+  when needed, never rebased.
+
+GitHub's docs say a rebase that leaves a PR's own diff unchanged keeps its
+approvals; a repo that dismisses stale approvals on new commits may still
+drop them. Untested.
+
+**When a set merges, GitHub moves the line above it.** Within seconds it
+points the next PR at main and rebases and force-pushes every linked branch
+above, dropping the merged set's commits (squash included). Choros doesn't
+race it: in the pass that first sees a merge, no linked set above the merged
+one, anywhere up the line, is re-synced. Over the next passes, a linked
+set's branch that moved to commits not on its recorded tip is adopted when
+GitHub's rebase explains it:
+
+- **the set it sat on merged** (it is now the bottom): `X = merge-base(new
+  tip, origin/main)`. Adopt when X is past the main the set was built on
+  and the new tip holds the merged set's commits only where main has them
+  (a merge commit keeps them; a squash drops them). Record base
+  `{main: X, no deps}`.
+- **a set further down merged**: adopt when the new tip sits on the
+  adopted tip of the set under it. Record base `{main unchanged, deps:
+  [(that set, its tip)]}`, exactly what `desired_base` would give, so the
+  next pass doesn't rewrite it again.
+
+Sets are visited in graph order, so each sees the tip adopted under it in
+the same pass. Any other move parks the set `diverged`, as today. If GitHub
+hasn't moved a branch by the next pass, the pass re-syncs it itself. An
+adopted set's clean landing folder follows it.
+
+**A closed PR in a stack** parks itself and everything above it, as any
+closed PR does; GitHub keeps it in the stack, closed. Dropping it (`choros
+queue drop`, after closing it on GitHub) repairs the stack. GitHub refuses
+to change a stacked PR's base, and refuses a link that leaves out a member,
+closed ones included, so the repair goes:
+
+1. `gh stack unstack <stack>`: the stack is dissolved; PRs stay open.
+2. The set above inherits the dropped set's dependency as usual, is
+   replayed onto it and force-pushed.
+3. Its PR is pointed at that set's branch (`gh pr edit --base`), or main.
+4. The stack's open PRs are linked again, bottom to top.
+5. The dropped set's branch is deleted by the first pass that finds no
+   open PR based on it: GitHub closes any PR whose base branch
+   disappears. One whose replay parked keeps it until it moves.
+
+After that GitHub treats the new stack like any other (verified: merging
+its bottom rebased the PR above onto main).
+
+**A PR left with nothing of its own** is closed by GitHub, and GitHub won't
+merge a stack through a closed PR. Two ways it happens:
+
+- **GitHub's rebase after a merge** (the set's change reached main some
+  other way): GitHub counts that PR as merged, not closed, and rebases the
+  next one straight onto main. The pass sees a merge and adopts the rest.
+  Nothing to do.
+- **Choros's own replay** (a fix on the set below did the same thing): the
+  empty branch is never pushed. The set folds into the one below: it
+  leaves the queue, its labels and sessions are added to that set (so its
+  tasks finish when that set merges), and its commits aren't handed back,
+  since that set has them. Its PR is closed with a note pointing there,
+  and PRs stacked on it move down onto that set, as on a drop. With no set
+  below (it was replayed onto main after that set merged), its change is
+  already on main: its PR is closed and the set counts as merged.
+
+**Merging.** You merge from GitHub as before; merging a stacked PR merges
+the ones under it with it, and the next pass sees them all merged. `gh pr
+merge` refuses any PR in a stack ("must be merged using the asynchronous
+merge REST API"); `gh stack merge N` works. Choros merges a PR itself only
+in instant mode, which makes no sets, so it needs no change.
+
+**Status.** A stacked set's `state` is `stacked`, and its `review` is the
+same `{draft, unanswered, approved}` a front set gets. `unlinked` is true
+for a stacked PR not yet in a GitHub stack; the graph notes it.
+
+**CI.** A stacked PR runs `pull_request` workflows on every re-sync, like
+`on: push` ones on private branches; a review fix low in a stack re-runs CI
+for every PR above it.
+
 ## Landings and sessions
 
 `<trunk>/landing/<queue>/landing-N/` is a choros workspace: a
@@ -521,10 +673,10 @@ which shows one queue.
 `choros status --json` is the same report for tools, merged sets included:
 `{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,
 diffbase_park}]}`. Other tools read each set's `n`, `repo`, `state`
-(`queued`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
+(`queued`, `stacked`, `front`, `merged`, `closed`), `title`, `pr` (`{number, url}`),
 `review`, `sessions` (`[{source, fork}]`) and `labels`, so those names stay
-fixed. `review` is `{draft, unanswered, approved}` for a front set once a
-pass has seen its PR, and null otherwise. `unanswered` means someone besides
+fixed. `review` is `{draft, unanswered, approved}` for a front or stacked set
+once a pass has seen its PR, and null otherwise. `unanswered` means someone besides
 the PR's author commented or reviewed after the author last commented,
 reviewed or wrote a commit; an approval with nothing written in it doesn't
 count. `approved` is GitHub's review decision, or, where the repo requires no
@@ -723,3 +875,14 @@ Round 4 (multi-repo queues):
 - "if I want to define a dependency across repos I should be able to. You don't need a lane to accomplish this, youjust need that by default the deps for a new landing set are the latest landing sets in the same repo"
 - "If they are different landing sets, then give them different numbers. for now, choros land at workspace level will just make a landing set in each repo as a convenience wrapper type thing"
 - [how workspaces find their queue] the scope decides: a queue scoped to a branch-space takes every workspace under it; binding is only needed for a trunk-wide queue ("I think C is the best no nonsense change for right now").
+
+Round 5 (stacked PRs, ergon_choros/6gfb):
+- [drafts] "team members arent going to review draft PRs because they are drafts, but thats not true for the native stacks"
+- "I am thinking native stacks, where in our toml we turn it on and a cap on how many prs at a time when using the feature"
+- "you can only have 1 parent to be a stack, but I am thinking that we should prioritize the longest lineage so to speak to reduce the critical path, rather than simply time based."
+- "The cap should apply once we start stacking, if our cap is 5, we may have 7 parallel unstack pr reviews, or 2 who have no deps plus 3 stacked."
+- [building stacks] choros calls `gh stack link`.
+- [graph grows later] a PR once stacked stays in its stack; free cap slots also go to the longest line first.
+- [a set emptied mid-stack by a replay] its labels move to the set below; it leaves the queue, its commits not handed back.
+- Mid-stack: "Choros repairs on drop". Approvals across rebases: trust GitHub's docs, untested.
+- Stacked PRs follow `pr.draft`; the cap counts per repo; `--json` gives stacked sets the state `stacked`; after a merge Choros leaves GitHub one pass to rebase the stack before re-syncing it itself.

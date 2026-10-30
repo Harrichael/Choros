@@ -39,8 +39,15 @@ pub fn sync(env: &Env, q: &Queue, handler: Handler<'_>) -> Result<PassReport> {
 /// without it on the pass that follows. Its commits go back to the
 /// workspace that landed them, to come back as unlanded on its next sync:
 /// otherwise that sync would take them out, as no longer in the queue.
+///
+/// In a GitHub stack, the PR stacked on it moves down onto what it sat on.
+/// GitHub won't change a stacked PR's base, nor link a stack without one of
+/// its PRs, closed ones included: so the stack is dissolved first, and the
+/// pass links what is left again.
 pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+    // As GitHub has it now: a drop that failed halfway may have unstacked.
+    work.observe_stacks(env.forge)?;
     let set = work
         .st
         .sets
@@ -53,10 +60,22 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     if set.status == SetStatus::Queued && set.pr.is_some() {
         return Err(eyre!("landing-{n} has an open PR; close it on GitHub, then drop the set"));
     }
-    if set.remote.is_some() && set.pr.is_none() {
-        let branch = set.branch(&q.name);
-        work.set_git(n).delete_remote_branch("origin", &branch)?;
+    let branch = set.branch(&q.name);
+    let dir = work.git(set.repo()).dir().to_path_buf();
+    if let Some(stack) = set.stack {
+        env.forge.unstack(&dir, stack)?;
+        for s in work.st.sets.values_mut().filter(|s| s.stack == Some(stack)) {
+            s.stack = None;
+        }
     }
+    let set = &work.st.sets[&n];
+    let stacked_on: Vec<u32> = work
+        .st
+        .sets
+        .values()
+        .filter(|s| s.is_open() && s.pr_base.as_deref() == Some(branch.as_str()))
+        .map(|s| s.n)
+        .collect();
     let returned = Returned {
         queue: q.name.clone(),
         n,
@@ -70,6 +89,16 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     let set = work.st.sets.get_mut(&n).unwrap();
     set.status = SetStatus::Dropped;
     set.park = None;
+    // Onto main it goes in the pass, once replayed: on main before that, it
+    // would count as public and keep the dropped work.
+    for m in stacked_on {
+        let [p] = graph::unmerged_deps(&work.st, m)[..] else { continue };
+        let below = work.st.sets[&p].branch(&q.name);
+        let pr = work.st.sets[&m].pr.as_ref().unwrap().number;
+        env.forge.set_pr_base(&dir, pr, &below)?;
+        work.st.sets.get_mut(&m).unwrap().pr_base = Some(below);
+    }
+    // The pass deletes the dropped branch once no PR is based on it.
     let report = work.pass(env.forge);
     work.save()?;
     let returned_to = workspace::give_back(&source.workspace, &source.repo, returned)?

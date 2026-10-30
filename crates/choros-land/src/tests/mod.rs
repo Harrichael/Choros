@@ -10,6 +10,7 @@ mod diffbase;
 mod invariants;
 mod regressions;
 mod repos;
+mod stacks;
 mod stories;
 
 use std::collections::BTreeMap;
@@ -21,7 +22,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::agent::{Agent, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
-use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings};
+use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings, Stack};
 use crate::land::{Deps, LandOutcome, LandRequest};
 use crate::queue::Queue;
 use crate::state::{Dep, LandMode, PrRef, QueueConfig, QueueState, Scope};
@@ -62,6 +63,7 @@ struct FakePr {
     /// The bare repo the PR was opened against.
     origin: PathBuf,
     head: String,
+    base: String,
     title: String,
     body: String,
     draft: bool,
@@ -71,9 +73,15 @@ struct FakePr {
 
 /// GitHub, minus the network: PRs live in memory, and merging one really
 /// merges its branch into its origin's main. PR numbers are shared by every
-/// repo, which keeps them apart in tests.
+/// repo, which keeps them apart in tests. Stacks behave as GitHub's did when
+/// tried: a stacked PR's base can't change, and a link may not leave out a
+/// member.
 pub struct FakeForge {
     prs: Mutex<BTreeMap<u64, FakePr>>,
+    /// Open stacks, their PRs bottom to top.
+    stacks: Mutex<BTreeMap<u64, Vec<u64>>>,
+    /// Refuse `gh stack link`, as when the extension fails.
+    pub refuse_links: Mutex<bool>,
     pub require_up_to_date: Mutex<bool>,
     /// Refuse to merge, as branch protection does while a review is due.
     pub refuse_merges: Mutex<bool>,
@@ -117,6 +125,56 @@ impl FakeForge {
         }
         git(&work, &["push", "--quiet", "origin", "main"]);
         self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Merged);
+    }
+
+    /// What GitHub does seconds after a stacked PR merges: the next PR up
+    /// is pointed at main, and every branch above is rebased onto what is
+    /// below it now, without the merged PR's commits. One left with nothing
+    /// of its own counts as merged, and the next is pointed at main instead.
+    pub fn restack(&self, merged: u64) {
+        let line: Vec<u64> = {
+            let stacks = self.stacks.lock().unwrap();
+            let stack = stacks.values().find(|s| s.contains(&merged)).expect("merged PR is in a stack");
+            stack.iter().skip_while(|p| **p != merged).skip(1).copied().collect()
+        };
+        let (origin, merged_head) = {
+            let prs = self.prs.lock().unwrap();
+            (prs[&merged].origin.clone(), prs[&merged].head.clone())
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("w");
+        git(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), "w"]);
+        let mut old_under = git(&work, &["rev-parse", &format!("origin/{merged_head}")]);
+        let mut new_under = git(&work, &["rev-parse", "origin/main"]);
+        let main = new_under.clone();
+        for pr in &line {
+            let head = self.prs.lock().unwrap()[pr].head.clone();
+            let old = git(&work, &["rev-parse", &format!("origin/{head}")]);
+            git(&work, &["checkout", "--quiet", "-B", &head, &old]);
+            git(&work, &["rebase", "--quiet", "--onto", &new_under, &old_under]);
+            git(&work, &["push", "--quiet", "--force", "origin", &head]);
+            let tip = git(&work, &["rev-parse", "HEAD"]);
+            let mut prs = self.prs.lock().unwrap();
+            let p = prs.get_mut(pr).unwrap();
+            if new_under == main {
+                p.base = "main".into();
+            }
+            if tip == main {
+                p.state = Some(PrState::Merged);
+            } else {
+                new_under = tip;
+            }
+            old_under = old;
+        }
+    }
+
+    pub fn base_of(&self, number: u64) -> String {
+        self.prs.lock().unwrap()[&number].base.clone()
+    }
+
+    /// The open stack holding `number`, bottom to top.
+    pub fn stack_of(&self, number: u64) -> Option<Vec<u64>> {
+        self.stacks.lock().unwrap().values().find(|s| s.contains(&number)).cloned()
     }
 
     pub fn reopen(&self, number: u64) {
@@ -171,6 +229,7 @@ impl Forge for FakeForge {
             FakePr {
                 origin: PathBuf::from(git(repo, &["remote", "get-url", "origin"])),
                 head: req.head.to_string(),
+                base: req.base.to_string(),
                 title: req.title.to_string(),
                 body: req.body.to_string(),
                 draft: req.draft,
@@ -198,8 +257,25 @@ impl Forge for FakeForge {
     }
 
     fn pr_state(&self, _repo: &Path, number: u64) -> Result<PrState> {
-        let prs = self.prs.lock().unwrap();
-        let pr = prs.get(&number).ok_or_else(|| eyre!("no PR #{number}"))?;
+        let mut prs = self.prs.lock().unwrap();
+        let pr = prs.get_mut(&number).ok_or_else(|| eyre!("no PR #{number}"))?;
+        // As GitHub does: a PR whose base branch is deleted is closed, and
+        // so is one on another PR's branch with nothing of its own.
+        let tip = |b: &str| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&pr.origin)
+                .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let base = tip(&pr.base);
+        let emptied = pr.base != "main" && base.is_some() && base == tip(&pr.head);
+        if pr.state == Some(PrState::Open) && (base.is_none() || emptied) {
+            pr.state = Some(PrState::Closed);
+        }
         let state = pr.state.clone().unwrap();
         // As GitHub does: an open PR's head is kept at refs/pull/N/head.
         if state == PrState::Open {
@@ -231,6 +307,71 @@ impl Forge for FakeForge {
 
     fn pr_template(&self, _repo: &Path) -> Result<Option<String>> {
         Ok(self.template.lock().unwrap().clone())
+    }
+
+    fn close_pr(&self, _repo: &Path, number: u64, _comment: &str) -> Result<()> {
+        self.close(number);
+        Ok(())
+    }
+
+    fn set_pr_base(&self, _repo: &Path, number: u64, base: &str) -> Result<()> {
+        if self.stack_of(number).is_some() {
+            return Err(eyre!("Cannot change the base branch because the pull request is part of a stack."));
+        }
+        self.prs.lock().unwrap().get_mut(&number).unwrap().base = base.to_string();
+        Ok(())
+    }
+
+    fn stacks_ready(&self, _repo: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn stacks(&self, _repo: &Path) -> Result<Vec<Stack>> {
+        let prs = self.prs.lock().unwrap();
+        Ok(self
+            .stacks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, members)| Stack {
+                number: *n,
+                prs: members.iter().map(|p| (*p, prs[p].base.clone())).collect(),
+            })
+            .collect())
+    }
+
+    fn link_stack(&self, _repo: &Path, stack: Option<u64>, prs: &[u64]) -> Result<u64> {
+        if *self.refuse_links.lock().unwrap() {
+            return Err(eyre!("failed to create GitHub client"));
+        }
+        let mut stacks = self.stacks.lock().unwrap();
+        let number = match stack {
+            Some(n) => {
+                let members = stacks.get_mut(&n).ok_or_else(|| eyre!("no stack #{n}"))?;
+                members.extend(prs.iter().filter(|p| !members.contains(p)).copied().collect::<Vec<_>>());
+                n
+            }
+            None => {
+                let held = stacks.iter().find(|(_, m)| m.iter().any(|p| prs.contains(p))).map(|(n, m)| (*n, m.clone()));
+                if let Some((n, members)) = held {
+                    if let Some(left) = members.iter().find(|p| !prs.contains(p)) {
+                        return Err(eyre!("Cannot update stack: this would remove #{left} from the stack"));
+                    }
+                    stacks.insert(n, prs.to_vec());
+                    n
+                } else {
+                    let n = stacks.keys().max().map_or(1000, |m| m + 1);
+                    stacks.insert(n, prs.to_vec());
+                    n
+                }
+            }
+        };
+        Ok(number)
+    }
+
+    fn unstack(&self, _repo: &Path, stack: u64) -> Result<()> {
+        self.stacks.lock().unwrap().remove(&stack).ok_or_else(|| eyre!("no stack #{stack}"))?;
+        Ok(())
     }
 }
 
@@ -341,6 +482,8 @@ impl World {
             _tmp: tmp,
             forge: FakeForge {
                 prs: Mutex::new(BTreeMap::new()),
+                stacks: Mutex::new(BTreeMap::new()),
+                refuse_links: Mutex::new(false),
                 require_up_to_date: Mutex::new(false),
                 refuse_merges: Mutex::new(false),
                 template: Mutex::new(None),
@@ -361,6 +504,14 @@ impl World {
 
     pub fn queue(&self) -> Queue {
         Queue::open(&self.trunk, QUEUE).unwrap()
+    }
+
+    /// Turn on stacked PRs for the queue, at most `max_open` open PRs a repo.
+    pub fn stack(&self, max_open: u32) {
+        let mut config = self.queue().config;
+        config.stack.enabled = true;
+        config.stack.max_open = max_open;
+        crate::state::write_config(&self.queue().dir().join("queue.toml"), &config).unwrap();
     }
 
     pub fn state(&self) -> QueueState {
