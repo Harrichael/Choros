@@ -1,0 +1,28 @@
+# On a narrow terminal, a set's line is cut with an ellipsis rather than
+# wrapped. The PR title gives way first, so the PR number and labels after
+# it stay readable; a line still too long is cut at the end.
+
+$ choros work ws app
+$ROOT/trunk/ws/app
+mkdir $ROOT/trunk/ws
+cloning app…
+copying agent templates…
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a, with a subject far too long to fit"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/landing/appq/landing-1
+$ COLUMNS=50 choros queue appq --landing
+appq (app) @ $ROOT/trunk
+* landing-1  front   write a, with a su… (app)  #1
+* main
+$ COLUMNS=30 choros queue appq --landing
+appq (app) @ $ROOT/trunk
+* landing-1  front   write a,…
+* main
+$ choros queue appq --landing
+appq (app) @ $ROOT/trunk
+* landing-1  front   write a, with a subject far too long to fit (app)  #1
+* main

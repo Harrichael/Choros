@@ -300,6 +300,32 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// The least of a PR title kept on a narrow terminal, before the rest of
+/// the line is cut instead.
+const TITLE_KEPT: usize = 16;
+
+/// The terminal's width when lines should be cut to it: `COLUMNS` if set,
+/// else the terminal's own, and never when piped.
+fn columns() -> Option<usize> {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .or_else(|| {
+            std::io::stdout()
+                .is_terminal()
+                .then(|| crossterm::terminal::size().ok().map(|(w, _)| w.into()))
+                .flatten()
+        })
+}
+
+fn ellipsize(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    if width == 0 { kept } else { kept + "…" }
+}
+
 /// A queue, its open sets drawn as a graph of what lands after what, and
 /// what needs doing about them, for `status` and `queue NAME`. With
 /// `landings_only`, just the sets.
@@ -314,6 +340,11 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         .map(|(n, s)| (*n, s.deps.iter().filter_map(|d| d.strip_prefix("landing-")?.parse().ok()).collect()))
         .collect();
     let width = open.keys().map(|n| format!("landing-{n}").len()).max().unwrap_or(0);
+    let columns = columns();
+    let fit = |line: &str| match columns {
+        Some(c) => ellipsize(line, c),
+        None => line.to_string(),
+    };
     for row in set_graph::draw(&after) {
         let (n, graph, under) = match row {
             set_graph::Row::Edges(graph) => {
@@ -327,13 +358,8 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
             set_graph::Row::Set { n, graph, under } => (n, graph, under),
         };
         let s = open[&n];
-        let mut line = format!(
-            "{graph}{:<width$}  {:<6}  {} ({})",
-            format!("landing-{n}"),
-            s.state,
-            s.pr_title.as_deref().unwrap_or(""),
-            s.repo
-        );
+        let head = format!("{graph}{:<width$}  {:<6}  ", format!("landing-{n}"), s.state);
+        let mut line = format!(" ({})", s.repo);
         if let Some(pr) = &s.pr {
             line.push_str(&format!("  #{}", pr.number));
         }
@@ -347,7 +373,16 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         if !s.labels.is_empty() {
             line.push_str(&format!("  [{}]", s.labels.join(", ")));
         }
-        println!("{line}");
+        // The title gives way first, so what's after it stays readable.
+        let title = s.pr_title.as_deref().unwrap_or("");
+        let title = match columns {
+            Some(c) => {
+                let room = c.saturating_sub(head.chars().count() + line.chars().count());
+                ellipsize(title, room.max(TITLE_KEPT))
+            }
+            None => title.to_string(),
+        };
+        println!("{}", fit(&format!("{head}{title}{line}")));
         // Sets in this queue are lanes in the graph; one in another queue
         // can only be named.
         let elsewhere: Vec<&str> = s.deps.iter().filter(|d| d.contains('/')).map(String::as_str).collect();
@@ -368,7 +403,7 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
             notes.push("landing folder has uncommitted changes".into());
         }
         for note in notes {
-            println!("{under}  {note}");
+            println!("{}", fit(&format!("{under}  {note}")));
         }
     }
     let merged = q.sets.len() - open.len();
