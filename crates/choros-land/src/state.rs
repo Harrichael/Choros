@@ -359,6 +359,10 @@ pub struct LandingSet {
     /// here on contains this set.
     #[serde(default)]
     pub merged_into: Option<String>,
+    /// When a pass first saw it merged, in Unix seconds: GitHub rebases the
+    /// stack above it in the minutes after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_seen_at: Option<u64>,
     pub source: Source,
     pub mode: LandMode,
     #[serde(default)]

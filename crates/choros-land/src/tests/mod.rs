@@ -69,6 +69,10 @@ struct FakePr {
     draft: bool,
     unanswered: bool,
     state: Option<PrState>,
+    /// Main just after this PR merged, and the branches above it then:
+    /// what GitHub rebases, and onto what, however late its push lands.
+    merged_main: Option<String>,
+    merged_line: Vec<String>,
 }
 
 /// GitHub, minus the network: PRs live in memory, and merging one really
@@ -124,7 +128,20 @@ impl FakeForge {
             MergeMethod::Rebase => panic!("not used"),
         }
         git(&work, &["push", "--quiet", "origin", "main"]);
-        self.prs.lock().unwrap().get_mut(&number).unwrap().state = Some(PrState::Merged);
+        let main = git(&work, &["rev-parse", "HEAD"]);
+        let above: Vec<u64> = self
+            .stack_of(number)
+            .map(|s| s.into_iter().skip_while(|p| *p != number).skip(1).collect())
+            .unwrap_or_default();
+        let mut prs = self.prs.lock().unwrap();
+        let line = above
+            .iter()
+            .map(|p| git(&work, &["rev-parse", &format!("origin/{}", prs[p].head)]))
+            .collect();
+        let pr = prs.get_mut(&number).unwrap();
+        pr.state = Some(PrState::Merged);
+        pr.merged_main = Some(main);
+        pr.merged_line = line;
     }
 
     /// What GitHub does seconds after a stacked PR merges: the next PR up
@@ -137,21 +154,22 @@ impl FakeForge {
             let stack = stacks.values().find(|s| s.contains(&merged)).expect("merged PR is in a stack");
             stack.iter().skip_while(|p| **p != merged).skip(1).copied().collect()
         };
-        let (origin, merged_head) = {
+        let (origin, merged_head, merged_main, then) = {
             let prs = self.prs.lock().unwrap();
-            (prs[&merged].origin.clone(), prs[&merged].head.clone())
+            let pr = &prs[&merged];
+            (pr.origin.clone(), pr.head.clone(), pr.merged_main.clone().unwrap(), pr.merged_line.clone())
         };
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path().join("w");
         git(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), "w"]);
         let mut old_under = git(&work, &["rev-parse", &format!("origin/{merged_head}")]);
-        let mut new_under = git(&work, &["rev-parse", "origin/main"]);
+        let mut new_under = merged_main;
         let main = new_under.clone();
-        for pr in &line {
+        for (pr, old) in line.iter().zip(then) {
             let head = self.prs.lock().unwrap()[pr].head.clone();
-            let old = git(&work, &["rev-parse", &format!("origin/{head}")]);
             git(&work, &["checkout", "--quiet", "-B", &head, &old]);
-            git(&work, &["rebase", "--quiet", "--onto", &new_under, &old_under]);
+            // GitHub's rebase writes new commits even where it could keep them.
+            git(&work, &["rebase", "--quiet", "--force-rebase", "--onto", &new_under, &old_under]);
             git(&work, &["push", "--quiet", "--force", "origin", &head]);
             let tip = git(&work, &["rev-parse", "HEAD"]);
             let mut prs = self.prs.lock().unwrap();
@@ -235,6 +253,8 @@ impl Forge for FakeForge {
                 draft: req.draft,
                 unanswered: false,
                 state: Some(PrState::Open),
+                merged_main: None,
+                merged_line: Vec::new(),
             },
         );
         Ok(PrRef {

@@ -548,12 +548,14 @@ GitHub's docs say a rebase that leaves a PR's own diff unchanged keeps its
 approvals; a repo that dismisses stale approvals on new commits may still
 drop them. Untested.
 
-**When a set merges, GitHub moves the line above it.** Within seconds it
-points the next PR at main and rebases and force-pushes every linked branch
-above, dropping the merged set's commits (squash included). Choros doesn't
-race it: in the pass that first sees a merge, no linked set above the merged
-one, anywhere up the line, is re-synced. Over the next passes, a linked
-set's branch that moved to commits not on its recorded tip is adopted when
+**When a set merges, GitHub moves the line above it.** It points the next
+PR at main and rebases and force-pushes every linked branch above, dropping
+the merged set's commits (squash included): within seconds for two PRs, and
+a long stack may take longer. Choros doesn't race it: for 5 minutes after a
+pass first sees a merge (`RESTACK_GRACE_SECS`, from `merged_seen_at`), no
+linked set above the merged one, anywhere up the line, is re-synced or has
+main merged in. GitHub's pushes are taken whenever they come: a linked set's
+branch that moved to commits not on its recorded tip is adopted when
 GitHub's rebase explains it:
 
 - **the set it sat on merged** (it is now the bottom): `X = merge-base(new
@@ -568,8 +570,14 @@ GitHub's rebase explains it:
 
 Sets are visited in graph order, so each sees the tip adopted under it in
 the same pass. Any other move parks the set `diverged`, as today. If GitHub
-hasn't moved a branch by the next pass, the pass re-syncs it itself. An
-adopted set's clean landing folder follows it.
+hasn't moved a branch within the 5 minutes, the pass re-syncs it itself. A
+rebase of GitHub's that turns up after that is still adopted, not parked:
+once a set below has merged, a new tip on the set under it is taken though
+that set didn't move, and one on main is measured against the merged sets
+(past the main each sat on, holding none of their commits off main), since
+main may have moved on since GitHub's rebase. Without a merge below, a
+rewrite of the set's own commits parks it `diverged`. An adopted set's clean
+landing folder follows it.
 
 **A closed PR in a stack** parks itself and everything above it, as any
 closed PR does; GitHub keeps it in the stack, closed. Dropping it (`choros
@@ -887,3 +895,4 @@ Round 5 (stacked PRs, ergon_choros/6gfb):
 - [a set emptied mid-stack by a replay] its labels move to the set below; it leaves the queue, its commits not handed back.
 - Mid-stack: "Choros repairs on drop". Approvals across rebases: trust GitHub's docs, untested.
 - Stacked PRs follow `pr.draft`; the cap counts per repo; `--json` gives stacked sets the state `stacked`; after a merge Choros leaves GitHub one pass to rebase the stack before re-syncing it itself.
+- [a long stack restacks slower than 10s] "10 seconds * 5 is 50 seconds, so should we consider adjusting our time tolerance?" → watch GitHub's progress with a time cap (5 minutes), and take GitHub's rewrite onto the right base even after Choros replayed (only once a set below has merged; a teammate's rewrite still parks).

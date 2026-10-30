@@ -3,7 +3,7 @@
 //! merging stays in order.
 
 use super::*;
-use crate::state::SetStatus;
+use crate::state::{ParkOp, SetStatus};
 
 impl World {
     fn pr(&self, n: u32) -> u64 {
@@ -295,21 +295,92 @@ fn a_stacked_set_emptied_onto_main_is_merged() {
     assert_eq!(w.forge.pr_state(&w.origin, two).unwrap(), PrState::Closed);
 }
 
-/// When GitHub hasn't moved the stack by the pass after the merge, Choros
-/// replays it itself.
+impl World {
+    /// Make the merge of `n` look `secs` older than it is.
+    fn age_merge(&self, n: u32, secs: u64) {
+        let mut st = self.state();
+        let seen = st.sets.get_mut(&n).unwrap().merged_seen_at.as_mut().unwrap();
+        *seen -= secs;
+        self.queue().write_state(&st).unwrap();
+    }
+}
+
+/// A long stack takes GitHub a while to rebase. However many passes run
+/// meanwhile, the PRs above the merge are left alone, and GitHub's pushes
+/// are taken when they come.
 #[test]
-fn a_stack_github_left_alone_is_replayed_a_pass_later() {
+fn a_slow_restack_is_waited_out() {
+    let w = World::new();
+    w.stack(6);
+    w.line(5);
+    let one = w.pr(1);
+    let before: Vec<String> = (2..=5).map(|n| w.origin_tip(n)).collect();
+
+    w.forge.merge(one, MergeMethod::Squash);
+    for _ in 0..3 {
+        let report = w.pass();
+        assert!(report.resynced.is_empty() && report.updated_public.is_empty());
+    }
+    assert_eq!((2..=5).map(|n| w.origin_tip(n)).collect::<Vec<_>>(), before);
+
+    w.forge.restack(one);
+    let report = w.pass();
+    assert_eq!(report.adopted, [2, 3, 4, 5]);
+    assert!(w.state().sets.values().all(|s| s.park.is_none()));
+}
+
+/// When GitHub hasn't moved the stack within the grace period after the
+/// merge, Choros replays it itself; if GitHub's rebase turns up after all,
+/// it lands on the same base and is taken, not parked.
+#[test]
+fn a_stack_github_left_alone_is_replayed_after_the_grace_period() {
     let w = World::new();
     w.stack(5);
-    w.line(2);
-    w.forge.merge(w.pr(1), MergeMethod::Squash);
+    w.line(3);
+    let one = w.pr(1);
+    w.forge.merge(one, MergeMethod::Squash);
     w.pass();
+    w.age_merge(1, crate::engine::RESTACK_GRACE_SECS);
 
+    // Main moves on meanwhile, so Choros replays onto a later main than
+    // the one GitHub rebases onto.
+    w.push_to_main("other.txt", "other\n");
     let report = w.pass();
-
-    assert_eq!(report.resynced, [2]);
+    assert_eq!(report.resynced, [2, 3]);
     assert_eq!(w.state().sets[&2].base_sha, w.origin_main());
     assert_eq!(w.own_commits(2), 1);
+
+    w.forge.restack(one);
+    w.pass();
+    assert!(w.state().sets.values().all(|s| s.park.is_none()));
+    assert_eq!(w.own_commits(2), 1);
+    assert_eq!(w.own_commits(3), 1);
+}
+
+/// With nothing merged below it, a rewrite of a stacked set's own commits
+/// (a squash, here) is no rebase of GitHub's: it parks, as before stacks.
+#[test]
+fn a_rewritten_stacked_branch_parks() {
+    let w = World::new();
+    w.stack(5);
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.commit(&ws, "c.txt", "c\n");
+    w.land_on_head(&ws).unwrap();
+    assert!(w.state().sets[&2].pr.is_some());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("w");
+    let branch = format!("{QUEUE}/landing-2");
+    git(tmp.path(), &["clone", "--quiet", "--branch", &branch, w.origin.to_str().unwrap(), "w"]);
+    git(&work, &["reset", "--quiet", "--soft", "HEAD~2"]);
+    git(&work, &["commit", "--quiet", "-m", "b and c"]);
+    git(&work, &["push", "--quiet", "--force", "origin", &branch]);
+    w.pass();
+
+    assert_eq!(w.state().sets[&2].park.as_ref().map(|p| p.op), Some(ParkOp::Diverged));
 }
 
 /// `gh stack link` fails, so the stacked PR sits on its branch unlinked,

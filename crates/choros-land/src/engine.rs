@@ -14,9 +14,20 @@ use crate::git::{Git, Step};
 use crate::graph;
 use crate::queue::{Queue, QueueLock};
 use crate::state::{
-    AgentSession, BaseSpec, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
+    AgentSession, BaseSpec, LandingSet, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
     Resolution, SetStatus, branch,
 };
+
+/// How long after a merge GitHub is left to rebase the stack above it
+/// before Choros replays what it left alone. A long stack takes GitHub
+/// longer; its pushes are taken whenever they come.
+pub const RESTACK_GRACE_SECS: u64 = 300;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 
 pub struct Env<'a> {
     pub forge: &'a dyn Forge,
@@ -496,6 +507,7 @@ impl<'q, 'h> Work<'q, 'h> {
                 (PrState::Merged, _) => {
                     set.status = SetStatus::Merged;
                     set.merged_into = Some(main);
+                    set.merged_seen_at = Some(now_secs());
                     set.park = None;
                     report.merged.push(n);
                 }
@@ -584,14 +596,22 @@ impl<'q, 'h> Work<'q, 'h> {
     /// When a set merges, GitHub rebases the linked branches above it onto
     /// what is left, dropping the merged commits. `r`, the branch's new tip,
     /// is taken as that rebase when it sits where the graph says the set
-    /// now sits, and that is somewhere new. The base to record is what
-    /// `desired_base` would give, so the next pass leaves the PR alone.
+    /// now sits, and that is somewhere new. Once a set below has merged, a
+    /// rewrite onto the right base is taken even if Choros got there first,
+    /// since GitHub may push after Choros replayed the set. The base to
+    /// record is what `desired_base` would give, so the next pass leaves the
+    /// PR alone.
     fn rebased_by_github(&self, n: u32, r: &str) -> Result<Option<(BaseSpec, String)>> {
         let set = &self.st.sets[&n];
         if set.pr.is_none() || set.stack.is_none() {
             return Ok(None);
         }
         let git = self.set_git(n);
+        let merged_below: Vec<&LandingSet> = graph::ancestors(&self.st, n)
+            .iter()
+            .map(|a| &self.st.sets[a])
+            .filter(|a| a.status == SetStatus::Merged && a.merged_seen_at.is_some())
+            .collect();
         match graph::sits_on(&self.st, n).as_slice() {
             // The set it sat on merged: GitHub moved it onto main.
             [] => {
@@ -601,13 +621,24 @@ impl<'q, 'h> Work<'q, 'h> {
                     Some(m) => *m != x && git.is_ancestor(m, &x)?,
                     None => x != set.base_sha,
                 };
+                // After Choros's own replay the base names no merged set, and
+                // main may have moved on since GitHub's rebase: measure it
+                // against the merged sets instead.
+                let late = !moved_on && !merged_below.is_empty() && {
+                    let mut past = true;
+                    for a in &merged_below {
+                        past &= a.base_sha != x && git.is_ancestor(&a.base_sha, &x)?;
+                    }
+                    past
+                };
                 // A merge commit leaves the merged set's commits on main, so
                 // still holding them is fine; holding them off main is not.
                 let mut dropped_merged = true;
-                for (_, t) in &set.base.deps {
+                let held = set.base.deps.iter().map(|(_, t)| t).chain(merged_below.iter().map(|a| &a.tip));
+                for t in held {
                     dropped_merged &= !git.is_ancestor(t, r)? || git.is_ancestor(t, &x)?;
                 }
-                Ok((moved_on && dropped_merged).then(|| {
+                Ok(((moved_on || late) && dropped_merged).then(|| {
                     let base = BaseSpec {
                         main: Some(x.clone()),
                         deps: Vec::new(),
@@ -616,12 +647,10 @@ impl<'q, 'h> Work<'q, 'h> {
                 }))
             }
             // A set further down merged: GitHub moved the one under it too.
-            // A rebase onto it from a landing folder passes as well; it is
-            // what a re-sync would have done.
             [p] => {
                 let under = self.st.sets[p].tip.clone();
                 let was = set.base.deps.iter().find(|(d, _)| d == p).map(|(_, t)| t.as_str());
-                let moved = was != Some(under.as_str()) && git.is_ancestor(&under, r)?;
+                let moved = (was != Some(under.as_str()) || !merged_below.is_empty()) && git.is_ancestor(&under, r)?;
                 Ok(moved.then(|| {
                     let base = BaseSpec {
                         main: set.base.main.clone(),
@@ -632,6 +661,17 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Whether GitHub may still be rebasing linked `n` after a merge below.
+    fn restacking(&self, n: u32) -> bool {
+        let now = now_secs();
+        self.st.sets[&n].stack.is_some()
+            && graph::ancestors(&self.st, n).iter().any(|a| {
+                let a = &self.st.sets[a];
+                a.status == SetStatus::Merged
+                    && a.merged_seen_at.is_some_and(|t| now.saturating_sub(t) < RESTACK_GRACE_SECS)
+            })
     }
 
     /// Which GitHub stack each PR is in, and what its PR is based on. A
@@ -1193,10 +1233,10 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.status != SetStatus::Queued {
                 continue;
             }
-            // GitHub is rebasing the linked line above a merge; give it a
-            // pass. That covers a PR GitHub has already put on main but not
+            // GitHub is rebasing the linked line above a merge; give it
+            // time. That covers a PR GitHub has already put on main but not
             // yet rebased, which would otherwise count as public.
-            if set.stack.is_some() && graph::ancestors(&self.st, n).iter().any(|a| report.merged.contains(a)) {
+            if self.restacking(n) {
                 continue;
             }
             if graph::public(&self.st, n) {

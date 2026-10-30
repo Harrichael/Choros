@@ -1190,6 +1190,7 @@ fn new_set(
         stack: None,
         remote: None,
         merged_into: None,
+        merged_seen_at: None,
         source: Source {
             workspace: ws.to_path_buf(),
             repo: repo.to_string(),
