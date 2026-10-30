@@ -56,6 +56,30 @@ fn a_line_behind_the_front_opens_as_one_stack() {
     assert!(status.sets.iter().all(|s| !s.unlinked));
 }
 
+/// A set may list both a set and one built on it, as older lands stored
+/// them. It still sits on one set, so it stacks, and after a merge GitHub's
+/// rebase of it is taken as usual.
+#[test]
+fn a_set_listing_a_set_and_one_built_on_it_still_stacks() {
+    let w = World::new();
+    w.line(3);
+    let mut st = w.state();
+    st.sets.get_mut(&3).unwrap().deps = vec![Dep::Set(1), Dep::Set(2)];
+    w.queue().write_state(&st).unwrap();
+    w.stack(5);
+
+    w.pass();
+    let one = w.pr(1);
+    assert_eq!(w.forge.stack_of(one), Some(vec![one, w.pr(2), w.pr(3)]));
+
+    w.forge.merge(one, MergeMethod::Squash);
+    w.pass();
+    w.forge.restack(one);
+    let report = w.pass();
+    assert_eq!(report.adopted, [2, 3]);
+    assert!(w.state().sets.values().all(|s| s.park.is_none()));
+}
+
 /// The cap counts every open PR in the repo, but holds back only stacking:
 /// sets at the front always open. With a cap of 2, a line of three stacks
 /// one; three sets with nothing ahead of them all open.

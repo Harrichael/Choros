@@ -484,9 +484,10 @@ a set is *stackable* when:
 
 - it is queued and not blocked (neither it nor anything it builds on is
   parked or closed), and not at the front;
-- it has exactly one unmerged dependency, a set in the same repo and queue
-  (merged ones are on main and don't count; an unmerged set in another repo
-  or queue means it can't stack);
+- it sits on exactly one unmerged set, in the same repo and queue (merged
+  ones are on main and don't count, nor does one that another of its
+  dependencies builds on; an unmerged set in another repo or queue means it
+  can't stack);
 - that set has a PR (at the front, or stacked) and no stacked child yet;
 - the queue's diffbase isn't holding PRs back (*Diffbase*: nothing opens
   early).

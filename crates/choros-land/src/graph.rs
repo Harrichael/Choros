@@ -205,6 +205,13 @@ pub fn unmerged_deps(state: &QueueState, n: u32) -> Vec<u32> {
         .collect()
 }
 
+/// The queued sets `n` sits directly on: its unmerged dependencies in its
+/// repo, less any another of them builds on. A set may list both a set and
+/// one built on it; it sits on the second alone.
+pub fn sits_on(state: &QueueState, n: u32) -> Vec<u32> {
+    leaves(state, &unmerged_deps(state, n))
+}
+
 pub fn merged_deps(state: &QueueState, n: u32) -> Vec<u32> {
     base_deps(state, &state.sets[&n])
         .filter(|d| state.sets.get(d).is_some_and(|s| s.status == SetStatus::Merged))

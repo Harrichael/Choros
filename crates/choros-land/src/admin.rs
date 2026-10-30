@@ -92,7 +92,7 @@ pub fn drop_set(env: &Env, q: &Queue, n: u32) -> Result<Dropped> {
     // Onto main it goes in the pass, once replayed: on main before that, it
     // would count as public and keep the dropped work.
     for m in stacked_on {
-        let [p] = graph::unmerged_deps(&work.st, m)[..] else { continue };
+        let [p] = graph::sits_on(&work.st, m)[..] else { continue };
         let below = work.st.sets[&p].branch(&q.name);
         let pr = work.st.sets[&m].pr.as_ref().unwrap().number;
         env.forge.set_pr_base(&dir, pr, &below)?;

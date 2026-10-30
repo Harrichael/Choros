@@ -592,7 +592,7 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(None);
         }
         let git = self.set_git(n);
-        match graph::unmerged_deps(&self.st, n).as_slice() {
+        match graph::sits_on(&self.st, n).as_slice() {
             // The set it sat on merged: GitHub moved it onto main.
             [] => {
                 let main = self.main_sha(set.repo())?;
@@ -942,16 +942,21 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.pr.is_some() || set.tip == set.base_sha {
                 continue;
             }
-            let waiting: Vec<&Dep> = set
-                .deps
-                .iter()
-                .filter(|d| match d {
-                    Dep::Set(m) => self.st.sets.get(m).is_some_and(|s| s.status != SetStatus::Merged),
-                    Dep::Cross { queue, n } => !cross(queue, *n),
-                })
-                .collect();
-            let [Dep::Set(p)] = waiting.as_slice() else { continue };
-            let under = &self.st.sets[p];
+            // Waiting on a set in another repo or queue: its PR opens at the
+            // front, if at all, so there is nothing to stack on.
+            let elsewhere = set.deps.iter().any(|d| match d {
+                Dep::Set(m) => self
+                    .st
+                    .sets
+                    .get(m)
+                    .is_some_and(|s| s.status != SetStatus::Merged && s.repo() != set.repo()),
+                Dep::Cross { queue, n } => !cross(queue, *n),
+            });
+            let [p] = graph::sits_on(&self.st, n)[..] else { continue };
+            if elsewhere {
+                continue;
+            }
+            let under = &self.st.sets[&p];
             // A closed child is still in GitHub's stack until it is dropped.
             let has_child = self.st.sets.values().any(|s| {
                 matches!(s.status, SetStatus::Queued | SetStatus::Closed)
@@ -961,9 +966,9 @@ impl<'q, 'h> Work<'q, 'h> {
             // stack and strand that PR's own link.
             if under.repo() != set.repo()
                 || under.pr.is_none()
-                || !(graph::public(&self.st, *p) || under.stack.is_some())
+                || !(graph::public(&self.st, p) || under.stack.is_some())
                 || has_child
-                || set.base.deps != [(*p, under.tip.clone())]
+                || set.base.deps != [(p, under.tip.clone())]
                 || open_prs(set.repo()) >= self.q.config.stack.max_open as usize
             {
                 continue;
@@ -972,18 +977,18 @@ impl<'q, 'h> Work<'q, 'h> {
                 .into_iter()
                 .filter(|a| self.st.sets[a].is_open())
                 .count();
-            out.push((n, *p, below + 1 + self.longest_chain_on(n)));
+            out.push((n, p, below + 1 + self.longest_chain_on(n)));
         }
         out
     }
 
-    /// How many open sets, one on another, build on `n` at most.
+    /// How many open sets, each sitting on the one before, build on `n`
+    /// at most.
     fn longest_chain_on(&self, n: u32) -> usize {
-        let repo = self.st.sets[&n].repo();
         self.st
             .sets
             .values()
-            .filter(|s| s.is_open() && s.repo() == repo && s.deps.contains(&Dep::Set(n)))
+            .filter(|s| s.is_open() && graph::sits_on(&self.st, s.n) == [n])
             .map(|s| 1 + self.longest_chain_on(s.n))
             .max()
             .unwrap_or(0)
@@ -1028,7 +1033,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// first and linked again later in the pass.
     fn fold_into_below(&mut self, n: u32, forge: &dyn Forge, report: &mut PassReport) {
         let name = self.q.name.clone();
-        let p = match graph::unmerged_deps(&self.st, n)[..] {
+        let p = match graph::sits_on(&self.st, n)[..] {
             [p] => Some(p),
             _ => None,
         };
