@@ -448,8 +448,9 @@ label = "ergon show {} --intent"    # {} is the label, passed as an argument
 A label the hook fails on, or prints nothing for, is left out.
 
 **Checks after any resolution** (agent or rerere): no unmerged paths, no
-conflict markers (`git diff --check`). A resolution that fails them stays
-parked.
+conflict markers (`git diff --check`, ignoring its whitespace warnings: they
+cover all the sets bring, not just the resolution). A resolution that fails
+them stays parked.
 
 **The resync agent** runs from the daemon or from `choros queue resolve`, in
 `<trunk>/landing/<queue>/_sync/<repo>/`, on the queue's `agent.model`:

@@ -216,12 +216,16 @@ impl Git {
             return Ok(Some(format!("still unmerged: {}", unmerged.join(", "))));
         }
         self.run(&["add", "--update"])?;
+        // --check also flags whitespace, but over everything the operation
+        // brings in; that is the sets' own, not the resolution's.
         let out = self.output(&["diff", "--cached", "--check"])?;
-        if !out.status.success() {
-            return Ok(Some(format!(
-                "conflict markers or whitespace errors left:\n{}",
-                String::from_utf8_lossy(&out.stdout).trim()
-            )));
+        let markers: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.ends_with(": leftover conflict marker"))
+            .map(str::to_string)
+            .collect();
+        if !markers.is_empty() {
+            return Ok(Some(format!("conflict markers left:\n{}", markers.join("\n"))));
         }
         Ok(None)
     }

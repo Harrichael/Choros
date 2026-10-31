@@ -385,3 +385,76 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
         Some("one and two\n")
     );
 }
+
+/// A set parked out of the merge head still follows what it builds on. When
+/// that is squash-merged, the set is replayed onto main; left on the old
+/// tip, it would clash with main in every merge-head build and stay parked.
+#[test]
+fn a_set_parked_out_of_the_merge_head_follows_its_base() {
+    let w = World::new();
+    let a = w.workspace("a");
+    let c = w.workspace("c");
+    w.commit(&a, "a.txt", "a\n");
+    w.land_on_head(&a).unwrap();
+    let b = w.workspace("b");
+    w.commit(&c, "README", "c\n");
+    w.land_with(&c, Some(vec![]), None, None).unwrap();
+    w.commit(&b, "a.txt", "a, then b\n");
+    w.commit(&b, "README", "b\n");
+    w.land_with(&b, Some(vec![Dep::Set(1)]), Some(OnConflict::MergeHead), None).unwrap();
+    assert_eq!(w.state().sets[&3].park.as_ref().map(|p| p.op), Some(ParkOp::MergeHead));
+
+    w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
+    w.pass();
+    let st = w.state();
+    assert_eq!(st.sets[&3].base.deps, vec![]);
+    assert_eq!(st.sets[&3].base.main, Some(w.origin_main()));
+    assert_eq!(w.file_at(&st.sets[&3].tip, "a.txt").as_deref(), Some("a, then b\n"));
+}
+
+/// Resolving a clash judges only the resolution. Whitespace git would flag
+/// in what the sets themselves bring (here, a file ending in a blank line)
+/// is theirs to keep, not a sign of a botched resolve.
+#[test]
+fn a_resolution_is_not_judged_by_the_sets_own_whitespace() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    w.land_on_head(&one).unwrap();
+    w.commit(&two, "schema.sql", "create table t;\n\n");
+    w.commit(&two, "README", "two\n");
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+
+    let mut h = Scripted {
+        content: [("README".to_string(), "one and two\n".to_string())].into(),
+        ..Default::default()
+    };
+    w.resolve(&mut h);
+    let st = w.state();
+    assert!(st.sets[&2].park.is_none());
+    let mh = &st.repos[REPO].merge_head.as_ref().unwrap().sha;
+    assert_eq!(w.file_at(mh, "README").as_deref(), Some("one and two\n"));
+    assert_eq!(w.file_at(mh, "schema.sql").as_deref(), Some("create table t;\n\n"));
+}
+
+/// A resolution that leaves conflict markers in is refused.
+#[test]
+fn a_resolution_with_markers_left_is_refused() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    w.land_on_head(&one).unwrap();
+    w.commit(&two, "README", "two\n");
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+
+    let mut h = Scripted {
+        content: [("README".to_string(), "<<<<<<< HEAD\none\n=======\ntwo\n>>>>>>> two\n".to_string())].into(),
+        ..Default::default()
+    };
+    let err = crate::admin::sync(&w.env(), &w.queue(), Some(&mut h)).unwrap_err();
+    assert!(err.to_string().contains("conflict markers left"), "{err}");
+    let st = w.state();
+    assert_eq!(w.file_at(&st.repos[REPO].merge_head.as_ref().unwrap().sha, "README").as_deref(), Some("one\n"));
+}

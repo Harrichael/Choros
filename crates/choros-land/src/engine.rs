@@ -1260,7 +1260,7 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 continue;
             }
-            if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge | ParkOp::MergeHead)) {
+            if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge)) {
                 continue;
             }
             let spec = self.desired_base(n)?;
@@ -1268,7 +1268,10 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.park.as_ref().is_some_and(|p| p.on == spec.key() && !self.retries(p)) {
                 continue;
             }
-            if spec == set.base && set.park.is_none() {
+            // Parked out of the merge head, a set still follows its base: on
+            // a stale one, it would clash in every merge-head build.
+            let parked_on_base = set.park.as_ref().is_some_and(|p| p.op != ParkOp::MergeHead);
+            if spec == set.base && !parked_on_base {
                 continue;
             }
             if self.resync(n, spec)? {
