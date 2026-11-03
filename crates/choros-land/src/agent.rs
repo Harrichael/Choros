@@ -49,16 +49,15 @@ impl Default for Claude {
 }
 
 /// What the resync agent may do, whether run by Choros or driven by you:
-/// edit and stage, never commit, push or rewrite.
-pub const TOOL_ARGS: [&str; 6] = [
+/// edit and stage, never commit, push or rewrite. The tool flags take
+/// several values: written apart, they would swallow the prompt after them.
+pub const TOOL_ARGS: [&str; 4] = [
     "--permission-mode",
     "acceptEdits",
-    "--allowedTools",
-    "Read,Edit,Write,Grep,Glob,\
+    "--allowedTools=Read,Edit,Write,Grep,Glob,\
 Bash(git status*),Bash(git diff*),Bash(git add*),Bash(git log*),Bash(git show*),\
 Bash(git checkout --ours*),Bash(git checkout --theirs*)",
-    "--disallowedTools",
-    "Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
+    "--disallowedTools=Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
 ];
 
 /// `claude` (as `bin`) in `dir` on `session`: created, or resumed.
