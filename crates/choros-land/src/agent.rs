@@ -22,6 +22,7 @@ pub struct ConflictBrief<'a> {
 }
 
 /// The session to use, and whether it has to be created.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSlot {
     pub id: String,
     pub fresh: bool,
@@ -30,48 +31,88 @@ pub struct AgentSlot {
 pub trait Agent {
     /// Resolve the conflict in progress in `brief.dir`, leaving every path
     /// resolved and staged. The caller verifies and concludes; the agent
-    /// must not commit or push.
-    fn resolve(&self, brief: &ConflictBrief) -> Result<()>;
+    /// must not commit or push. The session it ran in: `brief.session`, or
+    /// a fresh one when resuming that failed.
+    fn resolve(&self, brief: &ConflictBrief) -> Result<AgentSlot>;
     /// From `dir`, fork `source` into a new session with id `fork`.
     fn fork_session(&self, dir: &Path, source: &str, fork: &str, name: &str, note: &str) -> Result<()>;
 }
 
-pub struct Claude;
+pub struct Claude {
+    pub bin: std::path::PathBuf,
+}
 
-const ALLOWED_TOOLS: &str = "Read,Edit,Write,Grep,Glob,\
+impl Default for Claude {
+    fn default() -> Claude {
+        Claude { bin: "claude".into() }
+    }
+}
+
+/// What the resync agent may do, whether run by Choros or driven by you:
+/// edit and stage, never commit, push or rewrite.
+pub const TOOL_ARGS: [&str; 6] = [
+    "--permission-mode",
+    "acceptEdits",
+    "--allowedTools",
+    "Read,Edit,Write,Grep,Glob,\
 Bash(git status*),Bash(git diff*),Bash(git add*),Bash(git log*),Bash(git show*),\
-Bash(git checkout --ours*),Bash(git checkout --theirs*)";
+Bash(git checkout --ours*),Bash(git checkout --theirs*)",
+    "--disallowedTools",
+    "Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
+];
+
+/// `claude` (as `bin`) in `dir` on `session`: created, or resumed.
+pub fn claude_on(bin: &Path, dir: &Path, session: &AgentSlot) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(dir);
+    if session.fresh {
+        cmd.args(["--session-id", &session.id]);
+    } else {
+        cmd.args(["--resume", &session.id]);
+    }
+    cmd
+}
+
+/// A session to start in place of `session`, whose resume failed.
+fn fresh_instead(session: &AgentSlot) -> Option<AgentSlot> {
+    (!session.fresh).then(|| AgentSlot {
+        id: crate::uuid::v4(),
+        fresh: true,
+    })
+}
+
+impl Claude {
+    fn run(&self, brief: &ConflictBrief, session: &AgentSlot) -> Result<std::process::Output> {
+        let mut cmd = claude_on(&self.bin, brief.dir, session);
+        cmd.args(["-p", "--output-format", "json", "--model", brief.model]);
+        cmd.args(TOOL_ARGS);
+        cmd.arg(conflict_prompt(brief));
+        output_within(cmd, brief.timeout)?.ok_or_else(|| {
+            eyre!("the resync agent ran past {} minutes and was stopped", brief.timeout.as_secs() / 60)
+        })
+    }
+}
 
 impl Agent for Claude {
-    fn resolve(&self, brief: &ConflictBrief) -> Result<()> {
-        let prompt = conflict_prompt(brief);
-        let mut cmd = Command::new("claude");
-        cmd.current_dir(brief.dir)
-            .args(["-p", "--output-format", "json", "--model", brief.model]);
-        if brief.session.fresh {
-            cmd.args(["--session-id", &brief.session.id]);
-        } else {
-            cmd.args(["--resume", &brief.session.id]);
+    fn resolve(&self, brief: &ConflictBrief) -> Result<AgentSlot> {
+        let mut session = brief.session.clone();
+        let mut out = self.run(brief, &session)?;
+        // A session can stop resuming (a Claude Code fault has done it); one
+        // that did must not keep every conflict from the agent until it
+        // rotates.
+        if !out.status.success()
+            && let Some(fresh) = fresh_instead(&session)
+        {
+            session = fresh;
+            out = self.run(brief, &session)?;
         }
-        cmd.args([
-            "--permission-mode",
-            "acceptEdits",
-            "--allowedTools",
-            ALLOWED_TOOLS,
-            "--disallowedTools",
-            "Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
-        ]);
-        cmd.arg(prompt);
-        let out = output_within(cmd, brief.timeout)?.ok_or_else(|| {
-            eyre!("the resync agent ran past {} minutes and was stopped", brief.timeout.as_secs() / 60)
-        })?;
         if !out.status.success() {
             return Err(eyre!(
                 "the resync agent failed:\n{}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        Ok(())
+        Ok(session)
     }
 
     fn fork_session(&self, dir: &Path, source: &str, fork: &str, name: &str, note: &str) -> Result<()> {
@@ -219,5 +260,43 @@ mod tests {
         quick.args(["-c", "echo done"]);
         let out = output_within(quick, Duration::from_secs(5)).unwrap().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
+    }
+
+    /// `claude -p --resume` can fail on a session it made (a Claude Code
+    /// fault, seen in the wild). The agent then starts a fresh session and
+    /// says which, so that one is recorded to resume next time. A fresh
+    /// session that fails is not tried again.
+    #[test]
+    fn a_session_that_wont_resume_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$*\" in\n\
+             *--resume*) echo 'No deferred tool marker found in the resumed session.' >&2; exit 1 ;;\n\
+             *--session-id\\ broken*) exit 1 ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let claude = Claude { bin };
+        let brief = |session| ConflictBrief {
+            dir: dir.path(),
+            operation: "replaying landing-2 onto landing-1",
+            files: &[],
+            recorded: &[],
+            sides: &[],
+            session,
+            model: "opus",
+            timeout: Duration::from_secs(10),
+        };
+
+        let old = AgentSlot { id: "old".into(), fresh: false };
+        let used = claude.resolve(&brief(&old)).unwrap();
+        assert!(used.fresh);
+        assert_ne!(used.id, "old");
+
+        let broken = AgentSlot { id: "broken".into(), fresh: true };
+        assert!(claude.resolve(&brief(&broken)).is_err());
     }
 }

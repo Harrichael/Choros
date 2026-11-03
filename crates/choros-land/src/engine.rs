@@ -86,11 +86,11 @@ impl Conflict<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Handled {
-    /// `used_session`: the resync agent's session was started or resumed
+    /// `session`: the resync agent's session that was started or resumed
     /// (by the agent, or by you driving it), so it now exists to resume.
-    Resolved { used_session: bool },
+    Resolved { session: Option<AgentSlot> },
     /// It had its go and left the conflict as it was.
     Declined,
     /// It didn't look at it this time; the park waits for a later go.
@@ -119,6 +119,9 @@ pub struct PassReport {
     pub adopted: Vec<u32>,
     /// Stacked sets left empty by a replay, folded into the set below.
     pub folded: Vec<u32>,
+    /// Linked stacked sets the set below newly moved under, left for
+    /// GitHub's Rebase stack: a push of Choros's would cost their approvals.
+    pub behind_in_stack: Vec<u32>,
     /// Merged without a PR: every change in them was already on main.
     pub already_on_main: Vec<u32>,
     pub parked: Vec<u32>,
@@ -286,9 +289,9 @@ impl<'q, 'h> Work<'q, 'h> {
             agent: self.agent,
             settings: &self.q.config.agent,
         })?;
-        if let Handled::Resolved { used_session } = handled {
-            if used_session {
-                record_session(self.st.repos.get_mut(repo).unwrap(), &slot);
+        if let Handled::Resolved { session } = &handled {
+            if let Some(session) = session {
+                record_session(self.st.repos.get_mut(repo).unwrap(), session);
             }
             if let Some(problem) = git.resolution_problems()? {
                 git.abort_in_progress()?;
@@ -438,6 +441,18 @@ impl<'q, 'h> Work<'q, 'h> {
         self.publish(n)
     }
 
+    /// Would replaying `n` onto the tip of `p`, the set it sits on, leave
+    /// nothing of its own? `None` when it would conflict.
+    fn empty_on(&self, n: u32, p: u32) -> Result<Option<bool>> {
+        let set = &self.st.sets[&n];
+        let onto = &self.st.sets[&p].tip;
+        let git = self.git(set.repo());
+        match git.replay_tree(&set.base_sha, &set.tip, onto)? {
+            Some(tree) => Ok(Some(tree == git.run(&["rev-parse", &format!("{onto}^{{tree}}")])?)),
+            None => Ok(None),
+        }
+    }
+
     fn park(&mut self, n: u32, op: ParkOp, files: Vec<String>, on: String) -> Result<bool> {
         let tried = self.conflict_tried;
         self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on, tried });
@@ -574,9 +589,16 @@ impl<'q, 'h> Work<'q, 'h> {
                 }
                 Some(r) => {
                     if git.is_ancestor(&set.tip, &r)? {
+                        // A merge of main pushed by hand resolves the clash
+                        // the set was parked on.
+                        let resolved = match &set.park {
+                            Some(p) if p.op == ParkOp::Diverged => true,
+                            Some(p) if p.op == ParkOp::MainIntoPublic => git.is_ancestor(&p.on, &r)?,
+                            _ => false,
+                        };
                         set.tip = r.clone();
                         set.remote = Some(r);
-                        if set.park.as_ref().is_some_and(|p| p.op == ParkOp::Diverged) {
+                        if resolved {
                             set.park = None;
                         }
                     } else {
@@ -1196,6 +1218,8 @@ impl<'q, 'h> Work<'q, 'h> {
     /// The daemon's pass, minus the lock and fetch `begin` already did.
     pub fn pass(&mut self, forge: &dyn Forge) -> Result<PassReport> {
         let mut report = PassReport::default();
+        let was_behind: BTreeSet<u32> =
+            self.st.sets.keys().copied().filter(|n| graph::behind_in_stack(&self.st, *n).is_some()).collect();
         self.observe_prs(forge, &mut report)?;
         if let Err(e) = self.observe_stacks(forge) {
             report.errors.push(format!("reading GitHub's stacks failed: {e}"));
@@ -1262,6 +1286,28 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             if set.park.as_ref().is_some_and(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge)) {
                 continue;
+            }
+            // Only GitHub's Rebase stack keeps a stacked PR's approvals, and
+            // there is no API for it: wait for someone to press it, and take
+            // its push. Once Choros has replayed the set below, though, the
+            // line is Choros's to carry on. A set the move would leave with
+            // nothing of its own folds as usual, since GitHub would close its
+            // PR; one it conflicts with is re-synced as usual, since the
+            // button can't resolve a conflict.
+            if let Some(p) = graph::behind_in_stack(&self.st, n).filter(|p| !report.resynced.contains(p)) {
+                match self.empty_on(n, p)? {
+                    Some(true) => {
+                        self.fold_into_below(n, forge, &mut report);
+                        continue;
+                    }
+                    Some(false) => {
+                        if !was_behind.contains(&n) {
+                            report.behind_in_stack.push(n);
+                        }
+                        continue;
+                    }
+                    None => {}
+                }
             }
             let spec = self.desired_base(n)?;
             let set = &self.st.sets[&n];

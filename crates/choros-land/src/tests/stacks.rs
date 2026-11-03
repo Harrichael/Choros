@@ -135,25 +135,53 @@ fn the_longest_line_continues_the_stack() {
     assert_eq!(w.forge.stack_of(w.pr(1)), Some(vec![w.pr(1), w.pr(3), w.pr(4)]));
 }
 
-/// A review fix lands low in the stack. The PRs above are replayed onto it
-/// and force-pushed, so the stack stays one straight line; the PR it
-/// landed on only gained a commit.
+/// A review fix lands low in the stack. A push of Choros's would cost the
+/// PRs above their approvals, and only GitHub's Rebase stack keeps them, so
+/// they are left as they are, and status says to press it, once. When
+/// someone does, GitHub's rebase is taken as is.
 #[test]
-fn a_fix_low_in_a_stack_reaches_every_pr_above() {
+fn a_fix_low_in_a_stack_waits_for_rebase_stack() {
     let w = World::new();
     w.stack(5);
     w.line(3);
-    let front = w.origin_tip(1);
+    let before = (w.origin_tip(2), w.origin_tip(3));
 
     w.push_fix(1, "fix.txt", "fixed\n");
     let report = w.pass();
+    assert!(report.resynced.is_empty());
+    assert_eq!(report.behind_in_stack, [2]);
+    assert_eq!((w.origin_tip(2), w.origin_tip(3)), before);
+    let status = crate::status::queue_status(&w.trunk, QUEUE).unwrap();
+    let behind: Vec<bool> = status.sets.iter().map(|s| s.behind_in_stack).collect();
+    assert_eq!(behind, [false, true, false]);
+    assert!(w.pass().behind_in_stack.is_empty(), "said once");
 
-    assert_eq!(report.resynced, [2, 3]);
+    w.forge.rebase_stack(w.pr(1));
+    let report = w.pass();
+    assert_eq!(report.adopted, [2, 3]);
     let st = w.state();
-    assert!(git_is_ancestor(&w.origin, &front, &w.origin_tip(1)), "the front only gained a commit");
-    assert_eq!(w.file_at(&st.sets[&3].tip, "fix.txt").as_deref(), Some("fixed\n"));
     assert_eq!(st.sets[&3].tip, w.origin_tip(3));
+    assert_eq!(w.file_at(&st.sets[&3].tip, "fix.txt").as_deref(), Some("fixed\n"));
     assert_eq!(w.own_commits(3), 1);
+    assert!(st.sets.keys().all(|n| crate::graph::behind_in_stack(&st, *n).is_none()));
+    assert!(w.pass().resynced.is_empty());
+}
+
+/// A review fix low in the stack clashes with the PR above it. Rebase stack
+/// can't resolve that, so there is nothing to wait for: the PR above is
+/// re-synced as before, and with no one to resolve it, parks.
+#[test]
+fn a_fix_low_in_a_stack_that_clashes_is_not_left_for_rebase_stack() {
+    let w = World::new();
+    w.stack(5);
+    w.line(3);
+
+    w.push_fix(1, "f2.txt", "clash\n");
+    let report = w.pass();
+    assert!(report.behind_in_stack.is_empty());
+    assert_eq!(report.parked, [2]);
+    let status = crate::status::queue_status(&w.trunk, QUEUE).unwrap();
+    assert!(status.sets.iter().all(|s| !s.behind_in_stack));
 }
 
 /// The front is squash-merged. GitHub rebases the stack above on its own,

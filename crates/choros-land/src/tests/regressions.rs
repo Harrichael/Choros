@@ -458,3 +458,33 @@ fn a_resolution_with_markers_left_is_refused() {
     let st = w.state();
     assert_eq!(w.file_at(&st.repos[REPO].merge_head.as_ref().unwrap().sha, "README").as_deref(), Some("one\n"));
 }
+
+/// Main clashes with a set at the front, and no one resolves it in the
+/// pass, so the set parks. Someone merges main in by hand and pushes: that
+/// is the resolution, and the park goes, freeing the sets above it.
+#[test]
+fn main_merged_into_a_public_set_by_hand_clears_its_park() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "README", "mine\n");
+    w.land_on_head(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land_on_head(&ws).unwrap();
+    w.push_to_main("README", "theirs\n");
+    w.pass();
+    assert_eq!(w.state().sets[&1].park.as_ref().map(|p| p.op), Some(ParkOp::MainIntoPublic));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("w");
+    let branch = format!("{QUEUE}/landing-1");
+    git(tmp.path(), &["clone", "--quiet", "--branch", &branch, w.origin.to_str().unwrap(), "w"]);
+    let _ = Command::new("git").arg("-C").arg(&work).args(["merge", "--quiet", "origin/main"]).output();
+    std::fs::write(work.join("README"), "both\n").unwrap();
+    git(&work, &["commit", "--quiet", "-am", "Merge main"]);
+    git(&work, &["push", "--quiet", "origin", &branch]);
+
+    w.pass();
+    let st = w.state();
+    assert!(st.sets[&1].park.is_none());
+    assert!(!crate::graph::blocked(&st, 2));
+}

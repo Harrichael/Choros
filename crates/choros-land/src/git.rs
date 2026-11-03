@@ -157,6 +157,21 @@ impl Git {
         }
     }
 
+    /// The tree `base..tip` would make replayed onto `onto`, or `None` if
+    /// it conflicts. Answered without a worktree.
+    pub fn replay_tree(&self, base: &str, tip: &str, onto: &str) -> Result<Option<String>> {
+        let merge_base = format!("--merge-base={base}");
+        let out = self.output(&["merge-tree", "--write-tree", "--no-messages", &merge_base, onto, tip])?;
+        match out.status.code() {
+            Some(0) => Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string())),
+            Some(1) => Ok(None),
+            _ => Err(eyre!(
+                "git merge-tree failed:\n{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        }
+    }
+
     pub fn checkout_detached(&self, rev: &str) -> Result<()> {
         self.run(&["checkout", "--quiet", "--detach", rev])?;
         Ok(())

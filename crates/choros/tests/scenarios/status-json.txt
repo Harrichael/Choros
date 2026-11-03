@@ -48,7 +48,8 @@ $ choros status --json
           "blocked": false,
           "conflicts_with": [],
           "landing_dirty": false,
-          "unlinked": false
+          "unlinked": false,
+          "behind_in_stack": false
         },
         {
           "n": 2,
@@ -74,7 +75,8 @@ $ choros status --json
           "blocked": false,
           "conflicts_with": [],
           "landing_dirty": false,
-          "unlinked": false
+          "unlinked": false,
+          "behind_in_stack": false
         }
       ],
       "needs_sync": [

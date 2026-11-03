@@ -212,6 +212,18 @@ pub fn sits_on(state: &QueueState, n: u32) -> Vec<u32> {
     leaves(state, &unmerged_deps(state, n))
 }
 
+/// A linked stacked PR whose set below has moved under it: the set below,
+/// for GitHub's Rebase stack to bring it up to, approvals kept.
+pub fn behind_in_stack(state: &QueueState, n: u32) -> Option<u32> {
+    let set = &state.sets[&n];
+    if !stacked(state, n) || set.stack.is_none() {
+        return None;
+    }
+    let [p] = sits_on(state, n)[..] else { return None };
+    let on = set.base.deps.iter().find(|(d, _)| *d == p).map(|(_, t)| t);
+    (on != Some(&state.sets[&p].tip)).then_some(p)
+}
+
 pub fn merged_deps(state: &QueueState, n: u32) -> Vec<u32> {
     base_deps(state, &state.sets[&n])
         .filter(|d| state.sets.get(d).is_some_and(|s| s.status == SetStatus::Merged))

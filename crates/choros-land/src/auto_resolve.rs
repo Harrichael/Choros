@@ -91,7 +91,7 @@ impl AutoResolve {
         }
         if let Some(tree) = self.settled.get(&key) {
             git.run(&["read-tree", "--reset", "-u", tree])?;
-            return Ok(Handled::Resolved { used_session: false });
+            return Ok(Handled::Resolved { session: None });
         }
         if ledger.tried.contains(&key) {
             self.notes
@@ -117,14 +117,17 @@ impl AutoResolve {
         save(&path, &ledger)?;
 
         let log = q.dir().join(format!("auto-resolve-{}.log", c.repo));
-        if let Err(e) = c.agent.resolve(&c.brief()) {
-            std::fs::write(&log, format!("{what}\n\n{e:#}\n"))?;
-            self.notes.push(format!(
-                "left {what} parked: the agent didn't settle it; see {}",
-                log.display()
-            ));
-            return Ok(Handled::Declined);
-        }
+        let session = match c.agent.resolve(&c.brief()) {
+            Ok(s) => s,
+            Err(e) => {
+                std::fs::write(&log, format!("{what}\n\n{e:#}\n"))?;
+                self.notes.push(format!(
+                    "left {what} parked: the agent didn't settle it; see {}",
+                    log.display()
+                ));
+                return Ok(Handled::Declined);
+            }
+        };
         if let Some(problem) = git.resolution_problems()? {
             std::fs::write(&log, format!("{what}\n\n{problem}\n"))?;
             self.notes.push(format!(
@@ -159,7 +162,7 @@ impl AutoResolve {
         self.settled.insert(key, tree);
         self.notes
             .push(format!("the agent settled {what}; `{check}` passed"));
-        Ok(Handled::Resolved { used_session: true })
+        Ok(Handled::Resolved { session: Some(session) })
     }
 }
 

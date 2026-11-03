@@ -76,7 +76,7 @@ fn log_instant_merges(trunk: &Path) -> Result<()> {
 fn pass(trunk: &Path, name: &str) -> Result<()> {
     let q = Queue::open(trunk, name)?;
     let gh = Gh::new(q.gh_config_dir());
-    let claude = Claude;
+    let claude = Claude::default();
     let env = Env {
         forge: &gh,
         agent: &claude,
@@ -114,6 +114,7 @@ fn describe(name: &str, r: &PassReport) {
         ("opened stacked PRs for", &r.stacked),
         ("took GitHub's rebase of", &r.adopted),
         ("folded into the set below, as they were left empty,", &r.folded),
+        ("left for GitHub's Rebase stack, as the set below moved,", &r.behind_in_stack),
         ("found everything already on main, so no PR, for", &r.already_on_main),
         ("parked", &r.parked),
     ] {

@@ -6,7 +6,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use choros_land::agent::{Claude, ConflictBrief};
+use choros_land::agent::{self, AgentSlot, Claude, ConflictBrief};
 use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use choros_land::forge::Gh;
 use choros_land::land::{self, Deps, LandRequest};
@@ -30,7 +30,7 @@ impl Tools {
         let gh_dir = trunk.join(choros::CONFIG_DIR).join("gh");
         Tools {
             gh: Gh::new(gh_dir.exists().then_some(gh_dir)),
-            claude: Claude,
+            claude: Claude::default(),
         }
     }
 
@@ -405,6 +405,10 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         if s.unlinked {
             notes.push("not linked into a GitHub stack yet".into());
         }
+        if s.behind_in_stack {
+            let url = s.pr.as_ref().map(|p| format!(": {}", p.url)).unwrap_or_default();
+            notes.push(format!("the set below moved: press Rebase stack on GitHub{url}"));
+        }
         for note in notes {
             println!("{}", fit(&format!("{under}  {note}")));
         }
@@ -774,6 +778,7 @@ fn print_report(name: &str, r: &PassReport) {
         ("opened stacked PRs for", &r.stacked),
         ("took GitHub's rebase of", &r.adopted),
         ("folded into the set below, as they were left empty,", &r.folded),
+        ("left for GitHub's Rebase stack, as the set below moved,", &r.behind_in_stack),
         ("found everything already on main, so no PR, for", &r.already_on_main),
         ("parked", &r.parked),
     ] {
@@ -868,26 +873,33 @@ impl ConflictHandler for Interactive {
             .next()
             .unwrap_or('s'),
         };
-        let brief = || c.brief();
+        let resolved = |s: AgentSlot| Handled::Resolved { session: Some(s) };
         match choice {
-            'a' => {
-                c.agent.resolve(&brief())?;
-                Ok(Handled::Resolved { used_session: true })
-            }
+            'a' => Ok(resolved(c.agent.resolve(&c.brief())?)),
             'b' => {
-                c.agent.resolve(&brief())?;
+                let session = c.agent.resolve(&c.brief())?;
                 let _ = Command::new("git")
                     .arg("-C")
                     .arg(c.dir)
                     .args(["--no-pager", "diff", "--cached"])
                     .status();
                 match ask("push this resolution? [y] push / [i] intervene / [s] skip > ")?.as_str() {
-                    "y" | "" => Ok(Handled::Resolved { used_session: true }),
-                    "i" => drive(&brief()).map(|_| Handled::Resolved { used_session: true }),
+                    "y" | "" => Ok(resolved(session)),
+                    "i" => {
+                        // The agent's run made the session, even one it was
+                        // told to create: drive it as a resume.
+                        let existing = AgentSlot {
+                            fresh: false,
+                            ..session.clone()
+                        };
+                        let mut brief = c.brief();
+                        brief.session = &existing;
+                        drive(&brief).map(|_| resolved(session))
+                    }
                     _ => Ok(Handled::Declined),
                 }
             }
-            'c' => drive(&brief()).map(|_| Handled::Resolved { used_session: true }),
+            'c' => drive(&c.brief()).map(resolved),
             _ => Ok(Handled::Declined),
         }
     }
@@ -905,17 +917,12 @@ impl ConflictHandler for Interactive {
 
 /// Open Claude Code on the resync agent's session in the sync clone, with the
 /// conflict in progress, and let the user drive.
-fn drive(brief: &ConflictBrief) -> Result<()> {
-    let mut cmd = Command::new("claude");
-    cmd.current_dir(brief.dir).args(["--model", brief.model]);
-    if brief.session.fresh {
-        cmd.args(["--session-id", &brief.session.id]);
-    } else {
-        cmd.args(["--resume", &brief.session.id]);
-    }
-    cmd.arg(choros_land::agent::driven_conflict_prompt(brief));
+fn drive(brief: &ConflictBrief) -> Result<AgentSlot> {
+    let mut cmd = agent::claude_on(Path::new("claude"), brief.dir, brief.session);
+    cmd.args(["--model", brief.model]).args(agent::TOOL_ARGS);
+    cmd.arg(agent::driven_conflict_prompt(brief));
     cmd.status()?;
-    Ok(())
+    Ok(brief.session.clone())
 }
 
 /// `choros repo bind REPO QUEUE|none`: where this workspace lands `repo`.

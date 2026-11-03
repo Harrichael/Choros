@@ -20,7 +20,7 @@ use std::sync::{Mutex, Once};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::agent::{Agent, ConflictBrief};
+use crate::agent::{Agent, AgentSlot, ConflictBrief};
 use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings, Stack};
 use crate::land::{Deps, LandOutcome, LandRequest};
@@ -183,6 +183,30 @@ impl FakeForge {
                 new_under = tip;
             }
             old_under = old;
+        }
+    }
+
+    /// Press Rebase stack on the stack holding `number`: each branch above
+    /// the bottom is rebased onto the one below it as that now stands.
+    /// Only a bottom that gained commits is handled, which is all the
+    /// stories need.
+    pub fn rebase_stack(&self, number: u64) {
+        let stack = self.stack_of(number).expect("PR is in a stack");
+        let origin = self.prs.lock().unwrap()[&number].origin.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("w");
+        git(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), "w"]);
+        let head = |pr: &u64| self.prs.lock().unwrap()[pr].head.clone();
+        let mut new_under = git(&work, &["rev-parse", &format!("origin/{}", head(&stack[0]))]);
+        let mut old_under = None;
+        for pr in &stack[1..] {
+            let old = git(&work, &["rev-parse", &format!("origin/{}", head(pr))]);
+            let from = old_under.unwrap_or_else(|| git(&work, &["merge-base", &old, &new_under]));
+            git(&work, &["checkout", "--quiet", "-B", &head(pr), &old]);
+            git(&work, &["rebase", "--quiet", "--force-rebase", "--onto", &new_under, &from]);
+            git(&work, &["push", "--quiet", "--force", "origin", &head(pr)]);
+            new_under = git(&work, &["rev-parse", "HEAD"]);
+            old_under = Some(old);
         }
     }
 
@@ -406,7 +430,7 @@ pub struct FakeAgent {
 }
 
 impl Agent for FakeAgent {
-    fn resolve(&self, brief: &ConflictBrief) -> Result<()> {
+    fn resolve(&self, brief: &ConflictBrief) -> Result<AgentSlot> {
         self.models.lock().unwrap().push(brief.model.to_string());
         let Some(fix) = self.fix.lock().unwrap().clone() else {
             return Err(eyre!("the agent gave up"));
@@ -415,7 +439,7 @@ impl Agent for FakeAgent {
             std::fs::write(brief.dir.join(f), &fix)?;
             git(brief.dir, &["add", f]);
         }
-        Ok(())
+        Ok(brief.session.clone())
     }
 
     fn fork_session(&self, dir: &Path, source: &str, fork: &str, _name: &str, _note: &str) -> Result<()> {
@@ -455,7 +479,7 @@ impl ConflictHandler for Scripted {
             recorded: c.recorded.len(),
             prompt: crate::agent::conflict_prompt(&c.brief()),
         });
-        Ok(Handled::Resolved { used_session: false })
+        Ok(Handled::Resolved { session: None })
     }
 
     fn fork_conflict(&mut self, _fork: u32, _with: &[u32]) -> Result<Option<OnConflict>> {

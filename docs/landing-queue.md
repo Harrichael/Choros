@@ -344,7 +344,8 @@ the next pass.
    merge head) awaiting a decision; reopened → unpark.
 2. **External pushes.** If a set's remote tip has moved past its recorded tip
    (review fixes pushed from its landing, at the front or not), adopt the new
-   commits as part of the set.
+   commits as part of the set. A pushed merge that brings in the main a
+   set was parked clashing with resolves that park.
 3. **Desired base** of each queued private set:
    - all deps merged → `origin/main`;
    - some deps merged → a merge of `origin/main` with the unmerged deps'
@@ -414,7 +415,8 @@ resolve <queue>` asks about, every time:
 - **b)** The agent resolves, the diff is printed, then you choose push or
   intervene.
 - **c)** Intervene: Claude Code opens interactively in the sync clone on the
-  resync agent's current session, and you drive.
+  resync agent's current session, and you drive. It may do what the agent
+  may (edit, stage), and is barred from what it is barred from.
 
 Without a TTY (from inside a Claude session), `resolve` takes `--agent=trust`
 or prints the parked operation and exits non-zero.
@@ -462,7 +464,9 @@ claude -p --model <model> --resume <id> --permission-mode acceptEdits \
 ```
 
 Choros mints the session id with `--session-id` on first use, records it in
-`state.json`, and resumes it on later runs. After `agent.rotate_after` runs it
+`state.json`, and resumes it on later runs. A resume that fails (Claude Code
+has refused to resume a session it made) is retried at once in a fresh
+session, which is recorded in its place. After `agent.rotate_after` runs it
 starts a new session, seeded with a handoff summary; the queue's long-term
 notes live in a `CLAUDE.md` in the sync clone. The canned prompt names the
 operation, conflicted files, what each side is for, and any recorded
@@ -533,11 +537,10 @@ pass's errors. The extension can't read a token kept in the keychain under
 and only ever gains commits. With stacks, "has a PR" splits in two, both
 worked out from the graph, never stored:
 
-- **stacked**: it has a PR and an unmerged dependency in its repo. It is
-  re-synced like a private set: replayed onto its dependency's new tip and
-  force-pushed with a lease. GitHub does the same to stacks itself. This is
-  how a review fix lower down reaches the PRs above it, and how a stack
-  stays the straight line GitHub needs to merge it. A merge commit pushed
+- **stacked**: it has a PR and an unmerged dependency in its repo. Unlinked,
+  it is re-synced like a private set: replayed onto its dependency's new
+  tip and force-pushed with a lease. Linked, it is left for GitHub to move
+  (*When the set below moves*). A merge commit pushed
   onto it parks it (`pushed-merge`), as on a private set; so the landing
   folder's `CLAUDE.md` says `git pull --rebase`, and GitHub's "Update
   branch" button on a stacked PR leads to a park;
@@ -545,9 +548,32 @@ worked out from the graph, never stored:
   bottom of a stack, or a plain front set). As before: main is merged in
   when needed, never rebased.
 
-GitHub's docs say a rebase that leaves a PR's own diff unchanged keeps its
-approvals; a repo that dismisses stale approvals on new commits may still
-drop them. Untested.
+**When the set below moves** without merging (a review fix pushed to it, a
+force-push accepted with `queue resolve`, main merged into the bottom),
+the linked PRs above stay where they are. GitHub then shows **Rebase
+stack** in the merge box, and requires it before anything in the stack
+merges. Only that server-side rebase keeps approvals where a PR's own diff
+is unchanged, even with "dismiss stale approvals" on; a force-push of
+Choros's counts as new commits and dismisses them. GitHub has no API for
+it (`PUT pulls/N/update-branch` refuses stacked PRs, GraphQL's
+`updatePullRequestBranch` isn't stack-aware, and `gh stack rebase` rebases
+locally and pushes, like Choros), so someone presses it. Until then:
+
+- status notes the PR ("the set below moved: press Rebase stack on GitHub")
+  and sets `behind_in_stack`; the pass report says so once;
+- the merge head holds the line as it was, so new work starts without the
+  fix below until the stack is rebased;
+- GitHub's rebase, when it comes, is adopted as after a merge (*a set
+  further down merged*, below);
+- a set the move would leave with nothing of its own still folds into the
+  set below (*A PR left with nothing of its own*), since GitHub would close
+  its PR; and one the move conflicts with is re-synced as before (resolved
+  or parked), since the button can't resolve a conflict. Both are checked
+  with `git merge-tree`, without a replay.
+
+Once Choros has replayed the set below itself (after a merge GitHub didn't
+restack within the grace period, below), the line above is Choros's: it is
+replayed in the same pass, as before.
 
 **When a set merges, GitHub moves the line above it.** It points the next
 PR at main and rebases and force-pushes every linked branch above, dropping
@@ -564,8 +590,8 @@ GitHub's rebase explains it:
   and the new tip holds the merged set's commits only where main has them
   (a merge commit keeps them; a squash drops them). Record base
   `{main: X, no deps}`.
-- **a set further down merged**: adopt when the new tip sits on the
-  adopted tip of the set under it. Record base `{main unchanged, deps:
+- **a set further down merged**, or the set under it moved: adopt when
+  the new tip sits on the adopted tip of the set under it. Record base `{main unchanged, deps:
   [(that set, its tip)]}`, exactly what `desired_base` would give, so the
   next pass doesn't rewrite it again.
 
@@ -622,11 +648,12 @@ in instant mode, which makes no sets, so it needs no change.
 
 **Status.** A stacked set's `state` is `stacked`, and its `review` is the
 same `{draft, unanswered, approved}` a front set gets. `unlinked` is true
-for a stacked PR not yet in a GitHub stack; the graph notes it.
+for a stacked PR not yet in a GitHub stack, and `behind_in_stack` for a
+linked one waiting for Rebase stack; the graph notes both.
 
 **CI.** A stacked PR runs `pull_request` workflows on every re-sync, like
 `on: push` ones on private branches; a review fix low in a stack re-runs CI
-for every PR above it.
+for every PR above it once Rebase stack moves them.
 
 ## Landings and sessions
 
@@ -894,6 +921,7 @@ Round 5 (stacked PRs, ergon_choros/6gfb):
 - [building stacks] choros calls `gh stack link`.
 - [graph grows later] a PR once stacked stays in its stack; free cap slots also go to the longest line first.
 - [a set emptied mid-stack by a replay] its labels move to the set below; it leaves the queue, its commits not handed back.
-- Mid-stack: "Choros repairs on drop". Approvals across rebases: trust GitHub's docs, untested.
+- Mid-stack: "Choros repairs on drop".
+- [approvals] "I just had to force push to fix a base of a stack and then choros force pushed the rest of the stack but the problem is that kicks approval whereas if I use github ui ... to rebase the stack on top of the new base then it keeps approvals" → with no API for Rebase stack, a linked stacked PR whose set below moved waits for someone to press it.
 - Stacked PRs follow `pr.draft`; the cap counts per repo; `--json` gives stacked sets the state `stacked`; after a merge Choros leaves GitHub one pass to rebase the stack before re-syncing it itself.
 - [a long stack restacks slower than 10s] "10 seconds * 5 is 50 seconds, so should we consider adjusting our time tolerance?" → watch GitHub's progress with a time cap (5 minutes), and take GitHub's rewrite onto the right base even after Choros replayed (only once a set below has merged; a teammate's rewrite still parks).

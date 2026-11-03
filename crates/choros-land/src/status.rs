@@ -67,6 +67,9 @@ pub struct SetLine {
     pub landing_dirty: bool,
     /// A stacked PR not yet linked into a GitHub stack.
     pub unlinked: bool,
+    /// A stacked PR the set below moved under, waiting for GitHub's Rebase
+    /// stack.
+    pub behind_in_stack: bool,
 }
 
 /// The queues a command run at `cwd` is about. Inside a workspace: the ones
@@ -201,6 +204,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             conflicts_with: set.conflicts_with.clone(),
             landing_dirty,
             unlinked: graph::stacked(&st, *n) && set.stack.is_none(),
+            behind_in_stack: set.park.is_none() && graph::behind_in_stack(&st, *n).is_some(),
         });
     }
     let mut needs_sync = Vec::new();
