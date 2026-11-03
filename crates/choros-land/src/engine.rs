@@ -403,10 +403,40 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             _ => self.root(repo)?,
         };
+        let main = self.stackable_main(n, main)?;
         Ok(BaseSpec {
             main: Some(main),
             deps: tips,
         })
+    }
+
+    /// A set that may stack on a set with a PR must build on no main that
+    /// set lacks: its PR's diff, against that set's branch, would show the
+    /// difference. So it takes the newest main the set below has, unless
+    /// its commits conflict there; then it stays private, as without stacks.
+    fn stackable_main(&self, n: u32, main: String) -> Result<String> {
+        let set = &self.st.sets[&n];
+        if !self.q.config.stack.enabled || self.repo_state(set.repo())?.diffbase.is_some() {
+            return Ok(main);
+        }
+        let Some(p) = self.stack_spot(n) else { return Ok(main) };
+        let under = &self.st.sets[&p];
+        let git = self.git(set.repo());
+        if git.is_ancestor(&main, &under.tip)?
+            || git.replay_tree(&set.base_sha, &set.tip, &under.tip)?.is_none()
+        {
+            return Ok(main);
+        }
+        let below = git.run(&["merge-base", &under.tip, &self.main_sha(set.repo())?])?;
+        // Not without a dependency that merged since: it lives in main alone.
+        for d in graph::merged_deps(&self.st, n) {
+            if let Some(at) = &self.st.sets[&d].merged_into
+                && !git.is_ancestor(at, &below)?
+            {
+                return Ok(main);
+            }
+        }
+        Ok(below)
     }
 
     /// Rebuild `n`'s base from `spec` and replay its own commits onto it.
@@ -989,8 +1019,6 @@ impl<'q, 'h> Work<'q, 'h> {
     /// on and the length of its line: the stack under it, itself, and the
     /// longest chain of sets built on it.
     fn stack_candidates(&self) -> Vec<(u32, u32, usize)> {
-        let name = &self.q.name;
-        let cross = |queue: &str, m: u32| self.cross_merged()(queue, m);
         let open_prs = |repo: &str| {
             self.st
                 .sets
@@ -1004,33 +1032,10 @@ impl<'q, 'h> Work<'q, 'h> {
             if set.pr.is_some() || set.tip == set.base_sha {
                 continue;
             }
-            // Waiting on a set in another repo or queue: its PR opens at the
-            // front, if at all, so there is nothing to stack on.
-            let elsewhere = set.deps.iter().any(|d| match d {
-                Dep::Set(m) => self
-                    .st
-                    .sets
-                    .get(m)
-                    .is_some_and(|s| s.status != SetStatus::Merged && s.repo() != set.repo()),
-                Dep::Cross { queue, n } => !cross(queue, *n),
-            });
-            let [p] = graph::sits_on(&self.st, n)[..] else { continue };
-            if elsewhere {
-                continue;
-            }
+            let Some(p) = self.stack_spot(n) else { continue };
             let under = &self.st.sets[&p];
-            // A closed child is still in GitHub's stack until it is dropped.
-            let has_child = self.st.sets.values().any(|s| {
-                matches!(s.status, SetStatus::Queued | SetStatus::Closed)
-                    && s.pr_base.as_deref() == Some(under.branch(name).as_str())
-            });
-            // Under an unlinked stacked PR, linking would start a second
-            // stack and strand that PR's own link.
-            if under.repo() != set.repo()
-                || under.pr.is_none()
-                || !(graph::public(&self.st, p) || under.stack.is_some())
-                || has_child
-                || set.base.deps != [(p, under.tip.clone())]
+            if set.base.deps != [(p, under.tip.clone())]
+                || set.base_sha != under.tip
                 || open_prs(set.repo()) >= self.q.config.stack.max_open as usize
             {
                 continue;
@@ -1042,6 +1047,34 @@ impl<'q, 'h> Work<'q, 'h> {
             out.push((n, p, below + 1 + self.longest_chain_on(n)));
         }
         out
+    }
+
+    /// The set `n` would stack on, cap and base aside: the one set it sits
+    /// on, with a PR in a stack (or on main) and no other stacked child.
+    fn stack_spot(&self, n: u32) -> Option<u32> {
+        let set = &self.st.sets[&n];
+        // Waiting on a set in another repo or queue: its PR opens at the
+        // front, if at all, so there is nothing to stack on.
+        let elsewhere = set.deps.iter().any(|d| match d {
+            Dep::Set(m) => self
+                .st
+                .sets
+                .get(m)
+                .is_some_and(|s| s.status != SetStatus::Merged && s.repo() != set.repo()),
+            Dep::Cross { queue, n } => !self.cross_merged()(queue, *n),
+        });
+        let [p] = graph::sits_on(&self.st, n)[..] else { return None };
+        let under = &self.st.sets[&p];
+        // A closed child is still in GitHub's stack until it is dropped.
+        let has_child = self.st.sets.values().any(|s| {
+            s.n != n
+                && matches!(s.status, SetStatus::Queued | SetStatus::Closed)
+                && s.pr_base.as_deref() == Some(under.branch(&self.q.name).as_str())
+        });
+        // Under an unlinked stacked PR, linking would start a second
+        // stack and strand that PR's own link.
+        let linkable = graph::public(&self.st, p) || under.stack.is_some();
+        (!elsewhere && under.pr.is_some() && linkable && !has_child).then_some(p)
     }
 
     /// How many open sets, each sitting on the one before, build on `n`

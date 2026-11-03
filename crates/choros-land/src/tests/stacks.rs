@@ -135,6 +135,52 @@ fn the_longest_line_continues_the_stack() {
     assert_eq!(w.forge.stack_of(w.pr(1)), Some(vec![w.pr(1), w.pr(3), w.pr(4)]));
 }
 
+/// Main moves after the front opens its PR, and the next set is written on
+/// the newer main. Stacked on the front's branch, that main would show in
+/// its PR as if it were the set's own change, so it is built on the front
+/// alone, and its PR shows its own commit.
+#[test]
+fn a_set_written_on_a_newer_main_stacks_on_the_set_below_alone() {
+    let w = World::new();
+    w.stack(5);
+    let ws = w.line(1);
+    w.push_to_main("m.txt", "m\n");
+    w.sync(&ws);
+    w.commit(&ws, "f2.txt", "2\n");
+    w.land_on_head(&ws).unwrap();
+    w.pass();
+
+    assert_eq!(w.forge.base_of(w.pr(2)), format!("{QUEUE}/landing-1"));
+    let st = w.state();
+    assert_eq!(st.sets[&2].base_sha, st.sets[&1].tip);
+    assert_eq!(w.file_at(&st.sets[&2].tip, "m.txt"), None);
+    assert_eq!(w.own_commits(2), 1);
+    assert!(w.pass().resynced.is_empty());
+}
+
+/// The same, but the set's own commit changes what the newer main brought,
+/// so it can't go on the front alone. It stays private, as without stacks,
+/// and opens its PR on main once it reaches the front.
+#[test]
+fn a_set_that_needs_a_newer_main_stays_private() {
+    let w = World::new();
+    w.stack(5);
+    let ws = w.line(1);
+    w.push_to_main("m.txt", "m\n");
+    w.sync(&ws);
+    w.commit(&ws, "m.txt", "changed\n");
+    w.land_on_head(&ws).unwrap();
+    let report = w.pass();
+
+    assert!(report.parked.is_empty());
+    assert!(w.state().sets[&2].pr.is_none());
+    assert!(w.pass().resynced.is_empty());
+
+    w.forge.merge(w.pr(1), MergeMethod::Squash);
+    w.pass();
+    assert_eq!(w.forge.base_of(w.pr(2)), "main");
+}
+
 /// A review fix lands low in the stack. A push of Choros's would cost the
 /// PRs above their approvals, and only GitHub's Rebase stack keeps them, so
 /// they are left as they are, and status says to press it, once. When

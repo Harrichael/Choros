@@ -494,6 +494,13 @@ a set is *stackable* when:
   dependencies builds on; an unmerged set in another repo or queue means it
   can't stack);
 - that set has a PR (at the front, or stacked) and no stacked child yet;
+- it is built on that set's tip alone: no main the set below lacks. A set
+  written on a newer main (landed from the merge head after main moved) is
+  replayed onto the set below's tip first, at the newest main that set
+  has; otherwise its PR, diffed against that set's branch, would show the
+  newer main as its own change. If its commits conflict there (`git
+  merge-tree`, no agent), it keeps its base and stays private until the
+  front;
 - the queue's diffbase isn't holding PRs back (*Diffbase*: nothing opens
   early).
 
@@ -929,3 +936,6 @@ Round 5 (stacked PRs, ergon_choros/6gfb):
 Round 6 (where landings live):
 - "Can we move landings to under the .choros config under queues such that each queue has its own landing/ folder" → landing folders in `queues/<queue>/landing/`, the sync clone and check worktree beside them in `queues/<queue>/`.
 - [existing queues] moved on the queue's next lock, with each landing's Claude sessions moved so they still resume.
+
+Round 7 (a stacked PR showing main's diff):
+- "Uhh, whats up with pr 142? It says its a doc pr but there are 4k lines that arent about docs?" → a set stacks only on the set below's tip alone ("Option 1 for sure"); one that conflicts there stays private (chosen over the agent trying first).
