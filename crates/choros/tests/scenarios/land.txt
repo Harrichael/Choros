@@ -12,7 +12,7 @@ app now lands into appq
 $ echo a > a.txt && git add a.txt && git commit -qm "write a"
 $ choros land continue
 app → appq/landing-1, at the front: https://github.test/pull/1
-    landing: $ROOT/trunk/landing/appq/landing-1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
 $ choros status
 appq (app) @ $ROOT/trunk
 * landing-1  front   write a (app)  #1
@@ -22,7 +22,7 @@ appq (app) @ $ROOT/trunk
 $ echo "a, reviewed" > a.txt && git commit -qam "review a"
 $ choros land continue
 app → appq/landing-2, queued
-    landing: $ROOT/trunk/landing/appq/landing-2
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
     appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
 
 # Status draws the sets as git log --graph draws commits, each above the

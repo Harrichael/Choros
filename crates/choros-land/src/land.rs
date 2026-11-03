@@ -1399,7 +1399,7 @@ fn finish_instant_pr(trunk: &Path, ws: &Path, repo: &str, pr: &InstantPr) -> Res
     })
 }
 
-/// `<trunk>/landing/<queue>/landing-N/`: a workspace of its own on the set's
+/// `<queue config>/landing/landing-N/`: a workspace of its own on the set's
 /// branch, where review fixes are made and pushed.
 fn make_landing(q: &Queue, n: u32, parent: &Path) -> Result<PathBuf> {
     let dir = q.landing_dir(n);

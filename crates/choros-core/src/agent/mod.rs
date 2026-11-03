@@ -131,6 +131,43 @@ fn copy_templates(dirs: &[PathBuf], workspace: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Carry Claude Code's sessions for `from`, and for folders below it, over
+/// to `to`, a folder just moved there. Claude Code keeps a folder's sessions
+/// under its path, so a moved folder's sessions would not resume from it.
+pub fn move_claude_sessions(home: &Path, from: &Path, to: &Path) -> Result<()> {
+    let projects = home.join(".claude/projects");
+    let Ok(entries) = std::fs::read_dir(&projects) else { return Ok(()) };
+    let (old, new) = (ls::encode_cwd(from), ls::encode_cwd(to));
+    let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&old).filter(|r| r.is_empty() || r.starts_with('-')) else {
+            continue;
+        };
+        let dst = projects.join(format!("{new}{rest}"));
+        if dst.exists() {
+            continue;
+        }
+        // Rewritten before the rename, so a failure leaves the folder to retry.
+        for file in std::fs::read_dir(entry.path())?.flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            // Bounded by what can follow a path, so `landing-1` spares `landing-10`.
+            let text = std::fs::read_to_string(&path)?;
+            let moved = text
+                .replace(&format!("{from}/"), &format!("{to}/"))
+                .replace(&format!("{from}\""), &format!("{to}\""));
+            if moved != text {
+                std::fs::write(&path, moved)?;
+            }
+        }
+        std::fs::rename(entry.path(), &dst)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +211,30 @@ mod tests {
         std::fs::write(&settings, b"user-edited").unwrap();
         init_templates(trunk).unwrap();
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "user-edited");
+    }
+
+    /// A moved folder's sessions, and those of folders below it, follow it
+    /// with the paths inside rewritten; a sibling that shares a prefix stays.
+    #[test]
+    fn claude_sessions_follow_a_moved_folder() {
+        let home = tempdir();
+        let projects = home.path().join(".claude/projects");
+        let (from, to) = (Path::new("/t/landing/q/landing-1"), Path::new("/t/.cfg/q/landing/landing-1"));
+        let session = |dir: &Path, cwd: &str| {
+            std::fs::create_dir_all(projects.join(ls::encode_cwd(dir))).unwrap();
+            let line = format!("{{\"cwd\":\"{cwd}\"}}\n");
+            std::fs::write(projects.join(ls::encode_cwd(dir)).join("s.jsonl"), line).unwrap();
+        };
+        session(from, "/t/landing/q/landing-1");
+        session(&from.join("repo"), "/t/landing/q/landing-1/repo");
+        session(Path::new("/t/landing/q/landing-10"), "/t/landing/q/landing-10");
+
+        move_claude_sessions(home.path(), from, to).unwrap();
+
+        let read = |dir: &Path| std::fs::read_to_string(projects.join(ls::encode_cwd(dir)).join("s.jsonl")).unwrap();
+        assert_eq!(read(to), "{\"cwd\":\"/t/.cfg/q/landing/landing-1\"}\n");
+        assert_eq!(read(&to.join("repo")), "{\"cwd\":\"/t/.cfg/q/landing/landing-1/repo\"}\n");
+        assert_eq!(read(Path::new("/t/landing/q/landing-10")), "{\"cwd\":\"/t/landing/q/landing-10\"}\n");
+        assert!(!projects.join(ls::encode_cwd(from)).exists());
     }
 }

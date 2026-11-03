@@ -400,6 +400,30 @@ fn the_prompt_says_sync_until_the_workspace_is_synced() {
     assert!(two.join(REPO).join("a.txt").exists());
 }
 
+/// A queue from before landings lived in its config folder still has them,
+/// and its sync clone, at `<trunk>/landing/<queue>/`: the next lock moves
+/// them in, and the queue carries on from there.
+#[test]
+fn a_queue_with_landings_in_the_old_place_moves_them_in() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    let qdir = w.trunk.join(".choros-config/queues/appq");
+    let old = w.trunk.join("landing/appq");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::rename(qdir.join("_sync"), old.join("_sync")).unwrap();
+    std::fs::rename(qdir.join("landing/landing-1"), old.join("landing-1")).unwrap();
+
+    drop(w.queue().lock().unwrap());
+
+    assert!(!w.trunk.join("landing").exists());
+    assert_eq!(git(&qdir.join("landing/landing-1").join(REPO), &["branch", "--show-current"]), "appq/landing-1");
+    w.commit(&ws, "b.txt", "b\n");
+    w.land_on_head(&ws).unwrap();
+    assert!(qdir.join("landing/landing-2").exists());
+}
+
 /// A land leaves a landing folder on the set's branch, a workspace of its
 /// own, with the landing session forked into it.
 #[test]
@@ -410,7 +434,7 @@ fn a_land_makes_a_landing_with_the_session_forked_into_it() {
     let out = w.land_on_head(&ws).unwrap();
 
     let landing = out.landed[0].landing.clone().unwrap();
-    assert_eq!(landing, w.trunk.join("landing/appq/landing-1"));
+    assert_eq!(landing, w.trunk.join(".choros-config/queues/appq/landing/landing-1"));
     assert_eq!(git(&landing.join(REPO), &["branch", "--show-current"]), "appq/landing-1");
     assert!(landing.join(".choros-meta.toml").exists());
     let forks = w.agent.forks.lock().unwrap();

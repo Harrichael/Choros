@@ -370,7 +370,7 @@ pub fn resolve_target(cwd: &Path, name: Option<&str>) -> Result<(PathBuf, String
 }
 
 /// The workspace containing `cwd` and the trunk above it, however deep in
-/// branch-spaces, or under `<trunk>/landing/<queue>/landing-N`.
+/// branch-spaces, or a queue's landing folder in `<trunk>/.choros-config`.
 pub fn find_workspace(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
     let dir = cwd
         .ancestors()

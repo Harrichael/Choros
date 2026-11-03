@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use color_eyre::eyre::{eyre, Result};
 
-use crate::choros::{self, ChorosInfo, ARCHIVE_REL, CONFIG_DIR, META_FILE};
+use crate::choros::{self, ChorosInfo, ARCHIVE_REL, CONFIG_DIR, LANDING_DIR, META_FILE, QUEUES_REL};
 
 pub const BRANCH_CONFIG_DIR: &str = ".choros-branch-config";
 
@@ -29,10 +29,11 @@ pub fn find_trunk(cwd: &Path) -> Option<PathBuf> {
 /// The space `cwd` is in: the nearest trunk or branch-space at or above it.
 /// From inside a workspace, that is the space holding the workspace. Inside
 /// `.choros-config` (an archived branch-space, say) there is none: nothing
-/// may be made there.
+/// may be made there. A queue's landing folders, kept in its config, are
+/// the trunk's.
 pub fn find_space(cwd: &Path) -> Option<PathBuf> {
     if cwd.components().any(|c| c.as_os_str() == CONFIG_DIR) {
-        return None;
+        return find_trunk(cwd).filter(|t| cwd.starts_with(t.join(QUEUES_REL)));
     }
     cwd.ancestors()
         .find(|d| is_trunk(d) || is_branch_space(d))
@@ -121,7 +122,16 @@ pub fn create_branch(parent: &Path, name: &str) -> Result<PathBuf> {
 
 /// Where something at `dir` under the trunk goes when archived: the same
 /// path below `.choros-config/archive/`, so the archive mirrors the tree.
+/// A queue's landing folder goes where the queue archives its landings,
+/// `archive/landing/<queue>/`.
 pub fn archive_path(trunk: &Path, dir: &Path) -> Result<PathBuf> {
+    if let Ok(rest) = dir.strip_prefix(trunk.join(QUEUES_REL))
+        && let [queue, landing, name @ ..] = &rest.components().collect::<Vec<_>>()[..]
+        && landing.as_os_str() == LANDING_DIR
+    {
+        let archived = trunk.join(ARCHIVE_REL).join(LANDING_DIR).join(queue);
+        return Ok(name.iter().fold(archived, |p, c| p.join(c)));
+    }
     Ok(trunk.join(ARCHIVE_REL).join(rel(trunk, dir)?))
 }
 
@@ -302,5 +312,15 @@ mod tests {
 
         assert_eq!(find_space(&dst), None);
         assert_eq!(find_trunk(&dst), Some(t.to_path_buf()));
+    }
+
+    /// A landing archives beside its queue's other archived landings, not
+    /// under a mirror of `.choros-config`.
+    #[test]
+    fn a_landing_archives_with_its_queue() {
+        let t = Path::new("/t");
+        let landing = t.join(".choros-config/queues/q/landing/landing-3");
+        assert_eq!(archive_path(t, &landing).unwrap(), t.join(".choros-config/archive/landing/q/landing-3"));
+        assert_eq!(archive_path(t, &t.join("ws")).unwrap(), t.join(".choros-config/archive/ws"));
     }
 }

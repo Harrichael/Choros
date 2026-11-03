@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 use choros_core::choros::{ARCHIVE_REL, CONFIG_DIR, LANDING_DIR, QUEUES_REL};
-use choros_core::{git as core_git, registry};
+use choros_core::{agent, git as core_git, registry};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::git::Git;
@@ -159,16 +159,72 @@ impl Queue {
     pub fn lock(&self) -> Result<QueueLock> {
         let file = self.lock_file()?;
         file.lock()?;
+        self.adopt_old_layout()?;
         Ok(QueueLock(file))
     }
 
     pub fn try_lock(&self) -> Result<Option<QueueLock>> {
         let file = self.lock_file()?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(QueueLock(file))),
+            Ok(()) => {
+                self.adopt_old_layout()?;
+                Ok(Some(QueueLock(file)))
+            }
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(e)) => Err(e.into()),
         }
+    }
+
+    /// Landing folders and sync clones once lived in `<trunk>/landing/<queue>/`.
+    /// Move them into the queue's folder, Claude sessions and all, so
+    /// `claude --resume` still finds the landings' forked sessions.
+    fn adopt_old_layout(&self) -> Result<()> {
+        let old = self.trunk.join(LANDING_DIR).join(&self.name);
+        if !old.exists() {
+            return Ok(());
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let moved = |from: &Path, to: &Path| -> Result<()> {
+            // Sessions first: a retry finds the folder still to move, and
+            // its sessions with it.
+            if let Some(home) = &home {
+                agent::move_claude_sessions(home, from, to)?;
+            }
+            std::fs::create_dir_all(to.parent().unwrap())?;
+            std::fs::rename(from, to)?;
+            Ok(())
+        };
+        if old.join("_sync").exists() {
+            // A check running in the old worktree would lose its clone mid-run.
+            let mut checks = Vec::new();
+            for repo in std::fs::read_dir(old.join("_sync"))?.flatten() {
+                let lock = self.check_lock(&repo.file_name().to_string_lossy())?;
+                lock.lock()?;
+                checks.push(lock);
+            }
+            if old.join("_check").exists() {
+                std::fs::remove_dir_all(old.join("_check"))?;
+            }
+            moved(&old.join("_sync"), &self.dir().join("_sync"))?;
+        }
+        for entry in std::fs::read_dir(&old)?.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("landing-") {
+                moved(&entry.path(), &self.dir().join(LANDING_DIR).join(&name))?;
+            }
+        }
+        // Whatever else was left there (a .DS_Store, say) must not hold up the queue.
+        let _ = std::fs::remove_dir(&old);
+        let _ = std::fs::remove_dir(self.trunk.join(LANDING_DIR));
+        Ok(())
+    }
+
+    fn check_lock(&self, repo: &str) -> Result<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir().join(format!("check-{repo}.lock")))?)
     }
 
     fn lock_file(&self) -> Result<File> {
@@ -192,13 +248,9 @@ impl Queue {
     /// over between runs, and under a lock of its own rather than the
     /// queue's: a slow check holds up only other checks of the repo.
     pub fn check(&self, repo: &str, tip: &str, check: &str) -> Result<std::result::Result<(), String>> {
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.dir().join(format!("check-{repo}.lock")))?;
+        let lock = self.check_lock(repo)?;
         lock.lock()?;
-        let dir = self.trunk.join(LANDING_DIR).join(&self.name).join("_check").join(repo);
+        let dir = self.dir().join("_check").join(repo);
         let wt = Git::owned(&dir);
         // A sync clone made again, or a trunk moved, leaves the worktree
         // pointing nowhere; it holds only build output, so start over.
@@ -247,7 +299,7 @@ impl Queue {
     }
 
     pub fn landing_dir(&self, n: u32) -> PathBuf {
-        self.trunk.join(LANDING_DIR).join(&self.name).join(format!("landing-{n}"))
+        self.dir().join(LANDING_DIR).join(format!("landing-{n}"))
     }
 
     pub fn archived_landing_dir(&self, n: u32) -> PathBuf {
@@ -335,17 +387,15 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
     if dst.join("_queue").exists() || dst.join("_sync").exists() {
         return Err(eyre!("{} already holds an archived queue named {name}", dst.display()));
     }
-    let landing = trunk.join(LANDING_DIR).join(name);
     // Only build output, and a worktree of the sync clone that moving it
     // would orphan.
-    if landing.join("_check").exists() {
-        std::fs::remove_dir_all(landing.join("_check"))?;
+    if q.dir().join("_check").exists() {
+        std::fs::remove_dir_all(q.dir().join("_check"))?;
     }
-    if landing.join("_sync").exists() {
-        std::fs::rename(landing.join("_sync"), dst.join("_sync"))?;
+    if q.dir().join("_sync").exists() {
+        std::fs::rename(q.dir().join("_sync"), dst.join("_sync"))?;
     }
     std::fs::rename(q.dir(), dst.join("_queue"))?;
-    let _ = std::fs::remove_dir(&landing);
     Ok(true)
 }
 
@@ -374,5 +424,5 @@ pub fn push_workflows(trunk: &Path, repo: &str) -> bool {
 }
 
 pub fn sync_dir(trunk: &Path, queue: &str, repo: &str) -> PathBuf {
-    trunk.join(LANDING_DIR).join(queue).join("_sync").join(repo)
+    queues_dir(trunk).join(queue).join("_sync").join(repo)
 }

@@ -29,8 +29,8 @@ the workspace's next land settles its own record.
 | Dependency | Within a queue, in the same repo: A's commits sit on top of B's (B is part of A's base). In another repo, or in another queue: ordering only — A's PR does not open until B merges. |
 | Front | Every queued, unparked landing-set whose dependencies have all merged. Several at once is normal. |
 | Merge head | Per repo: `main` merged with every queued, unparked landing-set in that repo: what new work starts from. Branch `<queue>/merge-head` on that repo's origin. |
-| Landing | The folder `<trunk>/landing/<queue>/landing-N/`: a small choros workspace on the landing branch, with a fork of the Claude session(s) that did the work. |
-| Sync clone | `<trunk>/landing/<queue>/_sync/<repo>/`: a clone owned by Choros where every engine-side rebase, merge-head build and agent run happens. User workspaces are never rewritten by the daemon. |
+| Landing | The folder `<trunk>/.choros-config/queues/<queue>/landing/landing-N/`: a small choros workspace on the landing branch, with a fork of the Claude session(s) that did the work. |
+| Sync clone | `<trunk>/.choros-config/queues/<queue>/_sync/<repo>/`: a clone owned by Choros where every engine-side rebase, merge-head build and agent run happens. User workspaces are never rewritten by the daemon. |
 | Resync agent | A headless Claude Code session per queue and repo, run in the sync clone, that resolves conflicts when you ask it to. |
 
 ## Configuration and scope
@@ -153,7 +153,7 @@ check = "cargo check --workspace"
 ```
 
 The check runs with the queue let go, so a slow one holds up no one else's
-land. It runs in `landing/<queue>/_check/<repo>`, a worktree of the sync
+land. It runs in `queues/<queue>/_check/<repo>`, a worktree of the sync
 clone kept at one path so build output carries over, under a lock of its
 own. After it the land takes the queue again and rebuilds the tip; if the
 queue moved meanwhile, the new tip is checked in turn. Verdicts are kept by
@@ -455,7 +455,7 @@ cover all the sets bring, not just the resolution). A resolution that fails
 them stays parked.
 
 **The resync agent** runs from the daemon or from `choros queue resolve`, in
-`<trunk>/landing/<queue>/_sync/<repo>/`, on the queue's `agent.model`:
+`<trunk>/.choros-config/queues/<queue>/_sync/<repo>/`, on the queue's `agent.model`:
 
 ```
 claude -p --model <model> --resume <id> --permission-mode acceptEdits \
@@ -657,7 +657,7 @@ for every PR above it once Rebase stack moves them.
 
 ## Landings and sessions
 
-`<trunk>/landing/<queue>/landing-N/` is a choros workspace: a
+`<trunk>/.choros-config/queues/<queue>/landing/landing-N/` is a choros workspace: a
 `.choros-meta.toml` with `parent = "<source workspace>"` and
 `landing = { queue, n }`, a reference clone of the repo on `<queue>/landing-N`,
 the usual agent provisioning, and a `CLAUDE.md` saying the branch may be
@@ -925,3 +925,7 @@ Round 5 (stacked PRs, ergon_choros/6gfb):
 - [approvals] "I just had to force push to fix a base of a stack and then choros force pushed the rest of the stack but the problem is that kicks approval whereas if I use github ui ... to rebase the stack on top of the new base then it keeps approvals" → with no API for Rebase stack, a linked stacked PR whose set below moved waits for someone to press it.
 - Stacked PRs follow `pr.draft`; the cap counts per repo; `--json` gives stacked sets the state `stacked`; after a merge Choros leaves GitHub one pass to rebase the stack before re-syncing it itself.
 - [a long stack restacks slower than 10s] "10 seconds * 5 is 50 seconds, so should we consider adjusting our time tolerance?" → watch GitHub's progress with a time cap (5 minutes), and take GitHub's rewrite onto the right base even after Choros replayed (only once a set below has merged; a teammate's rewrite still parks).
+
+Round 6 (where landings live):
+- "Can we move landings to under the .choros config under queues such that each queue has its own landing/ folder" → landing folders in `queues/<queue>/landing/`, the sync clone and check worktree beside them in `queues/<queue>/`.
+- [existing queues] moved on the queue's next lock, with each landing's Claude sessions moved so they still resume.

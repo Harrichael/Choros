@@ -13,7 +13,7 @@ app now lands into appq
 $ echo a > a.txt && git add a.txt && git commit -qm "write a, with a subject far too long to fit"
 $ choros land continue
 app → appq/landing-1, at the front: https://github.test/pull/1
-    landing: $ROOT/trunk/landing/appq/landing-1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
 $ COLUMNS=50 choros queue appq --landing
 appq (app) @ $ROOT/trunk
 * landing-1  front   write a, with a su… (app)  #1

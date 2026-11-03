@@ -62,6 +62,6 @@ without one can't land short of `--force`:
 
 `choros status` shows each set; `! parked` means a conflict to resolve.
 To change an open set, such as for review fixes, work in its landing folder,
-`<trunk>/landing/<queue>/landing-N`: commit and `git push`, and the commits
+`<trunk>/.choros-config/queues/<queue>/landing/landing-N`: commit and `git push`, and the commits
 join the set (a rewrite doesn't). `choros landing open N` resumes the
 session forked there.

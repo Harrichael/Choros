@@ -37,8 +37,8 @@ repo settings: $ROOT/trunk/.choros-config/repos.toml
 $ echo a > a.txt && git add a.txt && git commit -qm "write a"
 $ choros land continue
 app → appq/landing-1, at the front: https://github.test/pull/1
-    landing: $ROOT/trunk/landing/appq/landing-1
-$ cd trunk/landing/appq/landing-1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
+$ cd trunk/.choros-config/queues/appq/landing/landing-1
 $ choros here
 here: landing folder of appq/landing-1, landed from $ROOT/trunk/one
 commits pushed to appq/landing-1 from here join the set; `choros land` refuses here
