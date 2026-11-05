@@ -550,10 +550,14 @@ worked out from the graph, never stored:
 - **stacked**: it has a PR and an unmerged dependency in its repo. Unlinked,
   it is re-synced like a private set: replayed onto its dependency's new
   tip and force-pushed with a lease. Linked, it is left for GitHub to move
-  (*When the set below moves*). A merge commit pushed
-  onto it parks it (`pushed-merge`), as on a private set; so the landing
-  folder's `CLAUDE.md` says `git pull --rebase`, and GitHub's "Update
-  branch" button on a stacked PR leads to a park;
+  (*When the set below moves*). A merge of the set below pushed onto it
+  (GitHub's "Update branch" button) is taken as Rebase stack would be: the
+  set's base becomes that set's tip. A set holding merges is replayed as
+  one commit of its whole change, so what a merge settled or added is
+  kept. Any other merge commit pushed onto it (main's, say) parks it
+  (`pushed-merge`), as on a private set, and status gives the push that
+  takes the merge back off; so the landing folder's `CLAUDE.md` says
+  `git pull --rebase`;
 - **public**: it has a PR and every dependency in its repo has merged (the
   bottom of a stack, or a plain front set). As before: main is merged in
   when needed, never rebased.
@@ -943,3 +947,4 @@ Round 6 (where landings live):
 Round 7 (a stacked PR showing main's diff):
 - "Uhh, whats up with pr 142? It says its a doc pr but there are 4k lines that arent about docs?" → a set stacks only on the set below's tip alone ("Option 1 for sure"); one that conflicts there stays private (chosen over the agent trying first).
 - [a pass hung on a dead fetch for 7 hours, two lands waiting on its lock] "Yes please fix choros to have a timeout" → network git and `gh` calls stop after 5 minutes, clones after 30.
+- [`queue resolve` couldn't free landing-26 and landing-27, parked on "Update branch" merges of the set below] "lets do 3" → a merge of the set below onto a stacked set is adopted; any other pushed merge stays parked, and status says how to push it back.

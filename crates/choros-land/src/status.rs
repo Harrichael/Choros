@@ -62,6 +62,9 @@ pub struct SetLine {
     pub labels: Vec<String>,
     pub deps: Vec<String>,
     pub park: Option<Park>,
+    /// Where Choros last had the branch: what a pushed merge goes back to.
+    #[serde(skip)]
+    pub tip: String,
     pub blocked: bool,
     pub conflicts_with: Vec<u32>,
     pub landing_dirty: bool,
@@ -200,6 +203,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
                 })
                 .collect(),
             park: set.park.clone(),
+            tip: set.tip.clone(),
             blocked: set.is_open() && set.park.is_none() && graph::blocked(&st, *n),
             conflicts_with: set.conflicts_with.clone(),
             landing_dirty,

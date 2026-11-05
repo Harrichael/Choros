@@ -108,6 +108,33 @@ impl Git {
         Ok(out.lines().map(str::to_string).collect())
     }
 
+    /// What a replay of `base..tip` cherry-picks: its commits, oldest first;
+    /// or, when merges are among them, one commit of the whole change, named
+    /// `message`. A merge can't be picked, and what it settled or added
+    /// would be lost if it were left out. The change is taken against
+    /// `base` with what the merges brought in (the set below, main) already
+    /// in it, so that is not replayed as the set's own.
+    pub fn replayable(&self, base: &str, tip: &str, message: &str) -> Result<Vec<String>> {
+        if !self.has_merges(base, tip)? {
+            return self.commits(base, tip);
+        }
+        let mut from = base.to_string();
+        let parents = self.run(&["rev-list", "--merges", "--reverse", "--format=%P", "--no-commit-header", &format!("{base}..{tip}")])?;
+        for brought in parents.lines().flat_map(|l| l.split_whitespace().skip(1)) {
+            if self.is_ancestor(brought, &from)? {
+                continue;
+            }
+            let out = self.output(&["merge-tree", "--write-tree", "--no-messages", &from, brought])?;
+            if !out.status.success() {
+                return Err(eyre!("{message}: can't tell its own work from what its merges brought in ({brought:.12})"));
+            }
+            let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            from = self.run(&["commit-tree", &tree, "-p", &from, "-p", brought, "-m", "what its merges brought in"])?;
+        }
+        let tree = format!("{tip}^{{tree}}");
+        Ok(vec![self.run(&["commit-tree", &tree, "-p", &from, "-m", message])?])
+    }
+
     pub fn has_merges(&self, base: &str, tip: &str) -> Result<bool> {
         let out = self.run(&["rev-list", "--merges", &format!("{base}..{tip}")])?;
         Ok(!out.is_empty())

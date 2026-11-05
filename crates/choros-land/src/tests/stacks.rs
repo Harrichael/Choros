@@ -32,6 +32,22 @@ impl World {
         git(&work, &["push", "--quiet", "origin", &branch]);
     }
 
+    /// `from` merged into a set's branch and pushed, as GitHub's "Update
+    /// branch" does, or by hand with `extra` written into the merge.
+    fn merge_into(&self, n: u32, from: &str, extra: &[(&str, &str)]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("w");
+        let branch = format!("{QUEUE}/landing-{n}");
+        git(tmp.path(), &["clone", "--quiet", "--branch", &branch, self.origin.to_str().unwrap(), "w"]);
+        git(&work, &["merge", "--quiet", "--no-commit", &format!("origin/{from}")]);
+        for (file, content) in extra {
+            std::fs::write(work.join(file), content).unwrap();
+            git(&work, &["add", file]);
+        }
+        git(&work, &["commit", "--quiet", "--no-edit"]);
+        git(&work, &["push", "--quiet", "origin", &branch]);
+    }
+
     fn origin_tip(&self, n: u32) -> String {
         git(&self.origin, &["rev-parse", &format!("{QUEUE}/landing-{n}")])
     }
@@ -211,6 +227,55 @@ fn a_fix_low_in_a_stack_waits_for_rebase_stack() {
     assert_eq!(w.own_commits(3), 1);
     assert!(st.sets.keys().all(|n| crate::graph::behind_in_stack(&st, *n).is_none()));
     assert!(w.pass().resynced.is_empty());
+}
+
+/// Someone merges the set below into a stacked PR whose set below moved,
+/// as "Update branch" does, adding a test in the merge besides. That is the
+/// set brought up to the set below, as Rebase stack would, so it is taken,
+/// not parked. When GitHub doesn't restack it after the front merges,
+/// Choros replays it as one commit, the test kept.
+#[test]
+fn update_branch_on_a_stacked_pr_is_taken() {
+    let w = World::new();
+    w.stack(5);
+    w.line(2);
+    w.push_fix(1, "fix.txt", "fixed\n");
+    w.pass();
+
+    w.merge_into(2, &format!("{QUEUE}/landing-1"), &[("t.txt", "test\n")]);
+    let report = w.pass();
+    assert_eq!(report.adopted, [2]);
+    assert!(report.parked.is_empty());
+    let st = w.state();
+    assert_eq!(st.sets[&2].tip, w.origin_tip(2));
+    assert_eq!(st.sets[&2].base.deps, [(1, st.sets[&1].tip.clone())]);
+    assert!(crate::graph::behind_in_stack(&st, 2).is_none());
+    assert!(w.pass().resynced.is_empty());
+
+    w.forge.merge(w.pr(1), MergeMethod::Squash);
+    w.pass();
+    w.age_merge(1, crate::engine::RESTACK_GRACE_SECS);
+    let report = w.pass();
+    assert_eq!(report.resynced, [2]);
+    let tip = w.state().sets[&2].tip.clone();
+    assert_eq!(w.file_at(&tip, "fix.txt").as_deref(), Some("fixed\n"));
+    assert_eq!(w.file_at(&tip, "t.txt").as_deref(), Some("test\n"));
+    assert_eq!(w.file_at(&tip, "f2.txt").as_deref(), Some("2\n"));
+    assert_eq!(w.own_commits(2), 1);
+}
+
+/// A merge of main, not of the set below, can't be taken that way: the set
+/// parks, as before, for someone to push its branch back.
+#[test]
+fn a_merge_of_main_into_a_stacked_pr_parks() {
+    let w = World::new();
+    w.stack(5);
+    w.line(2);
+    w.push_to_main("m.txt", "m\n");
+
+    w.merge_into(2, "main", &[]);
+    w.pass();
+    assert_eq!(w.state().sets[&2].park.as_ref().map(|p| p.op), Some(ParkOp::PushedMerge));
 }
 
 /// A review fix low in the stack clashes with the PR above it. Rebase stack

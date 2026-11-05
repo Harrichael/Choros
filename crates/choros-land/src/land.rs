@@ -407,7 +407,8 @@ fn return_onto(env: &Env, q: &Queue, repo: &str, mh: &str, returned: &[workspace
     let sync = work.git(repo);
     let mut commits = Vec::new();
     for r in returned {
-        commits.extend(sync.commits(&r.base, &r.tip)?);
+        let message = format!("The work of dropped {}", crate::state::branch(&r.queue, r.n));
+        commits.extend(sync.replayable(&r.base, &r.tip, &message)?);
     }
     let names: Vec<String> = returned.iter().map(|r| crate::state::branch(&r.queue, r.n)).collect();
     let what = format!("the commits of dropped {}", names.join(", "));

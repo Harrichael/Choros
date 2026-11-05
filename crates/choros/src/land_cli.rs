@@ -11,7 +11,7 @@ use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, P
 use choros_land::forge::Gh;
 use choros_land::land::{self, Deps, LandRequest};
 use choros_land::queue::{self, Queue};
-use choros_land::state::{Dep, LandMode, PrSpec, QueueConfig, Scope, parse_pr_list};
+use choros_land::state::{Dep, LandMode, ParkOp, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -390,7 +390,17 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         if !elsewhere.is_empty() {
             notes.push(format!("after {}", elsewhere.join(", ")));
         }
-        if let Some(p) = &s.park {
+        if let Some(p) = &s.park
+            && p.op == ParkOp::PushedMerge
+        {
+            notes.push(format!(
+                "! parked: a merge was pushed onto it that isn't of the set below as it is now; to go on, \
+                 push it back from its landing folder: git push --force-with-lease={b}:{on} origin {tip}:{b}",
+                b = s.branch,
+                on = p.on,
+                tip = s.tip,
+            ));
+        } else if let Some(p) = &s.park {
             notes.push(format!("! parked ({:?}) {}", p.op, p.files.join(", ")));
         } else if s.blocked {
             notes.push("waiting on a parked or closed set".into());

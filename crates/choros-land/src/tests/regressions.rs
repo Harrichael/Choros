@@ -488,3 +488,33 @@ fn main_merged_into_a_public_set_by_hand_clears_its_park() {
     assert!(st.sets[&1].park.is_none());
     assert!(!crate::graph::blocked(&st, 2));
 }
+
+/// A set with main merged into it, replayed (as a dropped set's work is):
+/// the one commit it becomes holds its own work, not main's. Taken as its
+/// own, main's change would come back after main reverted it.
+#[test]
+fn a_squashed_replay_leaves_out_what_merges_brought() {
+    let w = World::new();
+    let repo = w.trunk.join("squash");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    let commit = |file: &str, content: &str| {
+        std::fs::write(repo.join(file), content).unwrap();
+        git(&repo, &["add", file]);
+        git(&repo, &["commit", "--quiet", "-m", file]);
+    };
+    commit("README", "app\n");
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "--quiet", "-b", "set"]);
+    commit("own.txt", "own\n");
+    git(&repo, &["checkout", "--quiet", "main"]);
+    commit("m.txt", "main's\n");
+    git(&repo, &["checkout", "--quiet", "set"]);
+    git(&repo, &["merge", "--quiet", "--no-edit", "main"]);
+    let tip = git(&repo, &["rev-parse", "HEAD"]);
+
+    let picks = crate::git::Git::new(&repo).replayable(&base, &tip, "the set").unwrap();
+    assert_eq!(picks.len(), 1);
+    let changed = git(&repo, &["diff-tree", "--no-commit-id", "--name-only", "-r", &picks[0]]);
+    assert_eq!(changed, "own.txt");
+}

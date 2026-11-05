@@ -443,7 +443,8 @@ impl<'q, 'h> Work<'q, 'h> {
     pub fn resync(&mut self, n: u32, spec: BaseSpec) -> Result<bool> {
         let set = self.st.sets[&n].clone();
         let repo = set.repo();
-        let own = self.git(repo).commits(&set.base_sha, &set.tip)?;
+        let title = self.q.pr_title(&set).unwrap_or_else(|_| set.branch(&self.q.name));
+        let own = self.git(repo).replayable(&set.base_sha, &set.tip, &title)?;
         let main = spec.main.clone().ok_or_else(|| eyre!("base without main"))?;
         let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
         let what = set.branch(&self.q.name);
@@ -603,13 +604,40 @@ impl<'q, 'h> Work<'q, 'h> {
                 report.adopted.push(n);
                 continue;
             }
+            let merged = match &remote {
+                Some(r) if *r != seen && !public && git.is_ancestor(&self.st.sets[&n].tip, r)? => {
+                    git.has_merges(&self.st.sets[&n].tip, r)?
+                }
+                _ => false,
+            };
+            if merged
+                && let Some(r) = &remote
+                && let Some(base) = self.merged_from_below(n, r)?
+            {
+                let set = self.st.sets.get_mut(&n).unwrap();
+                set.base_sha = base.deps[0].1.clone();
+                set.base = base;
+                set.tip = r.clone();
+                set.remote = Some(r.clone());
+                // Merging the set below by hand is also how someone settles
+                // a conflict with it.
+                if set
+                    .park
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.op, ParkOp::PushedMerge | ParkOp::Resync | ParkOp::BaseMerge))
+                {
+                    set.park = None;
+                }
+                report.adopted.push(n);
+                continue;
+            }
             let set = self.st.sets.get_mut(&n).unwrap();
             match remote {
                 None => set.remote = None,
                 Some(r) if r == seen => {}
-                // A merge commit cannot be replayed with its set; public sets
-                // are never replayed, so only the others have to stop.
-                Some(r) if !public && git.is_ancestor(&set.tip, &r)? && git.has_merges(&set.tip, &r)? => {
+                // Any other merge cannot be replayed with its set; public
+                // sets are never replayed, so only the others have to stop.
+                Some(r) if merged => {
                     set.park = Some(Park {
                         op: ParkOp::PushedMerge,
                         files: Vec::new(),
@@ -643,6 +671,30 @@ impl<'q, 'h> Work<'q, 'h> {
             }
         }
         Ok(())
+    }
+
+    /// A merge of the set below pushed onto `n` (GitHub's "Update branch"
+    /// does it) is the set brought up to that set's tip, as Rebase stack
+    /// would: the base to record, when `r` brings in nothing but that tip
+    /// and merges. A later replay squashes it, so what the merges settled
+    /// or added is kept.
+    fn merged_from_below(&self, n: u32, r: &str) -> Result<Option<BaseSpec>> {
+        let set = &self.st.sets[&n];
+        let [p] = graph::sits_on(&self.st, n)[..] else { return Ok(None) };
+        let under = &self.st.sets[&p].tip;
+        let git = self.set_git(n);
+        let on_main = set.base.main.as_deref().map_or(Ok(true), |m| git.is_ancestor(m, under))?;
+        if !graph::stacked(&self.st, n) || !on_main || !git.is_ancestor(under, r)? {
+            return Ok(None);
+        }
+        let brought = git.run(&["rev-list", "--no-merges", r, &format!("^{}", set.tip), &format!("^{under}")])?;
+        if !brought.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(BaseSpec {
+            main: set.base.main.clone(),
+            deps: vec![(p, under.clone())],
+        }))
     }
 
     /// When a set merges, GitHub rebases the linked branches above it onto
