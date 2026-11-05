@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use choros_core::process::{self, output_limited};
 use color_eyre::eyre::{Result, eyre};
 
 pub struct Git {
@@ -56,6 +57,19 @@ impl Git {
 
     pub fn run(&self, args: &[&str]) -> Result<String> {
         let out = self.output(args)?;
+        self.finish(args, out)
+    }
+
+    /// `run` for a command that talks to a remote: one that hangs on a dead
+    /// connection would hold the queue's lock for good, so it is stopped.
+    pub fn remote(&self, args: &[&str]) -> Result<String> {
+        let mut cmd = self.command();
+        cmd.args(args);
+        let out = output_limited(cmd, process::NETWORK)?;
+        self.finish(args, out)
+    }
+
+    fn finish(&self, args: &[&str], out: Output) -> Result<String> {
         if !out.status.success() {
             return Err(eyre!(
                 "git {} failed in {}:\n{}",
@@ -115,7 +129,7 @@ impl Git {
     pub fn fetch(&self, remote: &str, refspecs: &[&str]) -> Result<()> {
         let mut args = vec!["fetch", "--quiet", "--prune", remote];
         args.extend_from_slice(refspecs);
-        self.run(&args)?;
+        self.remote(&args)?;
         Ok(())
     }
 
@@ -125,17 +139,17 @@ impl Git {
     /// fetch just saw, guarding nothing.
     pub fn push_lease(&self, remote: &str, sha: &str, branch: &str, expect: Option<&str>) -> Result<()> {
         let lease = format!("--force-with-lease=refs/heads/{branch}:{}", expect.unwrap_or(""));
-        self.run(&["push", "--quiet", &lease, remote, &format!("{sha}:refs/heads/{branch}")])?;
+        self.remote(&["push", "--quiet", &lease, remote, &format!("{sha}:refs/heads/{branch}")])?;
         Ok(())
     }
 
     pub fn push_force(&self, remote: &str, sha: &str, branch: &str) -> Result<()> {
-        self.run(&["push", "--quiet", "--force", remote, &format!("{sha}:refs/heads/{branch}")])?;
+        self.remote(&["push", "--quiet", "--force", remote, &format!("{sha}:refs/heads/{branch}")])?;
         Ok(())
     }
 
     pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["push", "--quiet", remote, &format!(":refs/heads/{branch}")])?;
+        self.remote(&["push", "--quiet", remote, &format!(":refs/heads/{branch}")])?;
         Ok(())
     }
 

@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use choros_core::process::output_within;
 use color_eyre::eyre::{Result, eyre};
 
 pub struct ConflictBrief<'a> {
@@ -130,42 +131,6 @@ impl Agent for Claude {
     }
 }
 
-/// `cmd`'s output, or `None` when it ran past `limit` and was killed.
-pub fn output_within(mut cmd: Command, limit: std::time::Duration) -> Result<Option<std::process::Output>> {
-    use std::io::Read;
-    use std::process::Stdio;
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    // Drained as it runs, so a chatty child never blocks on a full pipe.
-    let drain = |r: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut r) = r {
-                let _ = r.read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
-    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
-    let deadline = std::time::Instant::now() + limit;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    };
-    Ok(Some(std::process::Output {
-        status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
-    }))
-}
-
 pub fn conflict_prompt(brief: &ConflictBrief) -> String {
     let mut p = format!(
         "You are the resync agent for a Choros landing queue, working in {}.\n\
@@ -247,19 +212,6 @@ fn push_context(p: &mut String, brief: &ConflictBrief) {
 mod tests {
     use super::*;
     use std::time::Duration;
-
-    /// A run past its limit is stopped; one within it is read whole.
-    #[test]
-    fn a_run_past_its_limit_is_stopped() {
-        let mut slow = Command::new("sh");
-        slow.args(["-c", "sleep 5"]);
-        assert!(output_within(slow, Duration::from_millis(200)).unwrap().is_none());
-
-        let mut quick = Command::new("sh");
-        quick.args(["-c", "echo done"]);
-        let out = output_within(quick, Duration::from_secs(5)).unwrap().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
-    }
 
     /// `claude -p --resume` can fail on a session it made (a Claude Code
     /// fault, seen in the wild). The agent then starts a fresh session and

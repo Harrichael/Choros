@@ -112,7 +112,7 @@ impl Queue {
         let reg = registry::ensure_repo_exists(&self.trunk, repo)?;
         // A branch named exactly like the queue would make `<queue>/landing-N`
         // impossible to create on origin (a ref cannot also be a directory).
-        let clash = Git::new(&reg).run(&["ls-remote", "origin", &format!("refs/heads/{}", self.name)])?;
+        let clash = Git::new(&reg).remote(&["ls-remote", "origin", &format!("refs/heads/{}", self.name)])?;
         if !clash.is_empty() {
             return Err(eyre!(
                 "{repo}'s origin has a branch named {0}, so it can't land into queue {0}",
@@ -402,7 +402,7 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
 /// The branch `repo`'s origin points HEAD at: where its work lands.
 pub fn default_branch(trunk: &Path, repo: &str) -> Result<String> {
     let reg = registry::ensure_repo_exists(trunk, repo)?;
-    let out = Git::new(&reg).run(&["ls-remote", "--symref", "origin", "HEAD"])?;
+    let out = Git::new(&reg).remote(&["ls-remote", "--symref", "origin", "HEAD"])?;
     out.lines()
         .find_map(|l| l.strip_prefix("ref: refs/heads/")?.split_whitespace().next())
         .map(str::to_string)

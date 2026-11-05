@@ -1,10 +1,28 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::time::Duration;
 
 use color_eyre::eyre::{eyre, Result};
 
+use crate::process::{self, output_limited};
+
+/// A first clone of a big repo can take a while even on a good connection.
+const CLONE: Duration = Duration::from_secs(30 * 60);
+
 fn run(cmd: &mut Command) -> Result<String> {
     let output = cmd.output()?;
+    finish(cmd, output)
+}
+
+/// Run `cmd`, which talks to a remote, failing once it passes `limit`.
+fn remote(cmd: Command, limit: Duration) -> Result<String> {
+    let mut shown = Command::new(cmd.get_program());
+    shown.args(cmd.get_args());
+    let output = output_limited(cmd, limit)?;
+    finish(&shown, output)
+}
+
+fn finish(cmd: &Command, output: Output) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!(
@@ -27,35 +45,33 @@ pub fn remote_get_url(repo: &Path, remote: &str) -> Result<String> {
         .args(["remote", "get-url", remote]))
 }
 
-pub fn fetch(repo: &Path, remote: &str) -> Result<()> {
-    run(Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["fetch", "--quiet", remote]))?;
+pub fn fetch(repo: &Path, from: &str) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(["fetch", "--quiet", from]);
+    remote(cmd, process::NETWORK)?;
     Ok(())
 }
 
 pub fn clone(url: &str, dest: &Path) -> Result<()> {
     // `--` stops git from treating a url starting with `-` as an option
     // (CVE-2017-1000117-shaped risk, since url comes from user input).
-    run(Command::new("git").args([
-        "clone",
-        "--",
-        url,
-        dest.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
-    ]))?;
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "--", url, dest.to_str().ok_or_else(|| eyre!("non-utf8 path"))?]);
+    remote(cmd, CLONE)?;
     Ok(())
 }
 
 pub fn clone_with_reference(reference: &Path, url: &str, dest: &Path) -> Result<()> {
-    run(Command::new("git").args([
+    let mut cmd = Command::new("git");
+    cmd.args([
         "clone",
         "--reference-if-able",
         reference.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
         "--",
         url,
         dest.to_str().ok_or_else(|| eyre!("non-utf8 path"))?,
-    ]))?;
+    ]);
+    remote(cmd, CLONE)?;
     Ok(())
 }
 

@@ -1313,12 +1313,12 @@ fn land_instant(env: &Env, trunk: &Path, ws: &Path, repo: &str, req: &LandReques
     let head = git.head()?;
     match crate::instant::via(trunk, ws)? {
         crate::instant::Via::Push => {
-            git.run(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{main}")])?;
+            git.remote(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{main}")])?;
         }
         crate::instant::Via::Pr => {
             let ws_name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("choros");
             let branch = format!("{ws_name}/instant-{}", &head[..12]);
-            git.run(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")])?;
+            git.remote(&["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")])?;
             let title = match &req.title {
                 Some(t) => t.clone(),
                 None => git.subject(&head)?,

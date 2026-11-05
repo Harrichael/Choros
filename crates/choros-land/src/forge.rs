@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use choros_core::process::{self, output_limited};
 use color_eyre::eyre::{Result, eyre};
 use serde_json::Value;
 
@@ -103,7 +104,7 @@ impl Gh {
         if let Some(dir) = &self.config_dir {
             cmd.env("GH_CONFIG_DIR", dir);
         }
-        let out = cmd.output()?;
+        let out = output_limited(cmd, process::NETWORK)?;
         if !out.status.success() {
             return Err(eyre!(
                 "gh {} failed:\n{}",
@@ -123,7 +124,7 @@ impl Gh {
         if let Some(dir) = &self.config_dir {
             cmd.env("GH_CONFIG_DIR", dir);
         }
-        let out = cmd.output()?;
+        let out = output_limited(cmd, process::NETWORK)?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
             return Err(eyre!("gh stack {} failed:\n{}", args.join(" "), text.trim()));

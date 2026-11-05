@@ -334,7 +334,10 @@ minutes, or when `choros queue sync` pokes it (with no daemon running,
 **try-locks** (skips a queue whose lock is held) and runs one
 **level-triggered** pass: it computes what every set should look like from the
 graph, origin and GitHub, and fixes any difference. A crash mid-pass heals on
-the next pass.
+the next pass. Every fetch, push, `ls-remote` and `gh` call is stopped after
+5 minutes (a clone after 30) and fails as any error would (a fetch ends the
+pass; a push fails only its set): a connection that dies mid-call would
+otherwise hang the pass, and every land behind its lock, for hours.
 
 0. **Recover.** If the sync clone has a rebase, cherry-pick or merge in
    progress, abort it and `reset --hard`. Complete or roll back the journalled
@@ -939,3 +942,4 @@ Round 6 (where landings live):
 
 Round 7 (a stacked PR showing main's diff):
 - "Uhh, whats up with pr 142? It says its a doc pr but there are 4k lines that arent about docs?" → a set stacks only on the set below's tip alone ("Option 1 for sure"); one that conflicts there stays private (chosen over the agent trying first).
+- [a pass hung on a dead fetch for 7 hours, two lands waiting on its lock] "Yes please fix choros to have a timeout" → network git and `gh` calls stop after 5 minutes, clones after 30.
