@@ -63,12 +63,13 @@ merge_head = true                   # force-push <queue>/merge-head; false keeps
 private_sets = true                 # push queued (not yet front) landing branches
 [pr]
 draft = true                        # open front PRs as drafts
-[agent]
+[agent.resolver]                    # the resync agent; each agent has its own table
 rotate_after = 10                   # resync-agent runs before its session is rotated
 model = "opus"                      # always passed to claude, never its default
 auto_resolve = true                 # the daemon hands conflicts to the agent (see Conflicts)
 timeout_minutes = 20                # a run past this is stopped
 daily_runs = 20                     # the daemon's agent runs per day (UTC)
+user_claude_md = true               # false: the agent skips your ~/.claude CLAUDE.md and settings.json
 [stack]
 enabled = false                     # open PRs behind the front as GitHub stacked PRs (see Stacked PRs)
 max_open = 5                        # stacking stops once a repo has this many open PRs in the queue

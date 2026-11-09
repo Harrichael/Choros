@@ -83,7 +83,7 @@ fn pass(trunk: &Path, name: &str) -> Result<()> {
         home: None,
     };
     let mut auto = AutoResolve::new(trunk.to_path_buf(), name.to_string());
-    let handler: Option<&mut dyn ConflictHandler> = q.config.agent.auto_resolve.then_some(&mut auto as _);
+    let handler: Option<&mut dyn ConflictHandler> = q.config.agent.resolver.auto_resolve.then_some(&mut auto as _);
     // Someone is landing or resolving; they will finish the job, and the
     // next tick will see their result.
     let Some(mut work) = Work::begin(&q, env.agent, handler, false)? else {

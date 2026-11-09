@@ -627,13 +627,13 @@ fn new_interactive(env: &Env, trunk: &Path, args: &[&str]) -> Result<()> {
             |a| a.parse().map_err(|_| eyre!("answer a number")),
         )?;
     }
-    config.agent.rotate_after = question(
+    config.agent.resolver.rotate_after = question(
         "resync-agent runs before it starts a fresh session",
-        Some(&config.agent.rotate_after.to_string()),
+        Some(&config.agent.resolver.rotate_after.to_string()),
         |a| a.parse().map_err(|_| eyre!("answer a number")),
     )?;
-    config.agent.model = question("the resync agent's model", Some(&config.agent.model), |a| Ok(a.to_string()))?;
-    config.agent.auto_resolve = yes_no("let the daemon resolve conflicts with the agent", config.agent.auto_resolve)?;
+    config.agent.resolver.model = question("the resync agent's model", Some(&config.agent.resolver.model), |a| Ok(a.to_string()))?;
+    config.agent.resolver.auto_resolve = yes_no("let the daemon resolve conflicts with the agent", config.agent.resolver.auto_resolve)?;
     let prs = question("PRs to build on until they merge, as repo#N (app#40,41 for two)", Some("none"), |a| {
         let a = if a == "none" { "" } else { a };
         Ok(parse_pr_list(a, None)?.iter().map(PrSpec::to_string).collect::<Vec<_>>())
@@ -928,7 +928,7 @@ impl ConflictHandler for Interactive {
 /// Open Claude Code on the resync agent's session in the sync clone, with the
 /// conflict in progress, and let the user drive.
 fn drive(brief: &ConflictBrief) -> Result<AgentSlot> {
-    let mut cmd = agent::claude_on(Path::new("claude"), brief.dir, brief.session);
+    let mut cmd = agent::claude_on(Path::new("claude"), brief, brief.session);
     cmd.args(["--model", brief.model]).args(agent::TOOL_ARGS);
     cmd.arg(agent::driven_conflict_prompt(brief));
     cmd.status()?;

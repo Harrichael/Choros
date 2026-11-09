@@ -98,7 +98,7 @@ impl AutoResolve {
                 .push(format!("left {what} parked: the agent already had its try at it"));
             return Ok(Handled::Declined);
         }
-        if ledger.runs >= q.config.agent.daily_runs {
+        if ledger.runs >= q.config.agent.resolver.daily_runs {
             if !ledger.spent_noted {
                 self.notes.push(format!(
                     "left {what} parked until tomorrow (UTC): the agent already ran {} times today",

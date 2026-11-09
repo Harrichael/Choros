@@ -20,6 +20,8 @@ pub struct ConflictBrief<'a> {
     pub model: &'a str,
     /// Past this the run is stopped and counts as failed.
     pub timeout: std::time::Duration,
+    /// Read your user-level Claude settings too (`agent.resolver.user_claude_md`).
+    pub user_claude_md: bool,
 }
 
 /// The session to use, and whether it has to be created.
@@ -57,18 +59,23 @@ pub const TOOL_ARGS: [&str; 4] = [
     "acceptEdits",
     "--allowedTools=Read,Edit,Write,Grep,Glob,\
 Bash(git status*),Bash(git diff*),Bash(git add*),Bash(git log*),Bash(git show*),\
+Bash(git rev-parse*),Bash(git ls-files*),Bash(git blame*),\
 Bash(git checkout --ours*),Bash(git checkout --theirs*)",
     "--disallowedTools=Bash(git push*),Bash(git commit*),Bash(git reset*),Bash(git rebase*),Bash(git merge*),Bash(git cherry-pick*)",
 ];
 
-/// `claude` (as `bin`) in `dir` on `session`: created, or resumed.
-pub fn claude_on(bin: &Path, dir: &Path, session: &AgentSlot) -> Command {
+/// `claude` (as `bin`) in the brief's folder on `session`: created, or
+/// resumed.
+pub fn claude_on(bin: &Path, brief: &ConflictBrief, session: &AgentSlot) -> Command {
     let mut cmd = Command::new(bin);
-    cmd.current_dir(dir);
+    cmd.current_dir(brief.dir);
     if session.fresh {
         cmd.args(["--session-id", &session.id]);
     } else {
         cmd.args(["--resume", &session.id]);
+    }
+    if !brief.user_claude_md {
+        cmd.arg("--setting-sources=project,local");
     }
     cmd
 }
@@ -83,7 +90,7 @@ fn fresh_instead(session: &AgentSlot) -> Option<AgentSlot> {
 
 impl Claude {
     fn run(&self, brief: &ConflictBrief, session: &AgentSlot) -> Result<std::process::Output> {
-        let mut cmd = claude_on(&self.bin, brief.dir, session);
+        let mut cmd = claude_on(&self.bin, brief, session);
         cmd.args(["-p", "--output-format", "json", "--model", brief.model]);
         cmd.args(TOOL_ARGS);
         cmd.arg(conflict_prompt(brief));
@@ -131,6 +138,15 @@ impl Agent for Claude {
     }
 }
 
+/// The allow rules match a command by its start, so a `cd`, `git -C` or a
+/// chain is refused even where each part alone would pass.
+const GIT_USE: &str = "You may and should use git: `git add` is how you hand back each \
+resolved file. Run each git command on its own, from this folder: no `cd`, no `git -C`, no \
+`&&`, `;` or pipes, or it is refused. Look with `git status`, `git diff`, `git log` and \
+`git show` (`git show :1:FILE`, `:2:FILE`, `:3:FILE` for the base and each side); settle a \
+file with your edit tools, or with `git checkout --ours FILE` / `--theirs FILE` once \
+`:2:`/`:3:` show you which side is which; then `git add FILE`.";
+
 pub fn conflict_prompt(brief: &ConflictBrief) -> String {
     let mut p = format!(
         "You are the resync agent for a Choros landing queue, working in {}.\n\
@@ -139,7 +155,7 @@ pub fn conflict_prompt(brief: &ConflictBrief) -> String {
          Resolve every conflict so both sides' intent survives, then `git add` each file. \
          Do not commit, continue, abort, reset or push: Choros checks your result and \
          finishes the operation itself. If the right resolution is genuinely unclear, \
-         say so plainly in your final message instead of guessing.\n\
+         say so plainly in your final message instead of guessing.\n\n{GIT_USE}\n\
          CLAUDE.md here holds notes from earlier resync sessions on this queue (it is \
          not part of the repo); add to it anything the next session should know.\n",
         brief.dir.display(),
@@ -156,7 +172,7 @@ pub fn driven_conflict_prompt(brief: &ConflictBrief) -> String {
         "A conflict is in progress here while {}.\n\
          Conflicted files: {}.\n\n\
          Help me resolve it so both sides' intent survives, then `git add` each file. \
-         Do not commit, continue, abort, reset or push: Choros finishes the operation.\n",
+         Do not commit, continue, abort, reset or push: Choros finishes the operation.\n\n{GIT_USE}\n",
         brief.operation,
         files(brief),
     );
@@ -240,6 +256,7 @@ mod tests {
             session,
             model: "opus",
             timeout: Duration::from_secs(10),
+            user_claude_md: true,
         };
 
         let old = AgentSlot { id: "old".into(), fresh: false };
@@ -249,5 +266,34 @@ mod tests {
 
         let broken = AgentSlot { id: "broken".into(), fresh: true };
         assert!(claude.resolve(&brief(&broken)).is_err());
+    }
+
+    /// With `agent.user_claude_md = false` the agent runs without your own
+    /// CLAUDE.md, whose rules are for your sessions, not its job; and its
+    /// prompt says to use git.
+    #[test]
+    fn the_agent_can_be_kept_from_your_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        let args = dir.path().join("args");
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", args.display())).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let session = AgentSlot { id: "s".into(), fresh: true };
+        let brief = ConflictBrief {
+            dir: dir.path(),
+            operation: "replaying landing-2 onto landing-1",
+            files: &[],
+            recorded: &[],
+            sides: &[],
+            session: &session,
+            model: "opus",
+            timeout: Duration::from_secs(10),
+            user_claude_md: false,
+        };
+
+        Claude { bin }.resolve(&brief).unwrap();
+        let args = std::fs::read_to_string(&args).unwrap();
+        assert!(args.lines().any(|a| a == "--setting-sources=project,local"), "{args}");
+        assert!(args.contains("You may and should use git"), "{args}");
     }
 }

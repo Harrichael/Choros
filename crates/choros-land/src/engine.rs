@@ -68,7 +68,7 @@ pub struct Conflict<'a> {
     pub sides: Vec<crate::context::Side>,
     pub slot: &'a AgentSlot,
     pub agent: &'a dyn Agent,
-    pub settings: &'a crate::state::AgentConfig,
+    pub settings: &'a crate::state::ResolverConfig,
 }
 
 impl Conflict<'_> {
@@ -82,6 +82,7 @@ impl Conflict<'_> {
             session: self.slot,
             model: &self.settings.model,
             timeout: std::time::Duration::from_secs(u64::from(self.settings.timeout_minutes) * 60),
+            user_claude_md: self.settings.user_claude_md,
         }
     }
 }
@@ -274,7 +275,7 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(Some(files));
         };
         let rs = self.st.repos.get(repo).ok_or_else(|| eyre!("queue {} has nothing in {repo}", self.q.name))?;
-        let slot = agent_slot(rs, self.q.config.agent.rotate_after);
+        let slot = agent_slot(rs, self.q.config.agent.resolver.rotate_after);
         let recorded = recorded_for(&git, rs, &files);
         let sides = crate::context::sides(self.q, &self.st, repo, &files);
         let handled = handler.resolve(&Conflict {
@@ -287,7 +288,7 @@ impl<'q, 'h> Work<'q, 'h> {
             sides,
             slot: &slot,
             agent: self.agent,
-            settings: &self.q.config.agent,
+            settings: &self.q.config.agent.resolver,
         })?;
         if let Handled::Resolved { session } = &handled {
             if let Some(session) = session {

@@ -24,7 +24,7 @@ pub struct QueueConfig {
     #[serde(default)]
     pub pr: PrConfig,
     #[serde(default)]
-    pub agent: AgentConfig,
+    pub agent: Agents,
     #[serde(default)]
     pub stack: StackConfig,
     /// PRs the queue builds on before they reach main, as `repo#N`. Empty:
@@ -194,8 +194,37 @@ impl Default for StackConfig {
     }
 }
 
+/// Each agent Choros runs has a table of its own under `[agent]`:
+/// `[agent.resolver]` for the one that settles conflicts.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Agents {
+    pub resolver: ResolverConfig,
+}
+
+/// A flat `[agent]` is the resolver's own, as older queues wrote it. Keys
+/// both there and in `[agent.resolver]` are refused, not one side silently
+/// winning.
+impl<'de> Deserialize<'de> for Agents {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut table = toml::Table::deserialize(d)?;
+        let resolver = match table.remove("resolver") {
+            None => toml::Value::Table(table),
+            Some(resolver) => {
+                if let Some((key, _)) = table.iter().find(|(_, v)| !v.is_table()) {
+                    return Err(D::Error::custom(format!("`agent.{key}` belongs under [agent.resolver]")));
+                }
+                resolver
+            }
+        };
+        let resolver = resolver.try_into().map_err(|e| D::Error::custom(format!("[agent.resolver]: {e}")))?;
+        Ok(Agents { resolver })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
+pub struct ResolverConfig {
+    #[serde(default = "default_rotate_after")]
     pub rotate_after: u32,
     /// Always passed to `claude`, so the resync agent never runs on
     /// whatever model `claude` happens to default to.
@@ -211,18 +240,29 @@ pub struct AgentConfig {
     /// How many runs the daemon may start in a day (UTC).
     #[serde(default = "default_daily_runs")]
     pub daily_runs: u32,
+    /// Whether the resync agent reads your user-level Claude settings,
+    /// `~/.claude/CLAUDE.md` and `settings.json` both: rules for your
+    /// sessions (say, no git without asking) can keep it from staging its
+    /// fix. The repo's CLAUDE.md and settings are read either way.
+    #[serde(default = "yes")]
+    pub user_claude_md: bool,
 }
 
-impl Default for AgentConfig {
+impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
-            rotate_after: 10,
+            rotate_after: default_rotate_after(),
             model: default_model(),
             auto_resolve: true,
             timeout_minutes: default_timeout(),
             daily_runs: default_daily_runs(),
+            user_claude_md: true,
         }
     }
+}
+
+fn default_rotate_after() -> u32 {
+    10
 }
 
 fn default_model() -> String {
@@ -612,5 +652,30 @@ mod tests {
             .collect();
         assert_eq!(prs, ["app#40", "app#41", "lib#7", "lib#8"]);
         assert!(parse_pr_list("41", None).is_err(), "no repo to carry");
+    }
+
+    /// The resolver's settings live in `[agent.resolver]`; a queue written
+    /// when they sat in `[agent]` itself still reads, and is written back
+    /// the new way.
+    #[test]
+    fn the_resolvers_settings_read_from_either_table() {
+        let new: QueueConfig =
+            toml::from_str("[scope]\nbranch = \"x\"\n[agent.resolver]\nrotate_after = 3\nuser_claude_md = false\n").unwrap();
+        assert_eq!(new.agent.resolver.rotate_after, 3);
+        assert!(!new.agent.resolver.user_claude_md);
+
+        let old: QueueConfig = toml::from_str("[scope]\nbranch = \"x\"\n[agent]\nrotate_after = 4\n").unwrap();
+        assert_eq!(old.agent.resolver.rotate_after, 4);
+        assert!(old.agent.resolver.user_claude_md);
+        assert!(toml::to_string_pretty(&old).unwrap().contains("[agent.resolver]"));
+
+        let only_new: QueueConfig =
+            toml::from_str("[scope]\nbranch = \"x\"\n[agent.resolver]\nuser_claude_md = false\n").unwrap();
+        assert_eq!(only_new.agent.resolver.rotate_after, 10);
+        assert!(!only_new.agent.resolver.user_claude_md);
+
+        let both = "[scope]\nbranch = \"x\"\n[agent]\nrotate_after = 4\n[agent.resolver]\nuser_claude_md = false\n";
+        let err = toml::from_str::<QueueConfig>(both).unwrap_err().to_string();
+        assert!(err.contains("`agent.rotate_after` belongs under [agent.resolver]"), "{err}");
     }
 }
