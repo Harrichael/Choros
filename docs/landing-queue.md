@@ -49,7 +49,7 @@ folder has been archived and no set is open (to
 ```
 <trunk>/.choros-config/queues/<queue>/
     queue.toml      # settings (hand-editable)
-    state.json      # graph + bookkeeping (engine-owned; written via temp file + rename)
+    queue.db        # graph + bookkeeping (engine-owned SQLite; a queue that kept these in state.json is moved over the next time it is locked)
     lock            # flock target
 ```
 
@@ -317,12 +317,12 @@ Rebuilt from scratch on every land, re-sync and graph edit, in the sync clone:
 4. Force-push `<queue>/merge-head` if `push.merge_head`.
 
 Merge commits made here belong to the merge head only. Their SHAs are kept in
-`state.json` as *recorded resolutions*.
+`queue.db` as *recorded resolutions*.
 
 A workspace needs a sync (`⇣sync` in the prompt) when the merge head's
 *content* moved past its `base` — compared as (main SHA, set of `(set, tip)`
 pairs it contains), not by merge-head SHA, which changes on every rebuild.
-`state.json` stores the current composition; the workspace meta stores the one
+`queue.db` stores the current composition; the workspace meta stores the one
 its `base` had.
 
 ## The daemon
@@ -342,7 +342,7 @@ otherwise hang the pass, and every land behind its lock, for hours.
 
 0. **Recover.** If the sync clone has a rebase, cherry-pick or merge in
    progress, abort it and `reset --hard`. Complete or roll back the journalled
-   operation in `state.json`.
+   operation in `queue.db`.
 1. **Observe.** Fetch. For each open PR: merged → mark merged, keep its final
    tip; closed unmerged → park the set *and its whole subtree* (out of the
    merge head) awaiting a decision; reopened → unpark.
@@ -380,11 +380,11 @@ otherwise hang the pass, and every land behind its lock, for hours.
 Any conflict parks **only the affected set and its subtree**; the rest of the
 queue keeps moving, and new lands are accepted (a land that would depend on a
 parked set excludes it, like the merge head does). Operations are journalled in
-`state.json` before pushing and committed after. Locks are held only for short
+`queue.db` before pushing and committed after. Locks are held only for short
 steps, never while waiting on a person.
 
 **Source of truth:** GitHub/origin for PR state and public branch tips;
-`state.json` for the graph, bases and the expected tips of private branches. A
+`queue.db` for the graph, bases and the expected tips of private branches. A
 failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
@@ -468,7 +468,7 @@ claude -p --model <model> --resume <id> --permission-mode acceptEdits \
 ```
 
 Choros mints the session id with `--session-id` on first use, records it in
-`state.json`, and resumes it on later runs. A resume that fails (Claude Code
+`queue.db`, and resumes it on later runs. A resume that fails (Claude Code
 has refused to resume a session it made) is retried at once in a fresh
 session, which is recorded in its place. After `agent.rotate_after` runs it
 starts a new session, seeded with a handoff summary; the queue's long-term
@@ -763,7 +763,7 @@ any work done since, as unlanded. The set's tip stays in the sync clone under
 
 Landing again from a workspace always makes a new set. Changes to a set still
 in the queue go through its landing folder, and the land says so when the
-workspace has one open. `choros queue doctor` reconciles `state.json` with origin and GitHub.
+workspace has one open. `choros queue doctor` reconciles `queue.db` with origin and GitHub.
 
 ## Code layout
 
@@ -815,7 +815,7 @@ Where the build departs from the plan above, and why:
 - **The resync agent keeps its notes in the sync clone's `CLAUDE.md`**,
   listed in `.git/info/exclude` so it can never be staged into a resolution
   (and skipped when the repo tracks its own). Rotation starts a fresh session
-  that reads those notes; old session ids stay in `state.json`.
+  that reads those notes; old session ids stay in `queue.db`.
 - **Bases always include main.** A set's `BaseSpec` records the main commit it
   was built on and keeps it until a dependency merges past it, so the merge
   head and every set's base are built by the same function (start at main,
@@ -844,15 +844,12 @@ Where the build departs from the plan above, and why:
   than a second one attempted, so a pass that died after opening one heals.
 - **The engine does not read the environment**: the CLI passes
   `CLAUDE_CODE_SESSION_ID` in as `LandRequest::env_session`.
-- **State stays in JSON for now.** SQLite would not remove the queue lock,
-  which guards the sync clone's one git worktree; and the crash windows that
-  matter (GitHub against local state, the workspace file against the queue
-  file) span stores no database can make atomic, so write-then-reconcile and
-  idempotent lookups stay either way. Its real wins are an event history and
-  queries across queues; switch when a caller wants those (a timeline,
-  stats). Until then an append-only `events.jsonl` would give the history.
-  The state already loads and saves behind one module, so the swap is
-  surface, not shape.
+- **State is one SQLite file per queue**, read and written whole by the
+  engine at each step. It does not replace the queue lock, which guards the
+  sync clone's one git worktree; and the crash windows that matter (GitHub
+  against local state, the workspace file against the queue file) span
+  stores no database can make atomic, so write-then-reconcile and idempotent
+  lookups stay.
 - **Driving a conflict yourself (`c`) still holds the queue's lock** while
   Claude Code is open. Other lands wait, and say they are waiting. Releasing
   the lock mid-conflict needs a git worktree per parked conflict (the daemon's

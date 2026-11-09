@@ -22,7 +22,7 @@ here: workspace one
 trunk: $ROOT/trunk
 a land from here lands each repo as its own set:
   app: into appq; no check, so lands need --force
-queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/queue.db (`choros queue appq` reads it)
 repo settings: none yet; they go in $ROOT/trunk/.choros-config/repos.toml (`choros help agent` shows how)
 $ cd trunk
 $ printf '[app]\ncheck = "true"\n' > .choros-config/repos.toml
@@ -32,7 +32,7 @@ here: repo app, a clone in workspace one (the workspace root is ..)
 trunk: $ROOT/trunk
 a land from here lands app:
   app: into appq; check `true`
-queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/queue.db (`choros queue appq` reads it)
 repo settings: $ROOT/trunk/.choros-config/repos.toml
 $ echo a > a.txt && git add a.txt && git commit -qm "write a"
 $ choros land continue
@@ -43,7 +43,7 @@ $ choros here
 here: landing folder of appq/landing-1, landed from $ROOT/trunk/one
 commits pushed to appq/landing-1 from here join the set; `choros land` refuses here
 trunk: $ROOT/trunk
-queue appq: state in $ROOT/trunk/.choros-config/queues/appq/state.json (`choros queue appq` reads it)
+queue appq: state in $ROOT/trunk/.choros-config/queues/appq/queue.db (`choros queue appq` reads it)
 
 # A branch-space with a queue scoped to it: its new workspaces land there.
 $ cd trunk
@@ -58,7 +58,7 @@ here: branch-space epic, no workspace (`choros work NAME REPO…` makes one here
 trunk: $ROOT/trunk
 a new workspace here lands:
   app: into epq; check `true`
-queue epq: state in $ROOT/trunk/.choros-config/queues/epq/state.json (`choros queue epq` reads it)
+queue epq: state in $ROOT/trunk/.choros-config/queues/epq/queue.db (`choros queue epq` reads it)
 repo settings: $ROOT/trunk/.choros-config/repos.toml
 
 # `choros help agent` is the long form, for an agent that has to drive choros.

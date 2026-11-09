@@ -117,7 +117,7 @@ fn space_name(trunk: &Path, space: &Path) -> Result<Option<String>> {
 fn print_queue_state(trunk: &Path, queues: &BTreeSet<String>) -> Result<()> {
     for q in queues {
         let dir = Queue::open(trunk, q)?.dir();
-        println!("queue {q}: state in {} (`choros queue {q}` reads it)", dir.join("state.json").display());
+        println!("queue {q}: state in {} (`choros queue {q}` reads it)", choros_land::store::db_path(&dir).display());
     }
     Ok(())
 }

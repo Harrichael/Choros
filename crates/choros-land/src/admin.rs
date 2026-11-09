@@ -115,7 +115,7 @@ pub struct Dropped {
     pub returned_to: Option<PathBuf>,
 }
 
-/// Differences between state.json and origin that a pass would not fix on
+/// Differences between the queue's state and origin that a pass would not fix on
 /// its own, then a pass.
 pub fn doctor(env: &Env, q: &Queue) -> Result<Vec<String>> {
     let mut work = Work::begin(q, env.agent, None, true)?.unwrap();

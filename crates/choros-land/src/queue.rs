@@ -10,6 +10,7 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::git::Git;
 use crate::state::{self, LandingSet, QueueConfig, QueueState, RepoState, Scope, SetStatus};
+use crate::store::{self, Store};
 
 pub struct Queue {
     pub trunk: PathBuf,
@@ -99,6 +100,7 @@ impl Queue {
             name: name.to_string(),
             config,
         };
+        store::create(&dir)?;
         queue.write_state(&queue.read_state()?)?;
         Ok(queue)
     }
@@ -144,22 +146,19 @@ impl Queue {
         queues_dir(&self.trunk).join(&self.name)
     }
 
-    fn state_path(&self) -> PathBuf {
-        self.dir().join("state.json")
-    }
-
     pub fn read_state(&self) -> Result<QueueState> {
-        state::read_state(&self.state_path(), &self.config)
+        store::read(&self.dir(), &self.config)
     }
 
     pub fn write_state(&self, state: &QueueState) -> Result<()> {
-        state::write_state(&self.state_path(), state)
+        Store::open(&self.dir())?.write_state(state)
     }
 
     pub fn lock(&self) -> Result<QueueLock> {
         let file = self.lock_file()?;
         file.lock()?;
         self.adopt_old_layout()?;
+        store::adopt_json(&self.dir(), &self.config)?;
         Ok(QueueLock(file))
     }
 
@@ -168,6 +167,7 @@ impl Queue {
         match file.try_lock() {
             Ok(()) => {
                 self.adopt_old_layout()?;
+                store::adopt_json(&self.dir(), &self.config)?;
                 Ok(Some(QueueLock(file)))
             }
             Err(TryLockError::WouldBlock) => Ok(None),
@@ -317,7 +317,7 @@ impl Queue {
     }
 
     /// Put a sync clone back in a known state: whatever a crash left in
-    /// progress is abandoned, because every pass recomputes from state.json.
+    /// progress is abandoned, because every pass recomputes from the queue's state.
     pub fn recover(&self, repo: &str) -> Result<()> {
         let git = self.git(repo);
         git.abort_in_progress()?;

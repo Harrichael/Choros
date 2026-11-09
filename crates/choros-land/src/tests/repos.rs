@@ -105,11 +105,11 @@ fn a_one_repo_queue_from_before_is_read_into_its_repo() {
         "repo = \"app\"\nmain = \"main\"\nscope = \"trunk\"\n",
     )
     .unwrap();
-    let mut state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("state.json")).unwrap()).unwrap();
+    let mut state = serde_json::to_value(w.state()).unwrap();
     let repos = state.as_object_mut().unwrap().remove("repos").unwrap();
     state["merge_head"] = repos[REPO]["merge_head"].clone();
     state["resolutions"] = serde_json::json!([]);
+    std::fs::remove_file(dir.join("queue.db")).unwrap();
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
 
     let st = w.state();
@@ -118,4 +118,37 @@ fn a_one_repo_queue_from_before_is_read_into_its_repo() {
     w.commit(&ws, "b.txt", "b\n");
     w.land_on_head(&ws).unwrap();
     assert_eq!(w.state().sets[&2].deps, [Dep::Set(1)]);
+}
+
+/// A queue that kept its state in state.json is moved into queue.db whole
+/// the next time it is locked. A choros from before the move must stop on
+/// what is left in state.json, not read a queue with nothing in it; so must
+/// this one, should the database go missing.
+#[test]
+fn a_queue_kept_in_state_json_moves_into_the_database() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land_on_head(&ws).unwrap();
+    let (dir, config) = (w.queue().dir(), w.queue().config);
+    let before = serde_json::to_value(w.state()).unwrap();
+    let older_choros_reads = || crate::state::read_state_json(&dir.join("state.json"), &config);
+    std::fs::remove_file(dir.join("queue.db")).unwrap();
+    std::fs::write(dir.join("state.json"), before.to_string()).unwrap();
+
+    drop(w.queue().lock().unwrap());
+    assert_eq!(serde_json::to_value(w.state()).unwrap(), before);
+    assert!(older_choros_reads().is_err());
+
+    // A move cut short before it left word in state.json.
+    std::fs::remove_file(dir.join("state.json")).unwrap();
+    drop(w.queue().lock().unwrap());
+    assert!(older_choros_reads().is_err());
+    assert_eq!(serde_json::to_value(w.state()).unwrap(), before);
+
+    std::fs::remove_file(dir.join("queue.db")).unwrap();
+    assert!(w.queue().read_state().is_err());
+    assert!(w.queue().lock().is_err());
 }

@@ -1,5 +1,5 @@
 //! What a queue is configured to do (`queue.toml`, yours to edit) and what it
-//! currently holds (`state.json`, the engine's).
+//! currently holds (the engine's, kept by [`crate::store`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -290,8 +290,8 @@ pub struct QueueState {
     pub repos: BTreeMap<String, RepoState>,
     #[serde(default)]
     pub diffbase: DiffbaseState,
-    /// From a one-repo queue's state.json; `read_state` moves them into
-    /// `repos`.
+    /// From a one-repo queue's state.json; `read_state_json` moves them
+    /// into `repos`.
     #[serde(default, skip_serializing)]
     merge_head: Option<MergeHead>,
     #[serde(default, skip_serializing)]
@@ -329,7 +329,7 @@ pub struct DiffbaseState {
     /// Nothing in the queue moves while this is set.
     #[serde(default)]
     pub park: Option<DiffbasePark>,
-    /// A one-repo queue's built diffbase; `read_state` moves it into `repos`.
+    /// A one-repo queue's built diffbase; `read_state_json` moves it into `repos`.
     #[serde(default, skip_serializing)]
     built: Option<BuiltDiffbase>,
 }
@@ -599,9 +599,10 @@ pub fn write_config(path: &Path, config: &QueueConfig) -> Result<()> {
     write_atomic(path, toml::to_string_pretty(config)?.as_bytes())
 }
 
-/// `config` says, for a queue made when queues held one repo, which repo
-/// its old per-queue fields belong to.
-pub fn read_state(path: &Path, config: &QueueConfig) -> Result<QueueState> {
+/// A queue's state as `state.json` held it, before `queue.db`. `config`
+/// says, for a queue made when queues held one repo, which repo its old
+/// per-queue fields belong to.
+pub fn read_state_json(path: &Path, config: &QueueConfig) -> Result<QueueState> {
     if !path.exists() {
         return Ok(QueueState {
             next_n: 1,
@@ -625,10 +626,6 @@ pub fn read_state(path: &Path, config: &QueueConfig) -> Result<QueueState> {
         );
     }
     Ok(st)
-}
-
-pub fn write_state(path: &Path, state: &QueueState) -> Result<()> {
-    write_atomic(path, serde_json::to_string_pretty(state)?.as_bytes())
 }
 
 /// Readers (the prompt token in particular) must never see half a file.

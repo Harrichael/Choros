@@ -16,6 +16,7 @@ pub mod queue;
 pub mod repos;
 pub mod state;
 pub mod status;
+pub mod store;
 pub mod uuid;
 pub mod workspace;
 
