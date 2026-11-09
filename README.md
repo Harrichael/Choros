@@ -257,6 +257,8 @@ only the queued sets its commits need, and must pass the repo's `check` (set in
 `.choros-config/repos.toml`) on that tip. Repos not bound to a queue land
 straight to main. Full design: [docs/landing-queue.md](docs/landing-queue.md).
 
+![A queue's landing-sets: the front and its GitHub stacks in review, the rest queued on the merge head](docs/images/landing-queue.svg)
+
 ```bash
 choros queue new appq              # a queue for every repo of the trunk
 choros queue new -i                # the same, asking for each setting
