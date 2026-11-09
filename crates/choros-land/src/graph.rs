@@ -5,7 +5,7 @@
 //! One in another repo can't be built on, only waited for before its PR
 //! opens. "Ancestors" and "leaves" follow the first kind only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::{Dep, LandingSet, ParkOp, QueueState, SetStatus};
 
@@ -155,6 +155,45 @@ pub fn dependents(state: &QueueState, n: u32) -> BTreeSet<u32> {
         .copied()
         .filter(|m| ancestors(state, *m).contains(&n))
         .collect()
+}
+
+/// What in this queue has to merge before `n` can: every unmerged set it
+/// waits on, in any repo, in rounds. Each round can merge once the rounds before it
+/// have, so how many there are is the fewest merges in a row still ahead.
+pub fn rounds_before(state: &QueueState, n: u32) -> Vec<Vec<u32>> {
+    let waits_on = |set: &LandingSet| -> Vec<u32> {
+        set_deps(set)
+            .filter(|d| state.sets.get(d).is_some_and(|s| s.status != SetStatus::Merged))
+            .collect()
+    };
+    fn round(
+        state: &QueueState,
+        m: u32,
+        waits_on: &dyn Fn(&LandingSet) -> Vec<u32>,
+        memo: &mut BTreeMap<u32, usize>,
+    ) -> usize {
+        if let Some(r) = memo.get(&m) {
+            return *r;
+        }
+        let r = waits_on(&state.sets[&m])
+            .into_iter()
+            .map(|d| round(state, d, waits_on, memo))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        memo.insert(m, r);
+        r
+    }
+    let mut memo = BTreeMap::new();
+    let mut rounds: Vec<Vec<u32>> = Vec::new();
+    for m in reachable(state, n, waits_on) {
+        let r = round(state, m, &waits_on, &mut memo);
+        if rounds.len() < r {
+            rounds.resize(r, Vec::new());
+        }
+        rounds[r - 1].push(m);
+    }
+    rounds
 }
 
 /// A dependency cycle, across repos or not, would leave its sets waiting on

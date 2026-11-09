@@ -365,6 +365,15 @@ fn ensure_notes(git: &Git) -> Result<()> {
 /// `archive/landing/<name>/_queue`, beside its archived landing folders, and
 /// its sync clone with it. Returns whether it went. The caller holds the
 /// queue's lock and passes the state it read under it.
+/// Whether landing-`n` of another queue has merged, by its state file.
+pub fn merged_in(trunk: &Path, queue: &str, n: u32) -> bool {
+    Queue::open(trunk, queue)
+        .and_then(|q| q.read_state())
+        .ok()
+        .and_then(|s| s.sets.get(&n).map(|set| set.status == SetStatus::Merged))
+        .unwrap_or(false)
+}
+
 pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
     let (trunk, name) = (&q.trunk, &q.name);
     let owner = match &q.config.scope {

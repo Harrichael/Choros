@@ -105,6 +105,9 @@ INSIDE A WORKSPACE
                                     set; change an open one from its landing folder
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
+    choros landing path N [--queue Q]
+                                    the unmerged sets landing-N waits on, in rounds: the first
+                                    can be reviewed and merged now, each next once those before
 
 QUEUES (anywhere in a trunk; narrowed to where you are)
     choros status [--prompt|--all] [--json]

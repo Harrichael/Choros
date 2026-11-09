@@ -325,6 +325,77 @@ fn ellipsize(text: &str, width: usize) -> String {
     if width == 0 { kept } else { kept + "…" }
 }
 
+/// A set's row after `head`: its title, cut first on a narrow terminal,
+/// then its repo, PR, review and labels.
+fn set_line(s: &status::SetLine, head: &str, columns: Option<usize>) -> String {
+    let mut line = format!(" ({})", s.repo);
+    if let Some(pr) = &s.pr {
+        line.push_str(&format!("  #{}", pr.number));
+    }
+    if let Some(r) = &s.review {
+        for (on, word) in [(r.draft, "draft"), (r.unanswered, "unanswered"), (r.approved, "approved")] {
+            if on {
+                line.push_str(&format!(" {word}"));
+            }
+        }
+    }
+    if !s.labels.is_empty() {
+        line.push_str(&format!("  [{}]", s.labels.join(", ")));
+    }
+    // The title gives way first, so what's after it stays readable.
+    let title = s.pr_title.as_deref().unwrap_or("");
+    let title = match columns {
+        Some(c) => {
+            let room = c.saturating_sub(head.chars().count() + line.chars().count());
+            ellipsize(title, room.max(TITLE_KEPT))
+        }
+        None => title.to_string(),
+    };
+    let line = format!("{head}{title}{line}");
+    match columns {
+        Some(c) => ellipsize(&line, c),
+        None => line,
+    }
+}
+
+/// What to say under a set's row: what holds it up or needs doing.
+fn set_notes(s: &status::SetLine) -> Vec<String> {
+    let mut notes = Vec::new();
+    if s.state == "closed" {
+        notes.push("closed without merging: what's after it waits until it's reopened".into());
+    }
+    if let Some(p) = &s.park
+        && p.op == ParkOp::PushedMerge
+    {
+        notes.push(format!(
+            "! parked: a merge was pushed onto it that isn't of the set below as it is now; to go on, \
+             push it back from its landing folder: git push --force-with-lease={b}:{on} origin {tip}:{b}",
+            b = s.branch,
+            on = p.on,
+            tip = s.tip,
+        ));
+    } else if let Some(p) = &s.park {
+        notes.push(format!("! parked ({:?}) {}", p.op, p.files.join(", ")));
+    } else if s.blocked {
+        notes.push("waiting on a parked or closed set".into());
+    }
+    if !s.conflicts_with.is_empty() {
+        let with: Vec<String> = s.conflicts_with.iter().map(|n| format!("landing-{n}")).collect();
+        notes.push(format!("clashes with {}", with.join(", ")));
+    }
+    if s.landing_dirty {
+        notes.push("landing folder has uncommitted changes".into());
+    }
+    if s.unlinked {
+        notes.push("not linked into a GitHub stack yet".into());
+    }
+    if s.behind_in_stack {
+        let url = s.pr.as_ref().map(|p| format!(": {}", p.url)).unwrap_or_default();
+        notes.push(format!("the set below moved: press Rebase stack on GitHub{url}"));
+    }
+    notes
+}
+
 /// A queue, its open sets drawn as a graph of what lands after what, and
 /// what needs doing about them, for `status` and `queue NAME`. With
 /// `landings_only`, just the sets.
@@ -359,67 +430,12 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         };
         let s = open[&n];
         let head = format!("{graph}{:<width$}  {:<state_width$}  ", format!("landing-{n}"), s.state);
-        let mut line = format!(" ({})", s.repo);
-        if let Some(pr) = &s.pr {
-            line.push_str(&format!("  #{}", pr.number));
-        }
-        if let Some(r) = &s.review {
-            for (on, word) in [(r.draft, "draft"), (r.unanswered, "unanswered"), (r.approved, "approved")] {
-                if on {
-                    line.push_str(&format!(" {word}"));
-                }
-            }
-        }
-        if !s.labels.is_empty() {
-            line.push_str(&format!("  [{}]", s.labels.join(", ")));
-        }
-        // The title gives way first, so what's after it stays readable.
-        let title = s.pr_title.as_deref().unwrap_or("");
-        let title = match columns {
-            Some(c) => {
-                let room = c.saturating_sub(head.chars().count() + line.chars().count());
-                ellipsize(title, room.max(TITLE_KEPT))
-            }
-            None => title.to_string(),
-        };
-        println!("{}", fit(&format!("{head}{title}{line}")));
+        println!("{}", set_line(s, &head, columns));
         // Sets in this queue are lanes in the graph; one in another queue
         // can only be named.
         let elsewhere: Vec<&str> = s.deps.iter().filter(|d| d.contains('/')).map(String::as_str).collect();
-        let mut notes = Vec::new();
-        if !elsewhere.is_empty() {
-            notes.push(format!("after {}", elsewhere.join(", ")));
-        }
-        if let Some(p) = &s.park
-            && p.op == ParkOp::PushedMerge
-        {
-            notes.push(format!(
-                "! parked: a merge was pushed onto it that isn't of the set below as it is now; to go on, \
-                 push it back from its landing folder: git push --force-with-lease={b}:{on} origin {tip}:{b}",
-                b = s.branch,
-                on = p.on,
-                tip = s.tip,
-            ));
-        } else if let Some(p) = &s.park {
-            notes.push(format!("! parked ({:?}) {}", p.op, p.files.join(", ")));
-        } else if s.blocked {
-            notes.push("waiting on a parked or closed set".into());
-        }
-        if !s.conflicts_with.is_empty() {
-            let with: Vec<String> = s.conflicts_with.iter().map(|n| format!("landing-{n}")).collect();
-            notes.push(format!("clashes with {}", with.join(", ")));
-        }
-        if s.landing_dirty {
-            notes.push("landing folder has uncommitted changes".into());
-        }
-        if s.unlinked {
-            notes.push("not linked into a GitHub stack yet".into());
-        }
-        if s.behind_in_stack {
-            let url = s.pr.as_ref().map(|p| format!(": {}", p.url)).unwrap_or_default();
-            notes.push(format!("the set below moved: press Rebase stack on GitHub{url}"));
-        }
-        for note in notes {
+        let after = (!elsewhere.is_empty()).then(|| format!("after {}", elsewhere.join(", ")));
+        for note in after.into_iter().chain(set_notes(s)) {
             println!("{}", fit(&format!("{under}  {note}")));
         }
     }
@@ -804,11 +820,14 @@ fn print_report(name: &str, r: &PassReport) {
     }
 }
 
+const LANDING_USAGE: &str = "choros landing open N [--queue Q] [--session ID] | landing path N [--queue Q]";
+
 pub fn run_landing(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (n, rest) = match a.as_slice() {
-        ["open", n, rest @ ..] => (set_number(n)?, rest),
-        _ => usage("choros landing open N [--queue Q] [--session ID]"),
+    let (open, n, rest) = match a.as_slice() {
+        ["open", n, rest @ ..] => (true, set_number(n)?, rest),
+        ["path", n, rest @ ..] => (false, set_number(n)?, rest),
+        _ => usage(LANDING_USAGE),
     };
     let trunk = trunk_here()?;
     let mut queue = None;
@@ -817,7 +836,7 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
     while i < rest.len() {
         match rest[i] {
             "--queue" => queue = rest.get(i + 1).map(|s| s.to_string()),
-            "--session" => session = rest.get(i + 1).map(|s| s.to_string()),
+            "--session" if open => session = rest.get(i + 1).map(|s| s.to_string()),
             other => return Err(eyre!("unknown option {other}")),
         }
         i += 2;
@@ -829,6 +848,9 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
             _ => return Err(eyre!("which queue? pass --queue")),
         },
     };
+    if !open {
+        return print_path(&trunk, &queue, n);
+    }
     let q = Queue::open(&trunk, &queue)?;
     let (dir, fork) = admin::landing_session(&q, n, session.as_deref())?;
     let mut cmd = Command::new("claude");
@@ -841,6 +863,76 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
     if !status.success() {
         return Err(eyre!("claude exited with {status}"));
     }
+    Ok(())
+}
+
+/// The unmerged sets landing-`n` waits on, round by round: the first round
+/// can be reviewed and merged now, each next one once those before it have.
+fn print_path(trunk: &Path, queue: &str, n: u32) -> Result<()> {
+    let st = Queue::open(trunk, queue)?.read_state()?;
+    match st.sets.get(&n).map(|s| &s.status) {
+        None | Some(choros_land::state::SetStatus::Dropped) => return Err(eyre!("{queue} has no landing-{n}")),
+        Some(choros_land::state::SetStatus::Merged) => {
+            println!("landing-{n} has merged");
+            return Ok(());
+        }
+        _ => {}
+    }
+    let rounds = choros_land::graph::rounds_before(&st, n);
+    let report = status::queue_status(trunk, queue)?;
+    let lines: BTreeMap<u32, &status::SetLine> = report.sets.iter().map(|s| (s.n, s)).collect();
+    let ahead: Vec<u32> = rounds.iter().flatten().copied().collect();
+    // Sets in other queues get no round of their own: they're named on the
+    // rows that wait on them, until they merge.
+    let waits_on = |s: &status::SetLine| -> Vec<String> {
+        s.deps
+            .iter()
+            .filter(|d| match d.split_once('/') {
+                None => d.strip_prefix("landing-").and_then(|d| d.parse().ok()).is_some_and(|d| ahead.contains(&d)),
+                Some((other, m)) => m
+                    .strip_prefix("landing-")
+                    .and_then(|m| m.parse().ok())
+                    .is_some_and(|m| !queue::merged_in(trunk, other, m)),
+            })
+            .cloned()
+            .collect()
+    };
+    let shown: Vec<u32> = ahead.iter().chain([&n]).copied().filter(|m| lines.contains_key(m)).collect();
+    let elsewhere = shown.iter().flat_map(|m| waits_on(lines[m])).filter(|d| d.contains('/')).count();
+    let other = match elsewhere {
+        0 => String::new(),
+        1 => ", and 1 in another queue".into(),
+        e => format!(", and {e} in other queues"),
+    };
+    match (ahead.len(), rounds.len()) {
+        (0, _) if elsewhere == 0 => println!("landing-{n} waits on no unmerged set"),
+        (0, _) => println!("landing-{n} waits on no unmerged set in {queue}{other}:"),
+        (1, _) => println!("landing-{n} waits on 1 set{other}:"),
+        (sets, r) => println!("landing-{n} waits on {sets} sets, in {r} round{}{other}:", if r == 1 { "" } else { "s" }),
+    }
+    let width = shown.iter().map(|m| format!("landing-{m}").len()).max().unwrap_or(0);
+    let state_width = shown.iter().map(|m| lines[m].state.len()).max().unwrap_or(0);
+    let round_width = rounds.len().to_string().len();
+    let columns = columns();
+    let row = |label: String, m: u32| {
+        // Dropped between the two reads of the queue's state.
+        let Some(s) = lines.get(&m) else { return };
+        let head = format!("  {label:>round_width$}  {:<width$}  {:<state_width$}  ", format!("landing-{m}"), s.state);
+        println!("{}", set_line(s, &head, columns));
+        let on = waits_on(s);
+        let under = " ".repeat(round_width + 4);
+        let notes = (!on.is_empty()).then(|| format!("after {}", on.join(", "))).into_iter().chain(set_notes(s));
+        for note in notes {
+            let note = format!("{under}{note}");
+            println!("{}", columns.map_or(note.clone(), |c| ellipsize(&note, c)));
+        }
+    };
+    for (i, round) in rounds.iter().enumerate() {
+        for (j, m) in round.iter().enumerate() {
+            row(if j == 0 { (i + 1).to_string() } else { String::new() }, *m);
+        }
+    }
+    row("→".into(), n);
     Ok(())
 }
 

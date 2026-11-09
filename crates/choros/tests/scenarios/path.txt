@@ -1,0 +1,118 @@
+# `choros landing path N` lists what has to merge before landing-N can,
+# round by round: the first round can be reviewed and merged now, each
+# next one once the rounds before it have.
+
+$ choros work one app
+$ROOT/trunk/one/app
+mkdir $ROOT/trunk/one
+cloning app…
+copying agent templates…
+$ cd trunk/one/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
+$ echo "a, again" > a.txt && git commit -qam "rewrite a"
+$ choros land continue
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
+    appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
+$ cd trunk
+$ choros work two app
+$ROOT/trunk/two/app
+mkdir $ROOT/trunk/two
+cloning app…
+copying agent templates…
+$ cd trunk/two/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo c > c.txt && git add c.txt && git commit -qm "write c"
+$ choros land continue
+app → appq/landing-3, at the front: https://github.test/pull/2
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-3
+    ahead of appq/landing-1, appq/landing-2; `true` passed without them
+$ echo d > d.txt && git add d.txt && git commit -qm "write d"
+$ choros land continue --deps 2,3
+app → appq/landing-4, queued
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-4
+    appq/landing-3 is still open; to change it, work in its landing folder (`choros landing open 3 --queue appq`)
+
+$ choros landing path 4
+landing-4 waits on 3 sets, in 2 rounds:
+  1  landing-1  front   write a (app)  #1
+     landing-3  front   write c (app)  #2
+  2  landing-2  queued  rewrite a (app)
+     after landing-1
+  →  landing-4  queued  write d (app)
+     after landing-2, landing-3
+
+# Each merge takes a set off the path.
+$ gh pr merge 1 --squash
+$ choros queue sync appq
+appq: merged landing-1
+appq: re-synced landing-2, landing-4
+appq: opened PRs for landing-2
+$ choros landing path 4
+landing-4 waits on 2 sets, in 1 round:
+  1  landing-2  front   rewrite a (app)  #3
+     landing-3  front   write c (app)  #2
+  →  landing-4  queued  write d (app)
+     after landing-2, landing-3
+
+$ choros landing path 3
+landing-3 waits on no unmerged set
+  →  landing-3  front  write c (app)  #2
+$ choros landing path 1
+landing-1 has merged
+$ choros landing path 9
+choros: appq has no landing-9
+[exit 1]
+
+# A set in another queue gets no round, but stays named on the row that
+# waits on it until it merges. A closed set says what it holds up.
+$ cd trunk
+$ choros queue new otherq
+created queue otherq; bind a workspace's repos with `choros repo bind REPO otherq`
+$ choros work three app
+$ROOT/trunk/three/app
+mkdir $ROOT/trunk/three
+cloning app…
+copying agent templates…
+$ cd trunk/three/app
+$ choros repo bind app otherq
+app now lands into otherq
+$ echo e > e.txt && git add e.txt && git commit -qm "write e"
+$ choros land continue
+app → otherq/landing-1, at the front: https://github.test/pull/4
+    landing: $ROOT/trunk/.choros-config/queues/otherq/landing/landing-1
+$ cd trunk/two/app
+$ echo f > f.txt && git add f.txt && git commit -qm "write f"
+$ choros land continue --deps 3,otherq/1
+app → appq/landing-5, queued
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-5
+    appq/landing-3 is still open; to change it, work in its landing folder (`choros landing open 3 --queue appq`)
+    appq/landing-4 is still open; to change it, work in its landing folder (`choros landing open 4 --queue appq`)
+$ choros landing path 5 --queue appq
+landing-5 waits on 3 sets, in 2 rounds, and 1 in another queue:
+  1  landing-2  front   rewrite a (app)  #3
+     landing-3  front   write c (app)  #2
+  2  landing-4  queued  write d (app)
+     after landing-2, landing-3
+  →  landing-5  queued  write f (app)
+     after landing-4, otherq/landing-1
+$ gh pr close 2
+$ choros queue sync appq
+appq: closed landing-3
+$ choros landing path 5 --queue appq
+landing-5 waits on 3 sets, in 2 rounds, and 1 in another queue:
+  1  landing-2  front   rewrite a (app)  #3
+     landing-3  closed   (app)  #2
+     closed without merging: what's after it waits until it's reopened
+  2  landing-4  queued  write d (app)
+     after landing-2, landing-3
+     waiting on a parked or closed set
+  →  landing-5  queued  write f (app)
+     after landing-4, otherq/landing-1
+     waiting on a parked or closed set
