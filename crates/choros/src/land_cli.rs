@@ -11,7 +11,7 @@ use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, P
 use choros_land::forge::Gh;
 use choros_land::land::{self, Deps, LandRequest};
 use choros_land::queue::{self, Queue};
-use choros_land::state::{Dep, LandMode, ParkOp, PrSpec, QueueConfig, Scope, parse_pr_list};
+use choros_land::state::{ChangeBy, Dep, LandMode, ParkOp, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
 use color_eyre::eyre::{Result, eyre};
 
@@ -820,15 +820,16 @@ fn print_report(name: &str, r: &PassReport) {
     }
 }
 
-const LANDING_USAGE: &str = "choros landing open N [--queue Q] [--session ID] | landing path N [--queue Q]";
+const LANDING_USAGE: &str =
+    "choros landing open N [--queue Q] [--session ID] | landing path N [--queue Q] | landing log N [--queue Q]";
 
 pub fn run_landing(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (open, n, rest) = match a.as_slice() {
-        ["open", n, rest @ ..] => (true, set_number(n)?, rest),
-        ["path", n, rest @ ..] => (false, set_number(n)?, rest),
+    let (verb, n, rest) = match a.as_slice() {
+        [verb @ ("open" | "path" | "log"), n, rest @ ..] => (*verb, set_number(n)?, rest),
         _ => usage(LANDING_USAGE),
     };
+    let open = verb == "open";
     let trunk = trunk_here()?;
     let mut queue = None;
     let mut session = None;
@@ -848,8 +849,10 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
             _ => return Err(eyre!("which queue? pass --queue")),
         },
     };
-    if !open {
-        return print_path(&trunk, &queue, n);
+    match verb {
+        "path" => return print_path(&trunk, &queue, n),
+        "log" => return print_log(&trunk, &queue, n),
+        _ => {}
     }
     let q = Queue::open(&trunk, &queue)?;
     let (dir, fork) = admin::landing_session(&q, n, session.as_deref())?;
@@ -864,6 +867,54 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
         return Err(eyre!("claude exited with {status}"));
     }
     Ok(())
+}
+
+/// Each change made to landing-`n`, by a land or on its branch, and how
+/// often the queue has since moved it.
+fn print_log(trunk: &Path, queue: &str, n: u32) -> Result<()> {
+    let q = Queue::open(trunk, queue)?;
+    let st = q.read_state()?;
+    let set = st.sets.get(&n).ok_or_else(|| eyre!("{queue} has no landing-{n}"))?;
+    let history = q.history(n)?;
+    if history.changes.is_empty() {
+        println!("landing-{n} landed before its changes were kept");
+        return Ok(());
+    }
+    let git = q.git(set.repo());
+    let rows: Vec<[String; 3]> = history
+        .changes
+        .iter()
+        .map(|c| {
+            let by = match c.who.as_slice() {
+                [] => c.by.as_str().to_string(),
+                who => format!("{} by {}", c.by.as_str(), who.join(", ")),
+            };
+            // A push is told by what it added to the set as it then sat.
+            // Commits from before they were held by a ref may be gone.
+            let sat = history.placements.iter().rfind(|p| p.rev < c.rev);
+            let commits = match (c.by, sat) {
+                (ChangeBy::Pushed, Some(p)) => git.commits(&p.tip, &c.tip).map(|cs| format!("+{}", count(cs.len(), "commit"))),
+                _ => git.commits(&c.base, &c.tip).map(|cs| count(cs.len(), "commit")),
+            }
+            .unwrap_or_default();
+            let moved = match history.placements.iter().filter(|p| p.rev == c.rev).count() {
+                0 | 1 => String::new(),
+                placed => format!("moved {}", count(placed - 1, "time")),
+            };
+            [by, commits, moved]
+        })
+        .collect();
+    let width = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
+    println!("landing-{n}, {}:", set.status);
+    for (c, [by, commits, moved]) in history.changes.iter().zip(&rows) {
+        let row = format!("  {}  {by:<w0$}  {commits:<w1$}  {moved}", c.rev, w0 = width(0), w1 = width(1));
+        println!("{}", row.trim_end());
+    }
+    Ok(())
+}
+
+fn count(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 /// The unmerged sets landing-`n` waits on, round by round: the first round

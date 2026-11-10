@@ -65,4 +65,6 @@ To change an open set, such as for review fixes, work in its landing folder,
 `<trunk>/.choros-config/queues/<queue>/landing/landing-N`: commit and `git push`, and the commits
 join the set (a rewrite doesn't). `choros landing open N` resumes the
 session forked there. `choros landing path N` lists what has to merge
-before landing-N can, round by round.
+before landing-N can, round by round. `choros landing log N` lists each
+change made to landing-N: the land, then whatever was done on its branch
+since and who wrote it.

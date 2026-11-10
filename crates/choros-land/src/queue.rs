@@ -150,6 +150,10 @@ impl Queue {
         store::read(&self.dir(), &self.config)
     }
 
+    pub fn history(&self, n: u32) -> Result<store::History> {
+        Store::open(&self.dir())?.history(n)
+    }
+
     pub fn write_state(&self, state: &QueueState) -> Result<()> {
         Store::open(&self.dir())?.write_state(state)
     }
@@ -158,7 +162,7 @@ impl Queue {
         let file = self.lock_file()?;
         file.lock()?;
         self.adopt_old_layout()?;
-        store::adopt_json(&self.dir(), &self.config)?;
+        store::adopt(&self.dir(), &self.config)?;
         Ok(QueueLock(file))
     }
 
@@ -167,7 +171,7 @@ impl Queue {
         match file.try_lock() {
             Ok(()) => {
                 self.adopt_old_layout()?;
-                store::adopt_json(&self.dir(), &self.config)?;
+                store::adopt(&self.dir(), &self.config)?;
                 Ok(Some(QueueLock(file)))
             }
             Err(TryLockError::WouldBlock) => Ok(None),

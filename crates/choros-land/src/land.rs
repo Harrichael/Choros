@@ -18,7 +18,7 @@ use crate::git::Git;
 use crate::graph;
 use crate::queue::Queue;
 use crate::repos;
-use crate::state::{BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
+use crate::state::{ChangeBy, BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
 use crate::workspace::{self, InstantPr, LandingOf, RepoLanding};
 
 pub struct LandRequest {
@@ -1177,7 +1177,7 @@ fn new_set(
     repo: &str,
     req: &LandRequest,
 ) -> LandingSet {
-    LandingSet {
+    let mut set = LandingSet {
         n,
         deps,
         base,
@@ -1203,7 +1203,10 @@ fn new_set(
         sessions: Vec::new(),
         conflicts_with: Vec::new(),
         pending: None,
-    }
+        change: None,
+    };
+    set.changed(ChangeBy::Landed, Vec::new());
+    set
 }
 
 /// `choros repo sync`: move a repo's unlanded commits onto its queue's current

@@ -108,6 +108,9 @@ INSIDE A WORKSPACE
     choros landing path N [--queue Q]
                                     the unmerged sets landing-N waits on, in rounds: the first
                                     can be reviewed and merged now, each next once those before
+    choros landing log N [--queue Q]
+                                    each change made to landing-N, by a land or on its branch
+                                    and who wrote it, and how often the queue has moved it
 
 QUEUES (anywhere in a trunk; narrowed to where you are)
     choros status [--prompt|--all] [--json]

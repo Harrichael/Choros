@@ -16,21 +16,36 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Context, Result, eyre};
 use rusqlite::{Connection, OpenFlags, params};
 
-use crate::state::{self, DiffbaseState, LandingSet, QueueConfig, QueueState, RepoState};
+use crate::state::{
+    self, Change, DiffbaseState, LandingSet, Placement, QueueConfig, QueueState, RepoState,
+    now_secs,
+};
 
 const DB: &str = "queue.db";
 const JSON: &str = "state.json";
 const JSON_KEPT: &str = "state.json.migrated";
 const MOVED: &str = "This queue's state moved to queue.db. The choros that tried to read this file is older than the queue: reinstall it.\n";
 
-/// The newest layout this build reads and writes, in `PRAGMA user_version`.
-const VERSION: u32 = 1;
-
-const SCHEMA: &str = "
-    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-    CREATE TABLE sets (n INTEGER PRIMARY KEY, body TEXT NOT NULL) STRICT;
-    CREATE TABLE repos (name TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT;
-";
+/// The layout's steps, oldest first: a database's `PRAGMA user_version`
+/// counts the ones it has had.
+const LAYOUT: &[&str] = &[
+    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+     CREATE TABLE sets (n INTEGER PRIMARY KEY, body TEXT NOT NULL) STRICT;
+     CREATE TABLE repos (name TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT;",
+    // Each change ever made to a set, and each place the queue put one. A
+    // set's row holds only the latest of each.
+    "CREATE TABLE changes (
+         n INTEGER NOT NULL, rev INTEGER NOT NULL,
+         base TEXT NOT NULL, tip TEXT NOT NULL,
+         by TEXT NOT NULL, who TEXT NOT NULL, at INTEGER NOT NULL,
+         PRIMARY KEY (n, rev)) STRICT;
+     CREATE TABLE placements (
+         id INTEGER PRIMARY KEY,
+         n INTEGER NOT NULL, rev INTEGER NOT NULL,
+         onto TEXT NOT NULL, base TEXT NOT NULL, tip TEXT NOT NULL,
+         at INTEGER NOT NULL) STRICT;
+     CREATE INDEX placements_of ON placements (n, id);",
+];
 
 pub struct Store {
     conn: Connection,
@@ -95,10 +110,12 @@ pub fn create(dir: &Path) -> Result<()> {
     build_db(dir, None)
 }
 
-/// Move a queue kept in `state.json` into `queue.db`, keeping the file as
-/// `state.json.migrated`. The caller holds the queue's lock. Wherever a
-/// crash cut an earlier call short, this one carries on from there.
-pub fn adopt_json(dir: &Path, config: &QueueConfig) -> Result<()> {
+/// Bring the queue's record to what this build keeps: a queue kept in
+/// `state.json` is moved into `queue.db`, with the file kept as
+/// `state.json.migrated`, and a database from an older build gains what
+/// was added to the layout since. The caller holds the queue's lock.
+/// Wherever a crash cut an earlier call short, this one carries on.
+pub fn adopt(dir: &Path, config: &QueueConfig) -> Result<()> {
     let (json, kept) = (dir.join(JSON), dir.join(JSON_KEPT));
     if !db_path(dir).exists() {
         refuse_lost_db(dir)?;
@@ -107,6 +124,7 @@ pub fn adopt_json(dir: &Path, config: &QueueConfig) -> Result<()> {
         }
         build_db(dir, Some(&state::read_state_json(&json, config)?))?;
     }
+    Store::open(dir)?.upgrade()?;
     if is_note(&json) {
         return Ok(());
     }
@@ -128,10 +146,9 @@ impl Store {
             .wrap_err_with(|| format!("opening {}", path.display()))?;
         // Readers don't take the queue's lock, so one can meet a write.
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        let found: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if found != VERSION {
+        if layout_steps(&conn)? > LAYOUT.len() {
             return Err(eyre!(
-                "{} is in layout {found} and this choros knows layout {VERSION}: reinstall choros",
+                "{} was written by a newer choros than this one: reinstall choros",
                 path.display()
             ));
         }
@@ -141,10 +158,22 @@ impl Store {
     fn create(path: &Path) -> Result<Store> {
         let conn =
             Connection::open(path).wrap_err_with(|| format!("creating {}", path.display()))?;
-        conn.execute_batch(&format!(
-            "BEGIN; {SCHEMA} PRAGMA user_version = {VERSION}; COMMIT;"
-        ))?;
-        Ok(Store { conn })
+        let mut store = Store { conn };
+        store.upgrade()?;
+        Ok(store)
+    }
+
+    fn upgrade(&mut self) -> Result<()> {
+        if layout_steps(&self.conn)? == LAYOUT.len() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        for step in &LAYOUT[layout_steps(&tx)?..] {
+            tx.execute_batch(step)?;
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {}", LAYOUT.len()))?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn read_state(&self) -> Result<QueueState> {
@@ -202,6 +231,23 @@ impl Store {
                 params![name, serde_json::to_string(repo)?],
             )?;
         }
+        for (n, set) in &st.sets {
+            let Some(c) = &set.change else { continue };
+            // A tip whose push is still in doubt is no placement yet: a
+            // refused push puts the old one back.
+            if set.pending.is_some() {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO changes (n, rev, base, tip, by, who, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![n, c.rev, c.base, c.tip, c.by.as_str(), serde_json::to_string(&c.who)?, c.at as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO placements (n, rev, onto, base, tip, at) SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                 WHERE (?4, ?5) IS NOT (SELECT base, tip FROM placements WHERE n = ?1 ORDER BY id DESC LIMIT 1)",
+                params![n, c.rev, set.base.key(), set.base_sha, set.tip, now_secs() as i64],
+            )?;
+        }
         let kept = serde_json::to_string(&st.sets.keys().collect::<Vec<_>>())?;
         tx.execute(
             "DELETE FROM sets WHERE n NOT IN (SELECT value FROM json_each(?1))",
@@ -217,6 +263,72 @@ impl Store {
     }
 }
 
+fn layout_steps(conn: &Connection) -> Result<usize> {
+    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? as usize)
+}
+
 fn parse<T: serde::de::DeserializeOwned>(body: &str, what: &str) -> Result<T> {
     serde_json::from_str(body).wrap_err_with(|| format!("parsing {what} in queue.db"))
+}
+
+/// Everything that has happened to landing-`n`'s change, oldest first.
+pub struct History {
+    pub changes: Vec<Change>,
+    pub placements: Vec<Placement>,
+}
+
+impl Store {
+    pub fn history(&self, n: u32) -> Result<History> {
+        // A database no one has locked since this build was installed.
+        if layout_steps(&self.conn)? < LAYOUT.len() {
+            return Ok(History {
+                changes: Vec::new(),
+                placements: Vec::new(),
+            });
+        }
+        let mut changes = self
+            .conn
+            .prepare("SELECT rev, base, tip, by, who, at FROM changes WHERE n = ?1 ORDER BY rev")?;
+        let changes = changes
+            .query_map([n], |r| {
+                Ok((
+                    r.get::<_, u32>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .map(|row| {
+                let (rev, base, tip, by, who, at) = row?;
+                Ok(Change {
+                    rev,
+                    base,
+                    tip,
+                    by: parse(&format!("\"{by}\""), "a change")?,
+                    who: parse(&who, "a change")?,
+                    at: at as u64,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut placements = self
+            .conn
+            .prepare("SELECT rev, onto, base, tip, at FROM placements WHERE n = ?1 ORDER BY id")?;
+        let placements = placements
+            .query_map([n], |r| {
+                Ok(Placement {
+                    rev: r.get(0)?,
+                    onto: r.get(1)?,
+                    base: r.get(2)?,
+                    tip: r.get(3)?,
+                    at: r.get::<_, i64>(4)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(History {
+            changes,
+            placements,
+        })
+    }
 }

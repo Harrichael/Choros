@@ -422,6 +422,63 @@ pub struct LandingSet {
     /// and either keeps the new tip or puts the old one back.
     #[serde(default)]
     pub pending: Option<PendingPush>,
+    /// `None` only for a set no pass has seen since changes began to be kept.
+    #[serde(default)]
+    pub change: Option<Change>,
+}
+
+/// A set's change as someone last left it, by a land or by a push to its
+/// branch: its own commits are `base..tip`. The queue's replays move the
+/// set's `base_sha` and `tip`, never this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Change {
+    /// Counts the set's changes, from 1.
+    pub rev: u32,
+    pub base: String,
+    pub tip: String,
+    pub by: ChangeBy,
+    /// Who wrote the commits a push added.
+    #[serde(default)]
+    pub who: Vec<String>,
+    /// In Unix seconds.
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChangeBy {
+    Landed,
+    /// Commits were pushed onto its branch.
+    Pushed,
+    /// The set below was merged into its branch by hand.
+    MergedBelow,
+    /// Its branch was rewritten on origin, and that was accepted.
+    Rewritten,
+    /// As a pass first found it: it landed before changes were kept.
+    Found,
+}
+
+impl ChangeBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChangeBy::Landed => "landed",
+            ChangeBy::Pushed => "pushed",
+            ChangeBy::MergedBelow => "merged-below",
+            ChangeBy::Rewritten => "rewritten",
+            ChangeBy::Found => "found",
+        }
+    }
+}
+
+/// One time the queue put a set's change somewhere: `tip` is change `rev`
+/// on `base`, which was built from `onto` (a [`BaseSpec::key`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub rev: u32,
+    pub onto: String,
+    pub base: String,
+    pub tip: String,
+    pub at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -584,6 +641,24 @@ impl LandingSet {
     pub fn is_open(&self) -> bool {
         self.status == SetStatus::Queued
     }
+
+    /// The set's branch, as it stands, is a new change to it.
+    pub fn changed(&mut self, by: ChangeBy, who: Vec<String>) {
+        self.change = Some(Change {
+            rev: self.change.as_ref().map_or(1, |c| c.rev + 1),
+            base: self.base_sha.clone(),
+            tip: self.tip.clone(),
+            by,
+            who,
+            at: now_secs(),
+        });
+    }
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 pub fn branch(queue: &str, n: u32) -> String {

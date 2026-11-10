@@ -1,0 +1,58 @@
+# `choros landing log N` lists each change made to landing-N: the land,
+# then every push to its branch with who wrote the commits, and how often
+# the queue has put that change somewhere new.
+
+$ choros work one app
+$ROOT/trunk/one/app
+mkdir $ROOT/trunk/one
+cloning app…
+copying agent templates…
+$ cd trunk/one/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
+$ echo "a, again" > a.txt && git commit -qam "rewrite a"
+$ choros land continue
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
+    appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
+$ choros landing log 2
+landing-2, queued:
+  1  landed  1 commit
+
+# Someone else pushes a fix to landing-1's branch. It joins the set as a
+# change of its own, and landing-2 is moved onto it.
+$ cd trunk/.choros-config/queues/appq/landing/landing-1/app
+$ echo fix > fix.txt && git add fix.txt && git -c user.name="Sam Reviewer" commit -qm "a fix from review"
+$ git push -q
+$ choros queue sync appq
+appq: re-synced landing-2
+$ choros landing log 1
+landing-1, queued:
+  1  landed                  1 commit
+  2  pushed by Sam Reviewer  +1 commit
+$ choros landing log 2
+landing-2, queued:
+  1  landed  1 commit  moved 1 time
+
+# A push to a set the queue has moved counts only what it added.
+$ gh pr merge 1 --squash
+$ choros queue sync appq
+appq: merged landing-1
+appq: re-synced landing-2
+appq: opened PRs for landing-2
+$ cd trunk/.choros-config/queues/appq/landing/landing-2/app
+$ git pull -q
+$ echo more > more.txt && git add more.txt && git -c user.name="Sam Reviewer" commit -qm "one more thing"
+$ git push -q
+$ choros queue sync appq
+$ choros landing log 2
+landing-2, queued:
+  1  landed                  1 commit   moved 2 times
+  2  pushed by Sam Reviewer  +1 commit
+$ choros landing log 9
+choros: appq has no landing-9
+[exit 1]

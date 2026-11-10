@@ -388,6 +388,17 @@ steps, never while waiting on a person.
 failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
+**A set's change and where it sits are kept apart.** The change is the set's
+own commits as someone last left them: by the land, or by a push to its
+branch, whoever made it (commits added are taken as part of the set; a
+rewrite parks it until accepted). Where it sits is what the queue's replays
+make of that change on its current base. `queue.db` keeps each change a set
+has had since this was first kept, and each place the queue settled it; the
+sync clone holds a ref (`refs/choros/kept/<n>/<sha>`) to each while the set
+is open, so git's cleanup there leaves them be. (A sync clone borrows
+objects from the registry clone, whose own cleanup these refs do not reach.)
+`choros landing log N` lists them.
+
 `gh` runs with the trunk's account (`GH_CONFIG_DIR=<trunk>/.choros-config/gh`
 when present). The daemon runs Claude only as the resync agent, for the
 conflicts it settles on its own (*Conflicts*).

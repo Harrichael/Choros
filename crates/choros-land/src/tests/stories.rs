@@ -770,3 +770,31 @@ fn a_pass_notes_the_front_prs_review() {
     w.pass();
     assert_eq!(review(), PrReview { draft: false, unanswered: true, approved: false });
 }
+
+/// A set's change stays as it landed however the queue replays it, and the
+/// commits a replay replaces outlive git's cleanup: the queue's record of
+/// the set still names them.
+#[test]
+fn a_replay_keeps_the_change_and_the_commits_it_replaces() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    w.commit(&ws, "b.txt", "b\n");
+    w.land_on_head(&ws).unwrap();
+    let landed = w.state().sets[&2].clone();
+
+    w.forge.merge(1, MergeMethod::Squash);
+    assert_eq!(w.pass().resynced, [2]);
+
+    let now = w.state().sets[&2].clone();
+    assert_ne!(now.tip, landed.tip);
+    assert_eq!(now.change, landed.change);
+    let placed: Vec<String> = w.queue().history(2).unwrap().placements.into_iter().map(|p| p.tip).collect();
+    assert_eq!(placed, [landed.tip.clone(), now.tip]);
+
+    let sync = w.queue().sync_dir(REPO);
+    git(&sync, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&sync, &["gc", "--quiet", "--prune=now"]);
+    git(&sync, &["cat-file", "-e", &landed.tip]);
+}

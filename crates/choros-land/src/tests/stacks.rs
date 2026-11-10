@@ -3,7 +3,7 @@
 //! merging stays in order.
 
 use super::*;
-use crate::state::{ParkOp, SetStatus};
+use crate::state::{ChangeBy, ParkOp, SetStatus};
 
 impl World {
     fn pr(&self, n: u32) -> u64 {
@@ -669,4 +669,37 @@ fn git_is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
         .status()
         .unwrap()
         .success()
+}
+
+/// GitHub's rebase of a stack moves a set and changes nothing in it. A
+/// commit pushed onto the rebased branch before a pass saw the rebase comes
+/// in with it, and must be kept as a change to the set, not taken for part
+/// of the move.
+#[test]
+fn a_push_onto_githubs_rebase_is_a_change_to_the_set() {
+    let rebased = |pushed: bool| {
+        let w = World::new();
+        w.stack(5);
+        w.line(2);
+        let one = w.pr(1);
+        w.forge.merge(one, MergeMethod::Squash);
+        w.pass();
+        w.forge.restack(one);
+        if pushed {
+            let tmp = tempfile::tempdir().unwrap();
+            let work = tmp.path().join("w");
+            let branch = format!("{QUEUE}/landing-2");
+            git(tmp.path(), &["clone", "--quiet", "--branch", &branch, w.origin.to_str().unwrap(), "w"]);
+            std::fs::write(work.join("fix.txt"), "fix\n").unwrap();
+            git(&work, &["add", "fix.txt"]);
+            git(&work, &["commit", "--quiet", "-m", "a fix"]);
+            git(&work, &["push", "--quiet", "origin", &branch]);
+        }
+        assert_eq!(w.pass().adopted, [2]);
+        let set = w.state().sets[&2].clone();
+        let change = set.change.clone().unwrap();
+        (change.rev, change.by, change.tip == set.tip)
+    };
+    assert_eq!(rebased(false), (1, ChangeBy::Landed, false));
+    assert_eq!(rebased(true), (2, ChangeBy::Pushed, true));
 }

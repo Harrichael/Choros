@@ -3,6 +3,7 @@
 //! *should* look like from the graph, origin and GitHub, and fixes whatever
 //! differs — so a crash halfway simply heals on the next pass.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -14,20 +15,14 @@ use crate::git::{Git, Step};
 use crate::graph;
 use crate::queue::{Queue, QueueLock};
 use crate::state::{
-    AgentSession, BaseSpec, LandingSet, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
-    Resolution, SetStatus, branch,
+    AgentSession, BaseSpec, ChangeBy, LandingSet, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
+    Resolution, SetStatus, branch, now_secs,
 };
 
 /// How long after a merge GitHub is left to rebase the stack above it
 /// before Choros replays what it left alone. A long stack takes GitHub
 /// longer; its pushes are taken whenever they come.
 pub const RESTACK_GRACE_SECS: u64 = 300;
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 
 pub struct Env<'a> {
     pub forge: &'a dyn Forge,
@@ -147,6 +142,8 @@ pub struct Work<'q, 'h> {
     /// Stacked sets the last replay left with nothing of their own; see
     /// `fold_into_below`.
     emptied: BTreeSet<u32>,
+    /// Commits this session already holds a ref to; see `keep`.
+    kept: RefCell<BTreeSet<String>>,
     _lock: QueueLock,
 }
 
@@ -185,9 +182,13 @@ impl<'q, 'h> Work<'q, 'h> {
             handler,
             conflict_tried: false,
             emptied: BTreeSet::new(),
+            kept: RefCell::default(),
             _lock: lock,
         };
         work.settle_pending_pushes()?;
+        for set in work.st.sets.values_mut().filter(|s| s.is_open() && s.change.is_none()) {
+            set.changed(ChangeBy::Found, Vec::new());
+        }
         Ok(Some(work))
     }
 
@@ -215,7 +216,37 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     pub fn save(&self) -> Result<()> {
+        self.keep();
         self.q.write_state(&self.st)
+    }
+
+    /// Hold a ref to every open set's change and to where it now sits. A
+    /// replay leaves the commits it replaces on no branch, and git would
+    /// in time delete what the queue's record of the set still names.
+    /// Never an error: the record must not hold up the queue.
+    fn keep(&self) {
+        let mut kept = self.kept.borrow_mut();
+        let mut by_repo: BTreeMap<&str, Vec<(u32, &str)>> = BTreeMap::new();
+        for set in self.st.sets.values().filter(|s| s.is_open()) {
+            for sha in [Some(set.tip.as_str()), set.change.as_ref().map(|c| c.tip.as_str())].into_iter().flatten() {
+                let held = by_repo.entry(set.repo()).or_default();
+                if !kept.contains(sha) && !held.contains(&(set.n, sha)) {
+                    held.push((set.n, sha));
+                }
+            }
+        }
+        for (repo, shas) in by_repo {
+            let refs: Vec<(String, &str)> = shas.iter().map(|(n, sha)| (format!("refs/choros/kept/{n}/{sha}"), *sha)).collect();
+            let git = self.git(repo);
+            // One commit git no longer has refuses the lot; the rest are
+            // still worth holding.
+            if git.update_refs(&refs).is_err() {
+                for one in &refs {
+                    let _ = git.update_refs(std::slice::from_ref(one));
+                }
+            }
+            kept.extend(shas.iter().map(|(_, sha)| sha.to_string()));
+        }
     }
 
     /// The sync clone of `repo`.
@@ -594,11 +625,21 @@ impl<'q, 'h> Work<'q, 'h> {
                 && !git.is_ancestor(&self.st.sets[&n].tip, r)?
                 && let Some((base, base_sha)) = self.rebased_by_github(n, r)?
             {
+                // A push that reached the branch after GitHub's rebase and
+                // before this pass comes in with it.
+                let moved_only = match &self.st.sets[&n].change {
+                    Some(c) => git.replay_tree(&c.base, &c.tip, &base_sha)?.as_deref() == Some(git.tree(r)?.as_str()),
+                    None => true,
+                };
+                let who = if moved_only { Vec::new() } else { git.authors(r, &[&base_sha])? };
                 let set = self.st.sets.get_mut(&n).unwrap();
                 set.base = base;
                 set.base_sha = base_sha;
                 set.tip = r.clone();
                 set.remote = Some(r.clone());
+                if !moved_only {
+                    set.changed(ChangeBy::Pushed, who);
+                }
                 if set.park.as_ref().is_some_and(|p| p.op == ParkOp::Diverged) {
                     set.park = None;
                 }
@@ -615,11 +656,13 @@ impl<'q, 'h> Work<'q, 'h> {
                 && let Some(r) = &remote
                 && let Some(base) = self.merged_from_below(n, r)?
             {
+                let who = git.authors(r, &[&self.st.sets[&n].tip, &base.deps[0].1])?;
                 let set = self.st.sets.get_mut(&n).unwrap();
                 set.base_sha = base.deps[0].1.clone();
                 set.base = base;
                 set.tip = r.clone();
                 set.remote = Some(r.clone());
+                set.changed(ChangeBy::MergedBelow, who);
                 // Merging the set below by hand is also how someone settles
                 // a conflict with it.
                 if set
@@ -632,6 +675,7 @@ impl<'q, 'h> Work<'q, 'h> {
                 report.adopted.push(n);
                 continue;
             }
+            let main = self.main_sha(self.st.sets[&n].repo())?;
             let set = self.st.sets.get_mut(&n).unwrap();
             match remote {
                 None => set.remote = None,
@@ -655,8 +699,10 @@ impl<'q, 'h> Work<'q, 'h> {
                             Some(p) if p.op == ParkOp::MainIntoPublic => git.is_ancestor(&p.on, &r)?,
                             _ => false,
                         };
+                        let who = git.authors(&r, &[&set.tip, &main])?;
                         set.tip = r.clone();
                         set.remote = Some(r);
+                        set.changed(ChangeBy::Pushed, who);
                         if resolved {
                             set.park = None;
                         }
@@ -1537,9 +1583,11 @@ impl<'q, 'h> Work<'q, 'h> {
                 set.branch(&self.q.name)
             ));
         }
+        let who = git.authors(&on, &[&set.base_sha])?;
         set.tip = on.clone();
         set.remote = Some(on);
         set.park = None;
+        set.changed(ChangeBy::Rewritten, who);
         Ok(())
     }
 

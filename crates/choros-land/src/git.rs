@@ -135,6 +135,36 @@ impl Git {
         Ok(vec![self.run(&["commit-tree", &tree, "-p", &from, "-m", message])?])
     }
 
+    /// Who wrote the commits `tip` has and none of `not` do, each named once.
+    pub fn authors(&self, tip: &str, not: &[&str]) -> Result<Vec<String>> {
+        let not: Vec<String> = not.iter().map(|n| format!("^{n}")).collect();
+        let mut args = vec!["log", "--format=%an", tip];
+        args.extend(not.iter().map(String::as_str));
+        let out = self.run(&args)?;
+        let names: std::collections::BTreeSet<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        Ok(names.into_iter().map(str::to_string).collect())
+    }
+
+    /// Point each ref at its commit, in one git process.
+    pub fn update_refs(&self, refs: &[(String, &str)]) -> Result<()> {
+        use std::io::Write;
+        if refs.is_empty() {
+            return Ok(());
+        }
+        let args = ["update-ref", "--stdin"];
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let lines: String = refs.iter().map(|(name, sha)| format!("update {name} {sha}\n")).collect();
+        child.stdin.take().unwrap().write_all(lines.as_bytes())?;
+        let out = child.wait_with_output()?;
+        self.finish(&args, out).map(|_| ())
+    }
+
     pub fn has_merges(&self, base: &str, tip: &str) -> Result<bool> {
         let out = self.run(&["rev-list", "--merges", &format!("{base}..{tip}")])?;
         Ok(!out.is_empty())
@@ -226,6 +256,10 @@ impl Git {
         // Kept even when empty so the pick never stops on one; the caller
         // decides what an empty result means.
         self.step(&["cherry-pick", "--allow-empty", "--keep-redundant-commits", sha])
+    }
+
+    pub fn tree(&self, rev: &str) -> Result<String> {
+        self.run(&["rev-parse", &format!("{rev}^{{tree}}")])
     }
 
     /// Whether `rev` changes nothing: its tree is its parent's.
