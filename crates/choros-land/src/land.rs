@@ -129,7 +129,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         }
     }
 
-    let hooked = crate::hook::before(&trunk, &ws, req)?;
+    let hooked = crate::hook::before(&ws, req)?;
     let req = hooked.as_ref().unwrap_or(req);
 
     if req.body.is_none() && req.env_session.as_ref().is_some_and(|s| !s.is_empty()) {
@@ -156,7 +156,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         return Err(eyre!("nothing to land: no repo in scope has commits past its last landing"));
     }
     // Before the workspace is archived out from under where it runs.
-    if let Some(warning) = crate::hook::after(&trunk, &ws, req, &landed) {
+    if let Some(warning) = crate::hook::after(&ws, req, &landed) {
         landed[0].warnings.push(warning);
     }
 

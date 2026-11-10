@@ -27,6 +27,10 @@ pub struct WorkspaceLanding {
     /// Instant mode's route to main for this workspace, overriding the trunk's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instant: Option<crate::instant::Via>,
+    /// A command each land from this workspace runs before and after; see
+    /// [`crate::hook`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land_hook: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

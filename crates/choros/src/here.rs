@@ -50,6 +50,9 @@ pub fn run() -> Result<()> {
                 None => println!("here: {what}"),
             }
             println!("trunk: {}", trunk.display());
+            if let Some(hook) = workspace::read(ws)?.land_hook {
+                println!("each land from here runs the hook `{hook}`");
+            }
             let repos = match inside {
                 Some(repo) => {
                     println!("a land from here lands {repo}:");
@@ -106,6 +109,39 @@ pub fn run() -> Result<()> {
     } else {
         println!("repo settings: none yet; they go in {} (`choros help agent` shows how)", settings.display());
     }
+    Ok(())
+}
+
+/// What kind of folder this is, for a tool deciding what to do in it.
+pub fn run_json() -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Here {
+        /// `trunk`, `branch-space`, `workspace`, `landing` (a set's landing
+        /// folder) or `config` (inside choros's own files).
+        kind: &'static str,
+        trunk: std::path::PathBuf,
+        workspace: Option<std::path::PathBuf>,
+        land_hook: Option<String>,
+    }
+    let cwd = std::env::current_dir()?;
+    let trunk = space::find_trunk(&cwd)
+        .ok_or_else(|| eyre!("not under a choros trunk (no .choros-config above here)"))?;
+    let ws = choros::find_workspace(&cwd).ok().map(|(_, ws)| ws).filter(|ws| ws.starts_with(&trunk));
+    let landing = ws.as_deref().map(workspace::read).transpose()?;
+    let kind = match (space::find_space(&cwd), &landing) {
+        (None, _) => "config",
+        (_, Some(l)) if l.landing.is_some() => "landing",
+        (_, Some(_)) => "workspace",
+        (Some(space), None) if space::is_branch_space(&space) => "branch-space",
+        (Some(_), None) => "trunk",
+    };
+    let here = Here {
+        kind,
+        trunk,
+        land_hook: landing.and_then(|l| l.land_hook),
+        workspace: ws,
+    };
+    println!("{}", serde_json::to_string(&here)?);
     Ok(())
 }
 

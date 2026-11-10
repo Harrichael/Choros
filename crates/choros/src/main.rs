@@ -60,10 +60,15 @@ fn run() -> Result<()> {
         Some("status") => land_cli::run_status(rest),
         Some("queue") => land_cli::run_queue(rest),
         Some("landing") => land_cli::run_landing(rest),
-        Some("here") => {
-            reject_extra_args("here", &rest);
-            here::run()
-        }
+        Some("hook") => land_cli::run_hook(rest),
+        Some("here") => match rest.as_slice() {
+            [] => here::run(),
+            [json] if json == "--json" => here::run_json(),
+            _ => {
+                eprintln!("usage: choros here [--json]");
+                std::process::exit(2);
+            }
+        },
         Some("help") => match rest.as_slice() {
             [] => {
                 cli::print_usage();

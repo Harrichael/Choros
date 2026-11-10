@@ -97,6 +97,9 @@ INSIDE A WORKSPACE
     choros repo bind REPO QUEUE|none
                                     land REPO into QUEUE (none: straight to main), whatever queue
                                     is scoped to the workspace
+    choros hook [land COMMAND|none] show, set or drop the workspace's land hook: a command each
+                                    land from it runs as `COMMAND before`, when it may change
+                                    what the land carries or refuse it, and `COMMAND after`
     choros land continue|archive    land this repo (or, at the workspace root, each repo as its own
                                     set) into its queue, or straight to main when it has none; `archive` then
                                     archives the workspace. It lands on only what the commits
@@ -150,8 +153,9 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
                                     with `choros repo sync`
 
 AGENTS
-    choros here                     what this folder is, where a land from it goes, whether each
-                                    repo has a check, and where queue state lives
+    choros here [--json]            what this folder is, where a land from it goes, whether each
+                                    repo has a check, and where queue state lives; --json gives
+                                    tools the kind of folder, its trunk, workspace and land hook
     choros help agent               for an agent: making workspaces, landing and its flags,
                                     the check, and changing a landed set
     choros agent ls                 resumable claude / cursor sessions under the current directory

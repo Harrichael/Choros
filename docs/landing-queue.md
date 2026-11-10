@@ -293,13 +293,15 @@ commit, PR, labels and sessions: the only record of it other tools can read.
 
 ### The land hook
 
-A trunk can name a command that every land runs, so that whatever tracks
-the work can follow it. Choros still gives labels no meaning: the hook does.
+A workspace can name a command that every land from it runs, so that
+whatever tracks the work it is for can follow along. Choros still gives
+labels no meaning: the hook does.
 
-```toml
-# <trunk>/.choros-config/hooks.toml
-land = "tracker land-hook"   # run as `tracker land-hook before`, then `… after`
 ```
+choros hook land "tracker land-hook --task 12"   # in the workspace; `none` drops it
+```
+
+It is run as `tracker land-hook --task 12 before`, then `… after`.
 
 **Before** anything lands, it reads the land as JSON on stdin: `mode`
 (`continue` or `archive`), `labels`, `priority` (`p0`…`p4` or null), `title`,
@@ -315,9 +317,9 @@ reads the same JSON as the land went ahead with, plus `landed`: each set's
 `repo`, `queue` and `n` (the last two null for a land straight to main). The
 land stands whatever it does; a failure is shown as a warning.
 
-It runs where `land` was run, with its stderr on the terminal. A
-`hooks.toml` that can't be read refuses the land rather than skipping the
-hook.
+It runs where `land` was run, with its stderr on the terminal. A workspace
+with no hook lands as it always did, and a set's landing folder never has
+one.
 
 ## Diffbase
 

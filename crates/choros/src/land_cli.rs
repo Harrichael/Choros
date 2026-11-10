@@ -939,6 +939,32 @@ fn print_set(trunk: &Path, queue: &str, n: u32) -> Result<()> {
     Ok(())
 }
 
+/// `choros hook`: the workspace's land hook, shown or set.
+pub fn run_hook(args: Vec<String>) -> Result<()> {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (_, ws) = choros::find_workspace(&std::env::current_dir()?)?;
+    let mut landing = choros_land::workspace::read(&ws)?;
+    match a.as_slice() {
+        [] => match &landing.land_hook {
+            Some(command) => println!("land: {command}"),
+            None => println!("no land hook"),
+        },
+        ["land", _] if landing.landing.is_some() => {
+            return Err(eyre!("a landing folder isn't landed from, so it runs no land hook"));
+        }
+        ["land", command] => {
+            landing.land_hook = (*command != "none").then(|| command.to_string());
+            choros_land::workspace::write(&ws, &landing)?;
+            match &landing.land_hook {
+                Some(command) => eprintln!("each land from {} runs `{command} before`, then `{command} after`", ws.display()),
+                None => eprintln!("lands from {} run no hook", ws.display()),
+            }
+        }
+        _ => usage("choros hook [land COMMAND|none]"),
+    }
+    Ok(())
+}
+
 /// Each change made to landing-`n`, by a land or on its branch, and how
 /// often the queue has since moved it.
 fn print_log(trunk: &Path, queue: &str, n: u32) -> Result<()> {

@@ -1,10 +1,7 @@
-//! The land hook: a command the trunk names, told of each land before it
-//! is made and after, so that whatever tracks the work a land carries can
-//! follow along. `<trunk>/.choros-config/hooks.toml`:
-//!
-//! ```toml
-//! land = "tracker land-hook"   # run as `tracker land-hook before|after`
-//! ```
+//! The land hook: a command a workspace names (`choros hook land CMD`),
+//! told of each land from it before it is made and after, so that whatever
+//! tracks the work the workspace is for can follow along. It is run as
+//! `CMD before`, then `CMD after`.
 //!
 //! Before, it reads the land as JSON on stdin and may print JSON naming
 //! what to land with instead; failing, it refuses the land, and what it
@@ -28,18 +25,11 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use choros_core::choros::CONFIG_DIR;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::land::{LandRequest, Landed};
 use crate::state::LandMode;
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    land: Option<String>,
-}
 
 #[derive(Serialize)]
 struct Told<'a> {
@@ -70,19 +60,10 @@ struct Reply {
     body: Option<String>,
 }
 
-/// The trunk's land hook, if it names one. A `hooks.toml` that can't be
-/// read is an error: a hook that was meant to gate lands mustn't be
-/// skipped in silence.
-fn command(trunk: &Path) -> Result<Option<String>> {
-    let path = trunk.join(CONFIG_DIR).join("hooks.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).wrap_err_with(|| format!("reading {}", path.display())),
-    };
-    let config: Config =
-        toml::from_str(&text).wrap_err_with(|| format!("reading {}", path.display()))?;
-    Ok(config.land.filter(|c| !c.trim().is_empty()))
+fn command(ws: &Path) -> Result<Option<String>> {
+    Ok(crate::workspace::read(ws)?
+        .land_hook
+        .filter(|c| !c.trim().is_empty()))
 }
 
 fn told<'a>(req: &'a LandRequest, ws: &'a Path, landed: Option<&'a [Landed]>) -> Told<'a> {
@@ -135,8 +116,8 @@ fn run(command: &str, stage: &str, cwd: &Path, told: &Told) -> Result<String> {
 
 /// Tells the hook of a land about to be made, from `ws`. Returns the
 /// request to land with, when the hook changed it.
-pub fn before(trunk: &Path, ws: &Path, req: &LandRequest) -> Result<Option<LandRequest>> {
-    let Some(command) = command(trunk)? else {
+pub fn before(ws: &Path, req: &LandRequest) -> Result<Option<LandRequest>> {
+    let Some(command) = command(ws)? else {
         return Ok(None);
     };
     let printed =
@@ -172,8 +153,8 @@ pub fn before(trunk: &Path, ws: &Path, req: &LandRequest) -> Result<Option<LandR
 
 /// Tells the hook what landed. The land stands whatever it does, so its
 /// failure comes back as a warning to show.
-pub fn after(trunk: &Path, ws: &Path, req: &LandRequest, landed: &[Landed]) -> Option<String> {
-    let command = command(trunk).ok().flatten()?;
+pub fn after(ws: &Path, req: &LandRequest, landed: &[Landed]) -> Option<String> {
+    let command = command(ws).ok().flatten()?;
     run(&command, "after", &req.cwd, &told(req, ws, Some(landed)))
         .err()
         .map(|e| format!("{e}: the work landed, but what the hook keeps may not have followed"))

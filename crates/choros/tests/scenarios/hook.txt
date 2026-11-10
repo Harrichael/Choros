@@ -1,9 +1,8 @@
-# A trunk can name a land hook in `.choros-config/hooks.toml`. Each land
-# runs it before, when it can change what the land carries or refuse it,
-# and after, when it is told what landed.
+# A workspace can name a land hook. Each land from it runs it before, when
+# it can change what the land carries or refuse it, and after, when it is
+# told what landed.
 
 $ printf '%s\n' 'in=$(cat)' 'echo "hook $1: $in" >&2' 'case "$1 $in" in' '  before*archive*) echo "the tracker says: not finished" >&2; exit 1;;' '  before*) echo "{\"labels\": [\"tasks/a\", \"tasks/b\"], \"priority\": \"p2\"}";;' 'esac' > hook.sh
-$ printf 'land = "sh %s/hook.sh"\n' "$PWD" > .choros-config/hooks.toml
 $ choros work one app
 $ROOT/trunk/one/app
 mkdir $ROOT/trunk/one
@@ -12,6 +11,12 @@ copying agent templates…
 $ cd trunk/one/app
 $ choros repo bind app appq
 app now lands into appq
+$ choros hook land "sh $PWD/../../hook.sh"
+each land from $ROOT/trunk/one runs `sh $ROOT/trunk/one/app/../../hook.sh before`, then `sh $ROOT/trunk/one/app/../../hook.sh after`
+$ choros hook
+land: sh $ROOT/trunk/one/app/../../hook.sh
+$ choros here --json
+{"kind":"workspace","trunk":"$ROOT/trunk","workspace":"$ROOT/trunk/one","land_hook":"sh $ROOT/trunk/one/app/../../hook.sh"}
 $ echo a > a.txt && git add a.txt && git commit -qm "write a"
 $ choros land continue --label tasks/a --title "Write a"
 hook before: {"mode":"continue","labels":["tasks/a"],"priority":null,"title":"Write a","body":null,"session":null,"workspace":"$ROOT/trunk/one"}
@@ -33,7 +38,7 @@ $ choros land archive
 hook before: {"mode":"archive","labels":[],"priority":null,"title":null,"body":null,"session":null,"workspace":"$ROOT/trunk/one"}
 the tracker says: not finished
 choros: nothing landed
-  because: the land hook `sh $ROOT/trunk/hook.sh before` failed
+  because: the land hook `sh $ROOT/trunk/one/app/../../hook.sh before` failed
 [exit 1]
 $ choros status
 appq (app) @ $ROOT/trunk
@@ -46,4 +51,7 @@ $ choros land continue
 app → appq/landing-2, queued
     landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
     appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
-    warning: the land hook `sh $ROOT/trunk/hook.sh after` failed: the work landed, but what the hook keeps may not have followed
+    warning: the land hook `sh $ROOT/trunk/one/app/../../hook.sh after` failed: the work landed, but what the hook keeps may not have followed
+$ cd trunk
+$ choros here --json
+{"kind":"trunk","trunk":"$ROOT/trunk","workspace":null,"land_hook":null}
