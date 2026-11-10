@@ -113,7 +113,7 @@ fn the_cap_holds_back_stacking_not_the_front() {
     for name in ["a", "b", "c"] {
         let ws = v.workspace(name);
         v.commit(&ws, &format!("{name}.txt"), "x\n");
-        v.land_with(&ws, Some(vec![]), None, None).unwrap();
+        v.land_with(&ws, Some(vec![]), None).unwrap();
     }
     assert!(v.state().sets.values().all(|s| s.pr.is_some()), "front PRs open past the cap");
 }
@@ -136,11 +136,11 @@ fn the_longest_line_continues_the_stack() {
     config.stack.enabled = false;
     crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
     w.commit(&short, "b.txt", "b\n");
-    w.land_with(&short, Some(vec![Dep::Set(1)]), None, None).unwrap();
+    w.land_with(&short, Some(vec![Dep::Set(1)]), None).unwrap();
     w.commit(&long, "c.txt", "c\n");
-    w.land_with(&long, Some(vec![Dep::Set(1)]), None, None).unwrap();
+    w.land_with(&long, Some(vec![Dep::Set(1)]), None).unwrap();
     w.commit(&long, "d.txt", "d\n");
-    w.land_with(&long, Some(vec![Dep::Set(3)]), None, None).unwrap();
+    w.land_with(&long, Some(vec![Dep::Set(3)]), None).unwrap();
     assert_eq!(w.state().sets[&4].deps, [Dep::Set(3)]);
     w.stack(5);
 
@@ -389,7 +389,7 @@ fn a_set_emptied_mid_stack_folds_into_the_one_below() {
     let ws = w.workspace("ws");
     for i in 1..=3 {
         w.commit(&ws, &format!("f{i}.txt"), &format!("{i}\n"));
-        let mut req = w.request(&ws, crate::land::Deps::Head, None);
+        let mut req = w.request(&ws, crate::land::Deps::Head);
         req.labels = vec![format!("task/{i}")];
         req.sessions = vec![format!("session-{i}")];
         w.land_req(&req, None).unwrap();
@@ -601,7 +601,7 @@ fn a_closed_pr_in_a_stack_holds_its_line() {
     let tip = w.origin_tip(3);
     let other = w.workspace("other");
     w.commit(&other, "g.txt", "g\n");
-    w.land_with(&other, Some(vec![Dep::Set(1)]), None, None).unwrap();
+    w.land_with(&other, Some(vec![Dep::Set(1)]), None).unwrap();
     assert!(w.state().sets[&4].pr.is_none(), "landing-2 holds the stack's next place");
 
     w.forge.close(w.pr(2));

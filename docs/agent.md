@@ -19,10 +19,6 @@ the commits since the last land. Keep working and land again as you go.
                                 sets are always kept
     --deps HEAD                 on top of everything queued in the repo
     --force                     land without running the check
-    --on-conflict depend|merge-head
-                                when a --deps land clashes with a set it
-                                left out: land behind it, or resolve
-                                beside it
     --title T, --body-file F    the PR's title and body. The body tells the
                                 reviewer what changed and why, in the repo's
                                 PR template; leave out landing-sets and

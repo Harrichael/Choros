@@ -22,7 +22,6 @@ fn landing_two_repos_makes_a_set_in_each() {
         mode: LandMode::Continue,
         deps: crate::land::Deps::Head,
         force: false,
-        on_conflict: None,
         title: None,
         body: None,
         labels: Vec::new(),
@@ -68,7 +67,6 @@ fn a_dependency_across_repos_orders_the_prs() {
         mode: LandMode::Continue,
         deps: crate::land::Deps::Head,
         force: false,
-        on_conflict: None,
         title: None,
         body: None,
         labels: Vec::new(),
@@ -78,7 +76,7 @@ fn a_dependency_across_repos_orders_the_prs() {
     };
     crate::land::land(&w.env(), &lib_req, None).unwrap();
     w.commit(&ws, "uses.txt", "uses the api\n");
-    w.land_with(&ws, Some(vec![Dep::Set(1)]), None, None).unwrap();
+    w.land_with(&ws, Some(vec![Dep::Set(1)]), None).unwrap();
 
     let st = w.state();
     assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);

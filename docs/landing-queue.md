@@ -202,12 +202,12 @@ a fork never loses commits it builds on.
    cherry-pick the landed commits onto the base. Conflicts → *Conflicts*.
    A clean cherry-pick that changes less than the commits did (they remove
    lines a set left out of `--deps` added) refuses the land, naming the set.
-3. **Test-merge into the merge head before anything is public.** If the fork
-   conflicts with what is queued, ask (TTY) or require
-   `--on-conflict=merge-head|depend`: resolve in the merge head only (the pair
-   is flagged), or make this fork depend on the sets it conflicts with.
+3. **Test-merge into the merge head before anything is public.** A set the
+   fork clashes with was left out of `--deps`, but the two can't both be at
+   the front (*Plain land*, step 3): the fork goes behind it too, and the
+   replay runs again on top of it.
 4. Check the tip (*The check*): a failure refuses the land, naming no sets to
-   add — they were picked.
+   add: beyond a set it clashes with, they were picked.
 5. Push, record, rebuild the merge head. `landed_through = HEAD`; `base` is
    unchanged (the workspace still sits on the merge head).
 
@@ -500,13 +500,15 @@ resolve <queue>` asks about, every time:
 Without a TTY (from inside a Claude session), `resolve` takes `--agent=trust`
 or prints the parked operation and exits non-zero.
 
-**Sets that clash side by side** never both sit at the front after a plain
-land: it goes behind the set it clashes with (*Plain land*). A fork, whose
-dependencies were picked, asks at land time (see *Fork land*), and may still
-go beside with `--on-conflict=merge-head`: the pair is flagged
-(`conflicts_with`) and resolved in the merge head. Once both are public, the
-only choices are resolving in the merge head or closing one PR and
-re-queueing it as a dependent.
+**Sets that clash side by side** never both sit at the front after a land:
+it goes behind the set it clashes with (*Plain land*, *Fork land*). Two sets
+at the front can still come to clash afterwards, by a commit pushed to one
+of them. The newer is then parked out of the merge head until the pair is
+resolved there, and the pair is noted on it (`conflicts_with`); once both
+are public, the only other choice is closing one PR and re-queueing it as a
+dependent. Sets landed beside a clash before that was ruled out carry the
+same note. Work landed on top of one of a pair inherits the clash and does
+not go behind the other for it: that is the pair's to settle.
 
 **A set replayed after losing its footing starts from its change.** A set's
 replay normally starts from where it sits, so what was settled to put it
@@ -801,7 +803,7 @@ drawn as `git log --graph` draws commits: each set above the sets it lands
 after, and those after nothing in the queue above main. Each set's line
 gives its number, state (queued / front / closed), PR title, repo, PR
 number and review; lines under it say what's wrong (parked and why, waiting
-on a parked or closed set, flagged conflicting forks, a dirty landing
+on a parked or closed set, a set it is known to clash with, a dirty landing
 folder) or name a set in another queue it waits for. Merged sets are
 counted, not drawn. Then come the diffbase and the workspaces that need a
 sync; `--landing` leaves those out, as does `choros queue NAME --landing`,
@@ -920,9 +922,11 @@ Where the build departs from the plan above, and why:
   back that set only.
 - **A merge commit pushed onto a private set parks it** (`pushed-merge`); its
   commits could no longer be replayed one by one.
-- **A clash in the merge head parks one set, not the queue.** The leaf that
-  was knowingly landed beside the other's work (else the newer) is parked out
-  of the merge head with what builds on it; everyone else keeps landing. It is
+- **A clash in the merge head parks one set, not the queue.** The leaf
+  already known to clash with the other's work (else the newer) is parked
+  out of the merge head with what builds on it, and the pair is noted
+  (`conflicts_with`) so the same set is parked when they meet again;
+  everyone else keeps landing. It is
   retried when the merge head it would join changes, or by `choros queue
   resolve`.
 - **Opening a PR is idempotent**: an open PR for the branch is adopted rather

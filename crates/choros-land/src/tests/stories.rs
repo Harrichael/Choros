@@ -73,11 +73,11 @@ fn a_set_on_two_forks_keeps_both_when_one_squash_merges() {
     let y = w.workspace("y");
     let z = w.workspace("z");
     w.commit(&x, "x.txt", "x\n");
-    w.land_with(&x, Some(vec![]), None, None).unwrap();
+    w.land_with(&x, Some(vec![]), None).unwrap();
     w.commit(&y, "y.txt", "y\n");
-    w.land_with(&y, Some(vec![]), None, None).unwrap();
+    w.land_with(&y, Some(vec![]), None).unwrap();
     w.commit(&z, "z.txt", "z\n");
-    w.land_with(&z, Some(vec![Dep::Set(1), Dep::Set(2)]), None, None).unwrap();
+    w.land_with(&z, Some(vec![Dep::Set(1), Dep::Set(2)]), None).unwrap();
 
     let st = w.state();
     assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_some(), "forks on main are both at the front");
@@ -115,43 +115,44 @@ fn review_fixes_on_the_front_carry_into_the_set_behind() {
     assert_eq!(w.own_commits(1), 2, "the review fix is a new commit, nothing rewritten");
 }
 
-/// Two forks that edit the same line cannot sit side by side silently. With
-/// no way to ask, the land stops and says so; told to depend, the second
-/// lands behind the first instead.
+/// Two forks that edit the same line cannot both sit at the front. The
+/// second, though it picked no dependencies, lands behind the first, and
+/// what the two make of the line is settled as it lands.
 #[test]
 fn a_conflicting_fork_is_settled_before_it_goes_public() {
     let w = World::new();
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
-    w.land_with(&one, Some(vec![]), None, None).unwrap();
+    w.land_with(&one, Some(vec![]), None).unwrap();
     w.commit(&two, "README", "two\n");
 
-    let err = w.land_with(&two, Some(vec![]), None, None).unwrap_err();
-    assert!(err.to_string().contains("--on-conflict"), "{err}");
-    assert!(w.forge.pr_for("appq/landing-2").is_none());
-
-    w.land_with(&two, Some(vec![]), Some(OnConflict::Depend), Some(&mut Scripted::default()))
-        .unwrap();
+    let mut h = Scripted::default();
+    let out = w.land_with(&two, Some(vec![]), Some(&mut h)).unwrap();
+    assert_eq!(h.seen[0].files, ["README"]);
+    assert_eq!(
+        out.landed[0].notes,
+        ["on appq/landing-1, though it wasn't picked: they change the same lines (README), so it goes behind"]
+    );
     let st = w.state();
     let n = *st.sets.keys().max().unwrap();
     assert!(st.sets[&n].deps.contains(&Dep::Set(1)));
     assert!(st.sets[&n].pr.is_none(), "behind landing-1, so not public");
 }
 
-/// Two forks editing the same line, kept beside each other: the clash is
-/// resolved once, in the merge head. Returns the second fork's number.
+/// Two sets at the front that come to edit the same line: the clash is
+/// resolved once, in the merge head. Returns the second set's number.
 fn conflicting_forks_side_by_side(w: &World) -> u32 {
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
-    w.land_with(&one, Some(vec![]), None, None).unwrap();
-    w.commit(&two, "README", "two\n");
+    w.land_with(&one, Some(vec![]), None).unwrap();
+    w.clash_beside(&two, writes("README", "two\n"));
     let mut h = Scripted {
         content: [("README".to_string(), "one and two\n".to_string())].into(),
         ..Default::default()
     };
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), Some(&mut h)).unwrap();
+    w.resolve(&mut h);
     let st = w.state();
     let mh = st.repos[REPO].merge_head.as_ref().unwrap();
     assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
@@ -174,15 +175,15 @@ fn a_resolver_is_told_what_each_side_is_for() {
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
-    let mut req = w.request(&one, Deps::Picked(vec![]), None);
+    let mut req = w.request(&one, Deps::Picked(vec![]));
     req.title = Some("Say one".into());
     req.body = Some("Because one is right.".into());
     req.labels = vec!["demo/aaaa".into(), "skip/me".into()];
     w.land_req(&req, None).unwrap();
-    w.commit(&two, "README", "two\n");
+    w.clash_beside(&two, writes("README", "two\n"));
 
     let mut h = Scripted::default();
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), Some(&mut h)).unwrap();
+    w.resolve(&mut h);
 
     let prompt = &h.seen[0].prompt;
     assert!(
@@ -193,7 +194,10 @@ fn a_resolver_is_told_what_each_side_is_for() {
         "{prompt}"
     );
     assert!(!prompt.contains("skip/me"), "{prompt}");
-    assert!(prompt.contains("## appq/landing-2: write README\n\nCommits:\n- write README\n"), "{prompt}");
+    assert!(
+        prompt.contains("## appq/landing-2: write two.txt\n\nCommits:\n- write two.txt\n- pushed to the set\n"),
+        "{prompt}"
+    );
 }
 
 /// When the first of two clashing forks merges, main must be merged into the
@@ -335,7 +339,6 @@ fn concurrent_lands_serialize() {
                         mode: LandMode::Continue,
                         deps: crate::land::Deps::Head,
                         force: false,
-                        on_conflict: None,
                         title: None,
                         body: None,
                         labels: Vec::new(),
@@ -515,7 +518,7 @@ fn a_pr_body_follows_the_repos_template() {
     let ws = w.workspace("ws");
     w.commit(&ws, "a.txt", "a\n");
 
-    let mut req = w.request(&ws, crate::land::Deps::Head, None);
+    let mut req = w.request(&ws, crate::land::Deps::Head);
     req.env_session = Some("agent-session".into());
     let err = w.land_req(&req, None).unwrap_err().to_string();
     assert!(err.contains("what changed and why") && err.contains("## Purpose"), "{err}");
@@ -555,7 +558,7 @@ fn an_instant_pr_merged_after_its_land_is_logged_without_another_land() {
     *w.forge.refuse_merges.lock().unwrap() = true;
     for (ws, file, task) in [(&kept, "a.txt", "tasks/a"), (&shelved, "b.txt", "tasks/b")] {
         w.commit(ws, file, "x\n");
-        let mut req = w.request(ws, crate::land::Deps::Head, None);
+        let mut req = w.request(ws, crate::land::Deps::Head);
         req.labels = vec![task.into()];
         assert!(w.land_req(&req, None).is_err());
     }
@@ -748,7 +751,7 @@ fn a_set_depends_only_on_what_it_sits_directly_on() {
     assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
 
     w.commit(&other, "d.txt", "d\n");
-    w.land_with(&other, Some(vec![Dep::Set(1), Dep::Set(2)]), None, None).unwrap();
+    w.land_with(&other, Some(vec![Dep::Set(1), Dep::Set(2)]), None).unwrap();
     assert_eq!(w.state().sets[&4].deps, [Dep::Set(2)]);
 }
 

@@ -217,7 +217,7 @@ fn a_failing_check_refuses_the_land_short_of_force() {
     let log = w.trunk.join(".choros-config/queues/appq/check-app.log");
 
     for (deps, on) in [(Deps::Least, "on the merge head"), (Deps::Head, "on the merge head"), (Deps::Picked(vec![]), "on main")] {
-        let err = w.land_req(&w.request(&one, deps, None), None).unwrap_err().to_string();
+        let err = w.land_req(&w.request(&one, deps), None).unwrap_err().to_string();
         assert_eq!(
             err,
             format!(
@@ -230,7 +230,7 @@ fn a_failing_check_refuses_the_land_short_of_force() {
         assert!(w.state().sets.is_empty());
     }
 
-    let mut req = w.request(&one, Deps::Least, None);
+    let mut req = w.request(&one, Deps::Least);
     req.force = true;
     w.land_req(&req, None).unwrap();
     assert_eq!(w.state().sets.len(), 1);
@@ -249,7 +249,7 @@ fn a_queued_repo_needs_a_check() {
     assert!(err.starts_with("app has no check to land with"), "{err}");
     assert!(w.state().sets.is_empty());
 
-    let mut req = w.request(&one, Deps::Least, None);
+    let mut req = w.request(&one, Deps::Least);
     req.force = true;
     w.land_req(&req, None).unwrap();
     assert_eq!(w.state().sets.len(), 1);
@@ -283,16 +283,15 @@ fn a_land_goes_on_its_own_parked_set() {
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
     w.land_plain(&one).unwrap();
-    w.commit(&two, "README", "two\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    w.clash_beside(&two, writes("README", "two\n"));
     assert!(w.state().sets[&2].park.is_some());
-    w.commit(&two, "README", "two, more\n");
+    w.commit(&two, "two.txt", "its own, and more\n");
 
     w.land_plain(&two).unwrap();
 
     let st = w.state();
     assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
-    assert_eq!(w.file_at(&st.sets[&3].tip, "README").as_deref(), Some("two, more\n"));
+    assert_eq!(w.file_at(&st.sets[&3].tip, "two.txt").as_deref(), Some("its own, and more\n"));
 }
 
 /// Going behind a set for its lines pulls in nothing else: another set that
@@ -379,7 +378,7 @@ fn the_more_urgent_of_two_that_meet_in_their_lines_goes_first() {
 
     let req = LandRequest {
         priority: Some(0),
-        ..w.request(&urgent, Deps::Least, None)
+        ..w.request(&urgent, Deps::Least)
     };
     w.land_req(&req, None).unwrap();
     w.pass();
@@ -416,7 +415,7 @@ fn an_urgent_land_goes_ahead_of_a_whole_line_and_behind_the_pr_under_it() {
 
     let req = LandRequest {
         priority: Some(0),
-        ..w.request(&urgent, Deps::Least, None)
+        ..w.request(&urgent, Deps::Least)
     };
     w.land_req(&req, None).unwrap();
     w.pass();
@@ -448,7 +447,7 @@ fn a_land_that_needs_the_set_it_would_go_ahead_of_goes_behind_it() {
     w.land_plain(&y).unwrap();
     w.commit(&m, "NOTES", "m\n2\n");
     w.commit(&m, "a.txt", "a\n");
-    w.land_req(&w.request(&m, Deps::Picked(vec![Dep::Set(1)]), None), None).unwrap();
+    w.land_req(&w.request(&m, Deps::Picked(vec![Dep::Set(1)])), None).unwrap();
     w.commit(&other, "d.txt", "d\n");
     w.land_plain(&other).unwrap();
     w.commit(&urgent, "NOTES", "urgent\n2\n");
@@ -456,7 +455,7 @@ fn a_land_that_needs_the_set_it_would_go_ahead_of_goes_behind_it() {
 
     let req = LandRequest {
         priority: Some(0),
-        ..w.request(&urgent, Deps::Least, None)
+        ..w.request(&urgent, Deps::Least)
     };
     w.land_req(&req, None).unwrap();
 

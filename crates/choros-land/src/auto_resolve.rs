@@ -17,7 +17,7 @@ use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::engine::{Conflict, ConflictHandler, Handled, OnConflict};
+use crate::engine::{Conflict, ConflictHandler, Handled};
 use crate::git::Git;
 use crate::mend::By;
 use crate::queue::Queue;
@@ -175,11 +175,6 @@ impl ConflictHandler for AutoResolve {
     fn resolve(&mut self, c: &Conflict) -> Result<Handled> {
         let q = Queue::open(&self.trunk, &self.queue)?;
         self.try_resolve(&q, c)
-    }
-
-    /// The daemon never lands, so it is never asked.
-    fn fork_conflict(&mut self, _fork: u32, _with: &[u32]) -> Result<Option<OnConflict>> {
-        Ok(None)
     }
 
     /// A parked conflict already had its try; it waits for what's under it

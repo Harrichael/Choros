@@ -277,6 +277,18 @@ pub fn splice_out(state: &mut QueueState, n: u32) {
     for m in ids {
         let set = state.sets.get_mut(&m).unwrap();
         set.lines_only.retain(|d| *d != n);
+        // A clash with what `n` sat on stays known: its lines may be theirs.
+        if set.conflicts_with.contains(&n) {
+            set.conflicts_with.retain(|d| *d != n);
+            for d in &inherited {
+                if let Dep::Set(d) = d
+                    && !set.conflicts_with.contains(d)
+                    && *d != m
+                {
+                    set.conflicts_with.push(*d);
+                }
+            }
+        }
         if set.deps.contains(&Dep::Set(n)) {
             set.deps.retain(|d| *d != Dep::Set(n));
             for d in &inherited {

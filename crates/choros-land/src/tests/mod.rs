@@ -22,7 +22,7 @@ use std::sync::{Mutex, Once};
 use color_eyre::eyre::{Result, eyre};
 
 use crate::agent::{Agent, AgentSlot, ConflictBrief};
-use crate::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
+use crate::engine::{Conflict, ConflictHandler, Env, Handled, PassReport};
 use crate::forge::{Forge, MergeMethod, PrRequest, PrReview, PrState, RepoSettings, Stack};
 use crate::land::{Deps, LandOutcome, LandRequest};
 use crate::queue::Queue;
@@ -46,6 +46,11 @@ fn isolate_git() {
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         }
     });
+}
+
+/// A change that writes one file, for `push_onto` and `clash_beside`.
+pub fn writes<'a>(file: &'a str, content: &'a str) -> impl FnOnce(&Path) + 'a {
+    move |dir| std::fs::write(dir.join(file), content).unwrap()
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
@@ -457,7 +462,6 @@ impl Agent for FakeAgent {
 #[derive(Default)]
 pub struct Scripted {
     pub content: BTreeMap<String, String>,
-    pub fork: Option<OnConflict>,
     pub seen: Vec<SeenConflict>,
 }
 
@@ -481,10 +485,6 @@ impl ConflictHandler for Scripted {
             prompt: crate::agent::conflict_prompt(&c.brief()),
         });
         Ok(Handled::Resolved { session: None, by: crate::mend::By::Hand })
-    }
-
-    fn fork_conflict(&mut self, _fork: u32, _with: &[u32]) -> Result<Option<OnConflict>> {
-        Ok(self.fork)
     }
 }
 
@@ -609,21 +609,20 @@ impl World {
     /// `choros land continue --deps HEAD`: on everything queued, which most
     /// stories about the queue's own workings build on.
     pub fn land_on_head(&self, ws: &Path) -> Result<LandOutcome> {
-        self.land_with(ws, None, None, None)
+        self.land_with(ws, None, None)
     }
 
     /// `choros land continue`: on as little as the commits need.
     pub fn land_plain(&self, ws: &Path) -> Result<LandOutcome> {
-        self.land_req(&self.request(ws, Deps::Least, None), None)
+        self.land_req(&self.request(ws, Deps::Least), None)
     }
 
-    pub fn request(&self, ws: &Path, deps: Deps, on_conflict: Option<OnConflict>) -> LandRequest {
+    pub fn request(&self, ws: &Path, deps: Deps) -> LandRequest {
         LandRequest {
             cwd: ws.join(REPO),
             mode: LandMode::Continue,
             deps,
             force: false,
-            on_conflict,
             title: None,
             body: None,
             labels: Vec::new(),
@@ -668,14 +667,36 @@ impl World {
         self.check();
     }
 
-    pub fn land_with(
-        &self,
-        ws: &Path,
-        fork: Option<Vec<Dep>>,
-        on_conflict: Option<OnConflict>,
-        handler: Option<&mut Scripted>,
-    ) -> Result<LandOutcome> {
-        self.land_req(&self.request(ws, fork.map_or(Deps::Head, Deps::Picked), on_conflict), handler)
+    pub fn land_with(&self, ws: &Path, fork: Option<Vec<Dep>>, handler: Option<&mut Scripted>) -> Result<LandOutcome> {
+        self.land_req(&self.request(ws, fork.map_or(Deps::Head, Deps::Picked)), handler)
+    }
+
+    /// Someone else's commit pushed onto landing-`n`'s branch: `change`
+    /// edits a clone of it, and whatever it leaves is committed.
+    pub fn push_onto(&self, n: u32, change: impl FnOnce(&Path)) {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("w");
+        let branch = format!("{QUEUE}/landing-{n}");
+        git(tmp.path(), &["clone", "--quiet", "--branch", &branch, self.origin.to_str().unwrap(), "w"]);
+        change(&work);
+        git(&work, &["add", "--all"]);
+        git(&work, &["commit", "--quiet", "-m", "pushed to the set"]);
+        git(&work, &["push", "--quiet", "origin", &branch]);
+    }
+
+    /// A set at the front beside the others that clashes with one of them.
+    /// No land leaves two so: this one lands a file of its own, and the
+    /// clash comes after, in a commit pushed to its branch. With no one to
+    /// settle the pair, the pass that sees it parks the set out of the
+    /// merge head. Returns the set.
+    pub fn clash_beside(&self, ws: &Path, change: impl FnOnce(&Path)) -> u32 {
+        let own = format!("{}.txt", ws.file_name().unwrap().to_str().unwrap());
+        self.commit(ws, &own, "its own\n");
+        self.land_with(ws, Some(vec![]), None).unwrap();
+        let n = *self.state().sets.keys().max().unwrap();
+        self.push_onto(n, change);
+        self.pass();
+        n
     }
 
     /// `choros queue drop`.

@@ -65,7 +65,6 @@ fn land_archive_retires_the_workspace_it_ran_in() {
         mode: LandMode::Archive,
         deps: crate::land::Deps::Head,
         force: false,
-        on_conflict: None,
         title: None,
         body: None,
         labels: Vec::new(),

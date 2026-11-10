@@ -3,21 +3,15 @@
 
 use super::*;
 
-/// Two forks editing the same line, landed beside each other with no one
-/// to resolve the clash: the second is parked out of the merge head.
+/// Two sets at the front that come to edit the same line, with no one to
+/// resolve the clash: the second is parked out of the merge head.
 fn clash(w: &World) -> u32 {
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
-    w.land_with(&one, Some(vec![]), None, None).unwrap();
-    w.commit(&two, "README", "two\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None)
-        .unwrap();
-    let n = *w.state().sets.keys().max().unwrap();
-    assert!(
-        w.state().sets[&n].park.is_some(),
-        "no one at the land to resolve it"
-    );
+    w.land_with(&one, Some(vec![]), None).unwrap();
+    let n = w.clash_beside(&two, writes("README", "two\n"));
+    assert!(w.state().sets[&n].park.is_some(), "no one there to resolve it");
     n
 }
 
@@ -134,11 +128,8 @@ fn a_rebuilt_merge_head_keeps_a_fix_from_earlier_in_the_pass() {
     w.commit(&one, "a.txt", "edited\n");
     w.commit(&one, "README", "one\n");
     w.land_plain(&one).unwrap();
-    git(&two.join(REPO), &["rm", "--quiet", "a.txt"]);
-    git(&two.join(REPO), &["commit", "--quiet", "-m", "remove a.txt"]);
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
-    w.commit(&three, "README", "three\n");
-    w.land_with(&three, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    w.clash_beside(&two, |dir| std::fs::remove_file(dir.join("a.txt")).unwrap());
+    w.clash_beside(&three, writes("README", "three\n"));
 
     // Settles a.txt, which the check passes; the same fix in README fails it.
     *w.agent.fix.lock().unwrap() = Some("fixed\n".into());

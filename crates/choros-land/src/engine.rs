@@ -39,9 +39,6 @@ pub trait ConflictHandler {
     /// A conflict is in progress in `conflict.dir`. Leave it resolved and
     /// staged and say so, or decline (the operation is then parked).
     fn resolve(&mut self, conflict: &Conflict) -> Result<Handled>;
-    /// A fork being landed would conflict with queued sets `with` in the
-    /// merge head. `None`: no decision can be made here.
-    fn fork_conflict(&mut self, fork: u32, with: &[u32]) -> Result<Option<OnConflict>>;
     /// Whether to try parked operations again though nothing under them
     /// changed. Someone asking at a terminal, yes; the daemon, which had
     /// its try when the conflict came up, no.
@@ -94,14 +91,6 @@ pub enum Handled {
     Declined,
     /// It didn't look at it this time; the park waits for a later go.
     Deferred,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnConflict {
-    /// Keep the fork beside the others; resolve the clash in the merge head.
-    MergeHead,
-    /// Put the fork behind the sets it clashes with.
-    Depend,
 }
 
 /// What one pass did, for the daemon's log and for tests.
@@ -1085,43 +1074,51 @@ impl<'q, 'h> Work<'q, 'h> {
                     return Ok(());
                 }
                 Err((i, files)) => {
-                    let n = self.clash_culprit(repo, &composition, i)?;
-                    self.st.sets.get_mut(&n).unwrap().park = Some(Park {
+                    let (n, with) = self.clash_culprit(repo, &composition, i)?;
+                    let set = self.st.sets.get_mut(&n).unwrap();
+                    set.park = Some(Park {
                         op: ParkOp::MergeHead,
                         files,
                         on: full.clone(),
                         tried: self.conflict_tried,
                     });
+                    // So the same set is the one parked when the pair
+                    // meets again, whatever has landed on the other since.
+                    if let Some(with) = with.filter(|m| !set.conflicts_with.contains(m)) {
+                        set.conflicts_with.push(with);
+                    }
                 }
             }
         }
     }
 
     /// Leaf `i` would not merge onto the leaves before it. Of the pair that
-    /// clash, park the one that was knowingly landed beside the other's work
-    /// (it lists it, or something under it, in `conflicts_with`); failing
-    /// that, the newer one, since the older was there first.
-    fn clash_culprit(&self, repo: &str, composition: &Composition, i: usize) -> Result<u32> {
+    /// clash, the one to park, and the other: the one already known to
+    /// clash with the other's work (it lists it, or something under it, in
+    /// `conflicts_with`); failing that, the newer one, since the older was
+    /// there first.
+    fn clash_culprit(&self, repo: &str, composition: &Composition, i: usize) -> Result<(u32, Option<u32>)> {
         let git = self.git(repo);
         let (n, tip) = &composition.sets[i];
         let Some((m, _)) = composition.sets[..i]
             .iter()
             .find(|(_, t)| !git.merge_conflicts(t, tip).unwrap_or_default().is_empty())
         else {
-            return Ok(*n);
+            return Ok((*n, None));
         };
         let knows = |a: u32, b: u32| {
             let mut under = graph::ancestors(&self.st, b);
             under.insert(b);
             self.st.sets[&a].conflicts_with.iter().any(|c| under.contains(c))
         };
-        Ok(if knows(*m, *n) {
+        let parked = if knows(*m, *n) {
             *m
         } else if knows(*n, *m) {
             *n
         } else {
             (*n).max(*m)
-        })
+        };
+        Ok((parked, Some(if parked == *n { *m } else { *n })))
     }
 
     /// A merge head's contents: main and the repo's live leaves.

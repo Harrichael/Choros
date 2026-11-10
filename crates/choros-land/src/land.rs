@@ -13,7 +13,7 @@ use color_eyre::eyre::{Result, eyre};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::engine::{Handler, Env, OnConflict, Work};
+use crate::engine::{Env, Handler, Work};
 use crate::forge::{PrRequest, PrState};
 use crate::git::Git;
 use crate::graph;
@@ -30,7 +30,6 @@ pub struct LandRequest {
     pub deps: Deps,
     /// Land without running the repo's check.
     pub force: bool,
-    pub on_conflict: Option<OnConflict>,
     pub title: Option<String>,
     pub body: Option<String>,
     /// Kept on each set made, for other tools to read; choros never looks
@@ -451,7 +450,11 @@ fn land_queued(
     let mut checker = Checker::new(q, repo, check);
     let n = match &req.deps {
         Deps::Head => land_normal(env, q, ws, repo, req, &mut checker)?,
-        Deps::Picked(deps) => land_fork(env, q, ws, repo, deps, req, &mut checker, handler)?,
+        Deps::Picked(deps) => {
+            let (n, why) = land_fork(env, q, ws, repo, deps, req, &mut checker, handler)?;
+            notes = why;
+            n
+        }
         Deps::Least => match land_least(env, q, ws, repo, req, &mut checker)? {
             Least::Landed(n, why) => {
                 notes = why;
@@ -642,16 +645,16 @@ fn land_fork(
     req: &LandRequest,
     checker: &mut Checker,
     mut handler: Handler<'_>,
-) -> Result<u32> {
+) -> Result<(u32, Vec<String>)> {
     let repo_dir = ws.join(repo);
     let git = Git::new(&repo_dir);
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
     let head = git.head()?;
     let mut deps: Vec<Dep> = picked.to_vec();
-    // Asked once: a round that let the queue go for the check comes back to
-    // the same clash.
-    let mut decision = req.on_conflict;
+    // Sets left out of the picked ones that the commits clash with, and so
+    // go behind after all, with the files they clash in.
+    let mut behind: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     let mut rounds = 0;
     'round: loop {
         let mut work = Work::begin(q, env.agent, handler.as_deref_mut(), true)?.unwrap();
@@ -735,33 +738,21 @@ fn land_fork(
                 ));
             }
 
-            // Settle the fork's place before anything about it is public: check it
-            // against every other set of the merge head it would sit beside.
-            let clashes: Vec<u32> = clashes(&work.st, &sync, &live, &mine, &tip)?.into_iter().map(|(m, _)| m).collect();
+            // Settle the fork's place before anything about it is public. A
+            // set it clashes with was left out of the picked ones, but the
+            // two can't both be at the front (see `land_least`): it goes
+            // behind that set too.
+            // As in a plain land, a clash a set under the fork already has
+            // is that pair's to settle.
+            let inherited = |m: &u32| mine.iter().any(|a| work.st.sets[a].conflicts_with.contains(m));
+            let mut clashes = clashes(&work.st, &sync, &live, &mine, &tip)?;
+            clashes.retain(|(m, _)| !inherited(m));
             if !clashes.is_empty() {
-                if decision.is_none()
-                    && let Some(h) = work.handler.as_deref_mut()
-                {
-                    decision = h.fork_conflict(n, &clashes)?;
+                for (m, files) in clashes {
+                    behind.insert(m, files);
+                    deps.push(Dep::Set(m));
                 }
-                match decision {
-                    Some(OnConflict::Depend) => {
-                        deps.extend(clashes.into_iter().map(Dep::Set));
-                        continue;
-                    }
-                    Some(OnConflict::MergeHead) => {}
-                    None => {
-                        return Err(eyre!(
-                            "{what} conflicts with {} in the merge head; pass --on-conflict=depend \
-                             (land behind them) or --on-conflict=merge-head (resolve beside them)",
-                            clashes
-                                .iter()
-                                .map(|c| crate::state::branch(&q.name, *c))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                }
+                continue;
             }
 
             match checker.verdict(&sync, &tip)? {
@@ -783,18 +774,26 @@ fn land_fork(
 
             let mut set = new_set(n, graph::reduce(&work.st, &deps), spec, base, tip, ws, repo, req);
             set.landed_as(&through, &head);
-            set.conflicts_with = clashes;
+            set.lines_only = behind.keys().copied().filter(|m| set.deps.contains(&Dep::Set(*m))).collect();
             work.st.sets.insert(n, set);
             work.publish(n)?;
-            // A clash kept beside may park the merge head; `choros queue resolve`
-            // settles it, and status says so.
             work.rebuild_merge_head(repo)?;
             work.save()?;
             update_repo(ws, repo, |rl| {
                 rl.landed_through = Some(head.clone());
                 rl.fork_deps.clear();
             })?;
-            return Ok(n);
+            let notes = behind
+                .iter()
+                .map(|(m, files)| {
+                    format!(
+                        "on {}, though it wasn't picked: they change the same lines ({}), so it goes behind",
+                        crate::state::branch(&q.name, *m),
+                        files.join(", ")
+                    )
+                })
+                .collect();
+            return Ok((n, notes));
         }
     }
 }
@@ -1164,6 +1163,7 @@ fn place(
         // A clash a set under these commits already has, beside the same
         // set, is that pair's to settle; these only inherit it.
         let inherited = |m: &u32| mine.iter().any(|a| work.st.sets[a].conflicts_with.contains(m));
+
         // What the commits go ahead of, and what sits on that, will be
         // behind them: the sets under it are the ones to look at then.
         let after: BTreeSet<u32> = ahead.iter().flat_map(|a| graph::dependents(&work.st, *a)).chain(ahead.iter().copied()).collect();

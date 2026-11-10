@@ -5,19 +5,17 @@
 use super::*;
 use crate::state::MergeRule;
 
-/// Two forks that each rewrite `file`, landed beside each other with no one
-/// there to resolve the clash: the second is parked out of the merge head.
+/// Two sets at the front that come to rewrite `file` each its own way, with
+/// no one there to resolve the clash: the second is parked out of the merge
+/// head.
 fn clash(w: &World, file: &str, one: &str, two: &str) -> u32 {
     let (a, b) = (w.workspace("one"), w.workspace("two"));
     w.commit(&a, file, one);
-    w.land_with(&a, Some(vec![]), None, None).unwrap();
-    w.commit(&b, file, two);
-    w.land_with(&b, Some(vec![]), Some(OnConflict::MergeHead), None)
-        .unwrap();
-    let n = *w.state().sets.keys().max().unwrap();
+    w.land_with(&a, Some(vec![]), None).unwrap();
+    let n = w.clash_beside(&b, writes(file, two));
     assert!(
         w.state().sets[&n].park.is_some(),
-        "no one at the land to resolve it"
+        "no one there to resolve it"
     );
     n
 }
@@ -199,14 +197,14 @@ fn a_clash_of_lines_but_not_of_syntax_is_settled_by_mergiraf() {
         "stacks.json",
         "{\n  \"auth\": [\"a\"],\n  \"mail\": [\"m\", \"goose\"]\n}\n",
     );
-    w.land_with(&a, Some(vec![]), None, None).unwrap();
-    w.commit(
+    w.land_with(&a, Some(vec![]), None).unwrap();
+    w.clash_beside(
         &b,
-        "stacks.json",
-        "{\n  \"auth\": [\"a\"],\n  \"mail\": [\"m\"],\n  \"content\": [\"c\"]\n}\n",
+        writes(
+            "stacks.json",
+            "{\n  \"auth\": [\"a\"],\n  \"mail\": [\"m\"],\n  \"content\": [\"c\"]\n}\n",
+        ),
     );
-    w.land_with(&b, Some(vec![]), Some(OnConflict::MergeHead), None)
-        .unwrap();
 
     assert!(w.state().sets.values().all(|s| s.park.is_none()));
     assert_eq!(
@@ -242,12 +240,12 @@ fn regenerate_rules_make_files_again_from_both_sides() {
     w.commit(&one, "a.txt", "a1\n");
     w.commit(&one, "sum.txt", "a1\nb\n");
     w.commit(&one, "rev.txt", "b\na1\n");
-    w.land_with(&one, Some(vec![]), None, None).unwrap();
-    w.commit(&two, "b.txt", "b2\n");
-    w.commit(&two, "sum.txt", "a\nb2\n");
-    w.commit(&two, "rev.txt", "b2\na\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None)
-        .unwrap();
+    w.land_with(&one, Some(vec![]), None).unwrap();
+    w.clash_beside(&two, |dir| {
+        for (file, content) in [("b.txt", "b2\n"), ("sum.txt", "a\nb2\n"), ("rev.txt", "b2\na\n")] {
+            std::fs::write(dir.join(file), content).unwrap();
+        }
+    });
 
     assert!(w.state().sets.values().all(|s| s.park.is_none()));
     assert_eq!(

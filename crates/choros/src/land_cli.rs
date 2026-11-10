@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use choros_land::agent::{self, AgentSlot, Claude, ConflictBrief};
-use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
+use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, PassReport};
 use choros_land::forge::Gh;
 use choros_land::land::{self, Deps, LandRequest};
 use choros_land::mend::By;
@@ -74,12 +74,11 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--deps SET,…|none|HEAD | -i] [--force] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--priority pN] [--session ID]…"),
+        _ => usage("choros land continue|archive [--deps SET,…|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]… [--priority pN] [--session ID]…"),
     };
     let mut pick = false;
     let mut deps: Option<Deps> = None;
     let mut force = false;
-    let mut on_conflict = None;
     let mut title = None;
     let mut body = None;
     let mut labels: Vec<String> = Vec::new();
@@ -97,12 +96,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
             }
             "--force" => force = true,
             "--on-conflict" => {
-                on_conflict = Some(match it.next().as_deref() {
-                    Some("depend") => OnConflict::Depend,
-                    Some("merge-head") => OnConflict::MergeHead,
-                    Some(other) => return Err(eyre!("--on-conflict takes depend or merge-head, got `{other}`")),
-                    None => return Err(eyre!("--on-conflict takes depend or merge-head")),
-                })
+                return Err(eyre!("--on-conflict is gone: a land that clashes with a queued set always goes behind it"));
             }
             "--title" => title = it.next(),
             "--body-file" => {
@@ -143,7 +137,6 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         mode,
         deps,
         force,
-        on_conflict,
         title,
         body,
         labels,
@@ -1106,16 +1099,6 @@ impl ConflictHandler for Interactive {
             'c' => drive(&c.brief()).map(|s| resolved(s, By::Hand)),
             _ => Ok(Handled::Declined),
         }
-    }
-
-    fn fork_conflict(&mut self, fork: u32, with: &[u32]) -> Result<Option<OnConflict>> {
-        let with: Vec<String> = with.iter().map(|n| format!("landing-{n}")).collect();
-        eprintln!("landing-{fork} clashes with {} in the merge head.", with.join(", "));
-        Ok(match ask("  d) land behind them\n  m) stay beside them; resolve in the merge head\n  c) cancel\n> ")?.as_str() {
-            "d" => Some(OnConflict::Depend),
-            "m" => Some(OnConflict::MergeHead),
-            _ => None,
-        })
     }
 }
 

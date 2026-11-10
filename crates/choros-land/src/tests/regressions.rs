@@ -58,7 +58,6 @@ fn landing_from_a_landing_folder_is_refused() {
         mode: LandMode::Continue,
         deps: crate::land::Deps::Head,
         force: false,
-        on_conflict: None,
         title: None,
         body: None,
         labels: Vec::new(),
@@ -181,9 +180,6 @@ fn declining_a_resolution_records_no_agent_session() {
         fn resolve(&mut self, _c: &Conflict) -> Result<Handled> {
             Ok(Handled::Declined)
         }
-        fn fork_conflict(&mut self, _f: u32, _w: &[u32]) -> Result<Option<OnConflict>> {
-            Ok(None)
-        }
     }
     let w = World::new();
     let ws = w.workspace("ws");
@@ -204,11 +200,11 @@ fn a_fork_landed_behind_a_clash_without_a_terminal() {
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
-    w.land_with(&one, Some(vec![]), None, None).unwrap();
+    w.land_with(&one, Some(vec![]), None).unwrap();
     w.commit(&two, "README", "two\n");
 
     let err = w
-        .land_with(&two, Some(vec![]), Some(OnConflict::Depend), None)
+        .land_with(&two, Some(vec![]), None)
         .unwrap_err();
     assert!(err.to_string().contains("rebase --continue"), "{err}");
     let repo = two.join(REPO);
@@ -216,7 +212,7 @@ fn a_fork_landed_behind_a_clash_without_a_terminal() {
     git(&repo, &["add", "README"]);
     rebase_continue(&repo);
 
-    w.land_with(&two, Some(vec![]), Some(OnConflict::Depend), None).unwrap();
+    w.land_with(&two, Some(vec![]), None).unwrap();
     let st = w.state();
     let n = *st.sets.keys().max().unwrap();
     assert!(st.sets[&n].deps.contains(&Dep::Set(1)));
@@ -350,9 +346,10 @@ fn main_moving_alone_rewrites_no_private_set() {
     assert!(w.pass().resynced.is_empty());
 }
 
-/// A fork kept beside a clash, landed from inside a session (no one to
-/// resolve the merge head there), parks only itself; an unrelated land
-/// goes ahead on a merge head without it.
+/// A set that comes to clash with another at the front, with no one to
+/// resolve the merge head, parks only itself; an unrelated land goes ahead
+/// on a merge head without it, and is not the one parked for building on
+/// the other.
 #[test]
 fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     let w = World::new();
@@ -361,8 +358,7 @@ fn a_merge_head_clash_parks_the_fork_not_the_queue() {
     let three = w.workspace("three");
     w.commit(&one, "README", "one\n");
     w.land_on_head(&one).unwrap();
-    w.commit(&two, "README", "two\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    w.clash_beside(&two, writes("README", "two\n"));
     let st = w.state();
     let fork = *st.sets.keys().max().unwrap();
     assert_eq!(st.sets[&fork].park.as_ref().map(|p| p.op), Some(ParkOp::MergeHead));
@@ -399,10 +395,11 @@ fn a_set_parked_out_of_the_merge_head_follows_its_base() {
     w.land_on_head(&a).unwrap();
     let b = w.workspace("b");
     w.commit(&c, "README", "c\n");
-    w.land_with(&c, Some(vec![]), None, None).unwrap();
+    w.land_with(&c, Some(vec![]), None).unwrap();
     w.commit(&b, "a.txt", "a, then b\n");
-    w.commit(&b, "README", "b\n");
-    w.land_with(&b, Some(vec![Dep::Set(1)]), Some(OnConflict::MergeHead), None).unwrap();
+    w.land_with(&b, Some(vec![Dep::Set(1)]), None).unwrap();
+    w.push_onto(3, writes("README", "b\n"));
+    w.pass();
     assert_eq!(w.state().sets[&3].park.as_ref().map(|p| p.op), Some(ParkOp::MergeHead));
 
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Squash);
@@ -424,8 +421,7 @@ fn a_resolution_is_not_judged_by_the_sets_own_whitespace() {
     w.commit(&one, "README", "one\n");
     w.land_on_head(&one).unwrap();
     w.commit(&two, "schema.sql", "create table t;\n\n");
-    w.commit(&two, "README", "two\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    w.clash_beside(&two, writes("README", "two\n"));
 
     let mut h = Scripted {
         content: [("README".to_string(), "one and two\n".to_string())].into(),
@@ -447,8 +443,7 @@ fn a_resolution_with_markers_left_is_refused() {
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
     w.land_on_head(&one).unwrap();
-    w.commit(&two, "README", "two\n");
-    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
+    w.clash_beside(&two, writes("README", "two\n"));
 
     let mut h = Scripted {
         content: [("README".to_string(), "<<<<<<< HEAD\none\n=======\ntwo\n>>>>>>> two\n".to_string())].into(),
@@ -560,4 +555,21 @@ fn a_branch_mangled_on_origin_is_put_back_from_the_queues_record() {
     assert!(crate::admin::restore(&w.env(), &w.queue(), 1).is_err());
     assert_eq!(git(&w.origin, &["rev-parse", &branch]), fix);
     assert_eq!(w.state().sets[&1].tip, fix);
+}
+
+/// Work forked onto one of two sets that clash inherits the clash. It lands
+/// on the set it picked, beside the other: the clash is that pair's to
+/// settle, and nothing new is put in parallel.
+#[test]
+fn a_fork_on_one_of_a_clashing_pair_does_not_go_behind_the_other() {
+    let w = World::new();
+    let (one, two) = (w.workspace("one"), w.workspace("two"));
+    w.commit(&one, "README", "one\n");
+    w.land_on_head(&one).unwrap();
+    let parked = w.clash_beside(&two, writes("README", "two\n"));
+    w.commit(&two, "two.txt", "its own, and more\n");
+
+    w.land_with(&two, Some(vec![]), None).unwrap();
+
+    assert_eq!(w.state().sets[&3].deps, [Dep::Set(parked)]);
 }
