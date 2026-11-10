@@ -48,8 +48,10 @@ for when the check itself is what's broken.
 
 A plain land starts on main, takes in the queued sets your commits can't
 replay without, and checks the result. A set they only clash with side by
-side, it lands beside: either can merge first, and choros's resync agent
-resolves the pair; your PR opens once it has. If that fails, it looks for the set the check
+side, it lands behind, so the two PRs never conflict on GitHub; where the
+lines meet is settled by a tool when one can, and otherwise the land moves
+your workspace onto the queue and stops on the conflict for you to settle.
+If the check fails, it looks for the set the check
 needs, and lands on the fewest sets it passes with, saying which and why.
 
 The check goes in `<trunk>/.choros-config/repos.toml`; a queued repo

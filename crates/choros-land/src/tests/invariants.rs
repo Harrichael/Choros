@@ -41,7 +41,8 @@ impl World {
     }
 
     /// A landed set changes exactly what its commits changed in the
-    /// workspace, apart from files a conflict handler rewrote. A clean
+    /// workspace, apart from files a conflict handler rewrote or the queue
+    /// settled without one. A clean
     /// replay can still lose a hunk; this is where that shows.
     pub(super) fn check_landed(&self, out: &LandOutcome, before: &BTreeMap<String, Option<Lines>>, resolved: &[String]) {
         for l in &out.landed {
@@ -52,8 +53,10 @@ impl World {
             let set = &st.sets[&n];
             let sync = Git::new(&q.sync_dir(&l.repo));
             let landed = changed_lines(&sync, (&set.base_sha, &set.tip)).unwrap();
+            let made = sync.commits(&set.base_sha, &set.tip).unwrap();
+            let settled: Vec<String> = q.settled_in(&l.repo, &made).unwrap().into_iter().map(|s| s.path).collect();
             for file in before.keys().chain(landed.keys()) {
-                if resolved.contains(file) {
+                if resolved.contains(file) || settled.contains(file) {
                     continue;
                 }
                 assert_eq!(

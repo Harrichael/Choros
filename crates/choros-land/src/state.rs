@@ -461,6 +461,11 @@ pub struct LandingSet {
     /// left beside rather than behind.
     #[serde(default)]
     pub conflicts_with: Vec<u32>,
+    /// Sets among `deps` its commits replayed whole without: it went behind
+    /// them only because the two change the same lines. Whether it would
+    /// pass its check ahead of one is not known until that is tried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines_only: Vec<u32>,
     /// Written before a rewritten tip is pushed, cleared after: if the
     /// process dies in between, the next pass sees whether the push landed
     /// and either keeps the new tip or puts the old one back.
@@ -684,6 +689,20 @@ impl LandingSet {
 
     pub fn is_open(&self) -> bool {
         self.status == SetStatus::Queued
+    }
+
+    /// It landed as the commits `through..head`, as they were written:
+    /// where the land put them may already hold what was settled to put
+    /// them there.
+    pub fn landed_as(&mut self, through: &str, head: &str) {
+        self.change = Some(Change {
+            rev: 1,
+            base: through.to_string(),
+            tip: head.to_string(),
+            by: ChangeBy::Landed,
+            who: Vec::new(),
+            at: now_secs(),
+        });
     }
 
     /// The set's branch, as it stands, is a new change to it.

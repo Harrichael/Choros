@@ -300,8 +300,20 @@ impl<'q, 'h> Work<'q, 'h> {
         let git = self.git(repo);
         // rerere replayed every hunk; it only needs checking.
         if files.is_empty() && git.resolution_problems()?.is_none() {
+            let replayed = git.resolved_sides()?;
             git.conclude()?;
             self.record_resolution(repo, &files)?;
+            // Git keeps no word of who first made the fix it replayed; the
+            // queue's own record of those three versions may.
+            let made = git.head()?;
+            let mut store = Store::open(&self.q.dir())?;
+            let mut replayed_by = Vec::new();
+            for sides in &replayed {
+                let by = store.resolution(repo, sides)?.map_or(By::Rerere, |known| known.by);
+                replayed_by.push(Mended { path: sides.path.clone(), result: None, by, remembered: true });
+            }
+            let replayed: Vec<(&Sides, &Mended)> = replayed.iter().zip(&replayed_by).collect();
+            store.settle(repo, &made, &replayed)?;
             return Ok(None);
         }
         self.conflict_tried = false;
@@ -587,12 +599,29 @@ impl<'q, 'h> Work<'q, 'h> {
         Ok(below)
     }
 
+    /// The commits a replay of `n` starts from, as `from..through`. As it
+    /// now sits, by default: what was settled to put it there carries
+    /// forward while what it sits on only moves on. Once a set it sat on
+    /// is no longer under it (dropped, or put after it), that settling was
+    /// made against work that is gone, so the replay starts again from the
+    /// set's change as it was left.
+    fn to_replay(&self, n: u32) -> (String, String) {
+        let set = &self.st.sets[&n];
+        let under = graph::ancestors(&self.st, n);
+        let lost = set.base.deps.iter().any(|(d, _)| !under.contains(d));
+        match &set.change {
+            Some(c) if lost && self.set_git(n).has_object(&c.tip) => (c.base.clone(), c.tip.clone()),
+            _ => (set.base_sha.clone(), set.tip.clone()),
+        }
+    }
+
     /// Rebuild `n`'s base from `spec` and replay its own commits onto it.
     pub fn resync(&mut self, n: u32, spec: BaseSpec) -> Result<bool> {
         let set = self.st.sets[&n].clone();
         let repo = set.repo();
         let title = self.q.pr_title(&set).unwrap_or_else(|_| set.branch(&self.q.name));
-        let own = self.git(repo).replayable(&set.base_sha, &set.tip, &title)?;
+        let (from, through) = self.to_replay(n);
+        let own = self.git(repo).replayable(&from, &through, &title)?;
         let main = spec.main.clone().ok_or_else(|| eyre!("base without main"))?;
         let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
         let what = set.branch(&self.q.name);
@@ -1416,6 +1445,13 @@ impl<'q, 'h> Work<'q, 'h> {
             }
         }
         graph::splice_out(&mut self.st, n);
+        // What sat on it now sits on the set that took its work in: its
+        // footing moved, it wasn't lost (see `to_replay`).
+        for set in self.st.sets.values_mut() {
+            for (d, _) in set.base.deps.iter_mut().filter(|(d, _)| *d == n) {
+                *d = p;
+            }
+        }
         let set = self.st.sets.get_mut(&n).unwrap();
         set.status = SetStatus::Dropped;
         set.park = None;

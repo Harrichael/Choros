@@ -928,11 +928,12 @@ fn print_log(trunk: &Path, queue: &str, n: u32) -> Result<()> {
             let by = match &m.by {
                 By::Agent => "by the agent".to_string(),
                 By::Hand => "by hand".to_string(),
+                By::Rerere => "as git had it settled before".to_string(),
                 By::Union => "both sides' lines kept".to_string(),
                 By::Regenerate(command) => format!("made again by `{command}`"),
                 By::Mergiraf(tool) => format!("by {tool}"),
             };
-            let again = if m.remembered { ", as settled before" } else { "" };
+            let again = if m.remembered && m.by != By::Rerere { ", as settled before" } else { "" };
             println!("    {:<width$}  {by}{again}", m.path);
         }
     }

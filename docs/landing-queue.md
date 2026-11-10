@@ -222,12 +222,17 @@ A plain land lands on as little of the queue as the commits need:
    set added is "already done" without it, and that part would be lost. The
    skipped sets that changed those files are added.
 3. Test-merge the result against every other leaf. A set it clashes with
-   side by side isn't needed — either could merge first — so the land goes
-   beside it, flagging the pair (`conflicts_with`). Both PRs open; the new
-   set waits out of the merge head until the pair is resolved there: the
-   daemon's resync agent does that on its next pass (*Conflicts*), and
-   whichever PR merges first, the other takes main in with the same
-   resolution. To land behind it instead, pick it with `--deps`.
+   side by side isn't needed, but the two can't both be at the front:
+   whichever merged second would conflict on GitHub, and the push that
+   fixes it costs that PR its approvals. So the land goes behind it, and
+   the replay runs again on top of it. The set records that only the lines
+   put it there (`lines_only`): it doesn't build on that set, and either
+   could have gone first. That replay conflicts where the lines meet, and
+   is settled as any conflict needing no judgment is (*Conflicts*); one
+   that does need it falls back to everything queued, where the workspace
+   is moved onto the merge head for whoever wrote the commits to settle.
+   (A clash a set under these commits already has, beside the same set, is
+   that pair's to settle and isn't taken up again.)
 4. Check the result. Not conflicting isn't the same as not needing: the
    commits may call what a skipped set adds. If the check fails, search for
    what it needs. Each probe adds a whole line of skipped work — a set with
@@ -397,8 +402,8 @@ failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
 **A set's change and where it sits are kept apart.** The change is the set's
-own commits as someone last left them: by the land, or by a push to its
-branch, whoever made it (commits added are taken as part of the set; a
+own commits as someone last left them: by the land, as they were written in
+the workspace, or by a push to its branch, whoever made it (commits added are taken as part of the set; a
 rewrite parks it until accepted). Where it sits is what the queue's replays
 make of that change on its current base. `queue.db` keeps each change a set
 has had since this was first kept, and each place the queue settled it; the
@@ -471,10 +476,20 @@ resolve <queue>` asks about, every time:
 Without a TTY (from inside a Claude session), `resolve` takes `--agent=trust`
 or prints the parked operation and exits non-zero.
 
-**Sets that clash side by side** are flagged as a pair: a plain land goes
-beside the set it clashes with, and the daemon resolves the pair in the merge
-head. A fork asks at land time (see *Fork land*). Once both are public, the only choices are resolving in the merge head
-or closing one PR and re-queueing it as a dependent.
+**Sets that clash side by side** never both sit at the front after a plain
+land: it goes behind the set it clashes with (*Plain land*). A fork, whose
+dependencies were picked, asks at land time (see *Fork land*), and may still
+go beside with `--on-conflict=merge-head`: the pair is flagged
+(`conflicts_with`) and resolved in the merge head. Once both are public, the
+only choices are resolving in the merge head or closing one PR and
+re-queueing it as a dependent.
+
+**A set replayed after losing its footing starts from its change.** A set's
+replay normally starts from where it sits, so what was settled to put it
+there carries forward as the sets under it move on or merge. When a set it
+sat on is no longer under it (dropped), that settling was made against work
+that is gone, and the replay starts from the set's change as it was last
+left (*Source of truth*).
 
 **A closed PR** (parked with its subtree): reopen it; drop it (rebase its
 dependents without it, conflicts parked as usual); or close the dependents

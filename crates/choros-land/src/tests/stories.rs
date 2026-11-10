@@ -798,3 +798,43 @@ fn a_replay_keeps_the_change_and_the_commits_it_replaces() {
     git(&sync, &["gc", "--quiet", "--prune=now"]);
     git(&sync, &["cat-file", "-e", &landed.tip]);
 }
+
+/// What was settled to put a set on another is made against that other's
+/// work. When the other is dropped, the set is replayed from its change as
+/// it landed, not from where it sat: nothing of the dropped set stays in it.
+#[test]
+fn a_set_whose_footing_is_dropped_is_replayed_from_its_change() {
+    let w = World::new();
+    let (one, two) = (w.workspace("one"), w.workspace("two"));
+    w.commit(&one, "a.txt", "a\n");
+    w.land_on_head(&one).unwrap();
+    w.commit(&two, "b.txt", "b\n");
+    w.land_on_head(&two).unwrap();
+    assert_eq!(w.state().sets[&2].deps, [Dep::Set(1)]);
+
+    // A push to landing-1 that meets landing-2's file: settled by hand, in
+    // words that only make sense on top of landing-1.
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("w");
+    let branch = format!("{QUEUE}/landing-1");
+    git(tmp.path(), &["clone", "--quiet", "--branch", &branch, w.origin.to_str().unwrap(), "w"]);
+    std::fs::write(work.join("b.txt"), "one's b\n").unwrap();
+    git(&work, &["add", "b.txt"]);
+    git(&work, &["commit", "--quiet", "-m", "one writes b too"]);
+    git(&work, &["push", "--quiet", "origin", &branch]);
+    let mut by_hand = Scripted::default();
+    by_hand.content.insert("b.txt".into(), "one's b, then b\n".into());
+    w.resolve(&mut by_hand);
+    let sat = w.state().sets[&2].tip.clone();
+    assert_eq!(w.file_at(&sat, "b.txt").as_deref(), Some("one's b, then b\n"));
+
+    w.forge.close(w.forge.pr_for(&branch).unwrap());
+    w.pass();
+    w.drop_set(1);
+    w.pass();
+
+    let set = w.state().sets[&2].clone();
+    assert!(set.park.is_none());
+    assert_eq!(w.file_at(&set.tip, "b.txt").as_deref(), Some("b\n"));
+    assert_eq!(w.file_at(&set.tip, "a.txt"), None);
+}

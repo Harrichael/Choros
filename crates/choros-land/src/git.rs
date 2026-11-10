@@ -312,9 +312,19 @@ impl Git {
     /// Each file left conflicted by the step in progress, with what each
     /// side has of it.
     pub fn conflict_sides(&self) -> Result<Vec<crate::mend::Sides>> {
+        self.sides(&["ls-files", "--unmerged", "-z"])
+    }
+
+    /// As `conflict_sides`, for the files of the step in progress whose
+    /// conflict is already staged as resolved: rerere's doing.
+    pub fn resolved_sides(&self) -> Result<Vec<crate::mend::Sides>> {
+        self.sides(&["ls-files", "--resolve-undo", "-z"])
+    }
+
+    fn sides(&self, list: &[&str]) -> Result<Vec<crate::mend::Sides>> {
         use crate::mend::{Side, Sides};
         let mut sides: Vec<Sides> = Vec::new();
-        for entry in self.run_raw(&["ls-files", "--unmerged", "-z"])?.split('\0').filter(|e| !e.is_empty()) {
+        for entry in self.run_raw(list)?.split('\0').filter(|e| !e.is_empty()) {
             let (meta, path) = entry.split_once('\t').ok_or_else(|| eyre!("git ls-files -u: {entry}"))?;
             let mut meta = meta.split(' ');
             let (mode, blob, stage) = (meta.next(), meta.next(), meta.next());

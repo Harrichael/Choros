@@ -88,14 +88,21 @@ fn work_that_undoes_a_set_lands_behind_it() {
     );
 }
 
-/// Two pieces of work that edit the same line, neither built on the other:
-/// either could merge first, so the second lands beside the first, not
-/// behind it. Both PRs open at once. The merge head can't hold both until
-/// the pair is resolved, so the new set waits out of it until the daemon's
-/// agent settles the pair.
+/// Two pieces of work that edit the same lines, neither built on the other.
+/// They can't both be at the front: whichever merged second would conflict
+/// on GitHub. So the second lands behind the first, and the queue notes
+/// that only the lines put it there. A rule that keeps both sides' lines
+/// settles the pair as it lands, with no one asked.
 #[test]
-fn work_that_only_clashes_lands_beside() {
+fn work_that_only_clashes_lands_behind() {
     let w = World::new();
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "README".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
     let one = w.workspace("one");
     let two = w.workspace("two");
     w.commit(&one, "README", "one\n");
@@ -105,22 +112,33 @@ fn work_that_only_clashes_lands_beside() {
     let out = w.land_plain(&two).unwrap();
 
     let st = w.state();
-    assert_eq!(st.sets[&2].deps, []);
-    assert_eq!(st.sets[&2].conflicts_with, [1]);
-    assert!(st.sets[&2].park.is_some());
-    assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_some(), "both at the front");
+    assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);
+    assert_eq!(st.sets[&2].lines_only, [1]);
+    assert!(st.sets[&2].park.is_none());
+    assert!(st.sets[&1].pr.is_some() && st.sets[&2].pr.is_none(), "one at the front");
     assert_eq!(
         out.landed[0].notes[0],
-        "beside appq/landing-1: they clash in README, but either can merge first; the resync agent \
-         settles the pair in the merge head"
+        "on appq/landing-1: they change the same lines (README), so it goes behind"
     );
+    assert_eq!(w.file_at(&st.sets[&2].tip, "README").as_deref(), Some("one\ntwo\n"));
+}
 
-    *w.agent.fix.lock().unwrap() = Some("one and two\n".into());
-    w.daemon_pass();
-    let st = w.state();
-    assert!(st.sets[&2].park.is_none());
-    let mh = st.repos[REPO].merge_head.as_ref().unwrap();
-    assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
+/// A clash no tool can put together takes judgment, and the one landing has
+/// it: the land moves the workspace onto the queue and stops on the
+/// conflict there, for whoever wrote the commits to settle.
+#[test]
+fn work_that_clashes_past_any_tool_is_settled_where_it_was_written() {
+    let w = World::new();
+    let one = w.workspace("one");
+    let two = w.workspace("two");
+    w.commit(&one, "README", "one\n");
+    w.land_plain(&one).unwrap();
+    w.commit(&two, "README", "two\n");
+
+    let err = w.land_plain(&two).unwrap_err().to_string();
+
+    assert!(err.contains("rebasing app onto appq's merge head conflicts in: README"), "{err}");
+    assert_eq!(w.state().sets.len(), 1);
 }
 
 /// No conflict doesn't mean no need: these commits use a file a queued set
@@ -266,7 +284,7 @@ fn a_land_goes_on_its_own_parked_set() {
     w.commit(&one, "README", "one\n");
     w.land_plain(&one).unwrap();
     w.commit(&two, "README", "two\n");
-    w.land_plain(&two).unwrap();
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
     assert!(w.state().sets[&2].park.is_some());
     w.commit(&two, "README", "two, more\n");
 
@@ -275,4 +293,64 @@ fn a_land_goes_on_its_own_parked_set() {
     let st = w.state();
     assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
     assert_eq!(w.file_at(&st.sets[&3].tip, "README").as_deref(), Some("two, more\n"));
+}
+
+/// Going behind a set for its lines pulls in nothing else: another set that
+/// touches the same file elsewhere is no part of it.
+#[test]
+fn a_settled_clash_takes_in_only_the_set_it_clashes_with() {
+    let w = World::new();
+    let lines = |first: &str, last: &str| format!("{first}\n2\n3\n4\n5\n6\n7\n8\n9\n{last}\n");
+    w.push_to_main("NOTES", &lines("1", "10"));
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "NOTES".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
+    let (zed, one, two) = (w.workspace("zed"), w.workspace("one"), w.workspace("two"));
+    w.commit(&zed, "NOTES", &lines("1", "zed"));
+    w.land_plain(&zed).unwrap();
+    w.commit(&one, "NOTES", &lines("one", "10"));
+    w.land_plain(&one).unwrap();
+    assert_eq!(w.state().sets[&2].deps, [], "they meet in no line");
+    w.commit(&two, "NOTES", &lines("two", "10"));
+
+    w.land_plain(&two).unwrap();
+
+    let st = w.state();
+    assert_eq!(st.sets[&3].deps, [Dep::Set(2)]);
+    assert_eq!(st.sets[&3].lines_only, [2]);
+}
+
+/// A set that went behind another for its lines landed as it was written.
+/// When the other is dropped, nothing of it stays behind in the set.
+#[test]
+fn dropping_what_a_set_went_behind_for_its_lines_leaves_none_of_it() {
+    let w = World::new();
+    w.push_to_main("NOTES", "1\n2\n");
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "NOTES".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
+    let (one, two) = (w.workspace("one"), w.workspace("two"));
+    w.commit(&one, "NOTES", "one\n2\n");
+    w.land_plain(&one).unwrap();
+    w.commit(&two, "NOTES", "two\n2\n");
+    w.land_plain(&two).unwrap();
+    let sat = w.state().sets[&2].tip.clone();
+    assert_eq!(w.file_at(&sat, "NOTES").as_deref(), Some("one\ntwo\n2\n"));
+
+    w.forge.close(w.forge.pr_for(&format!("{QUEUE}/landing-1")).unwrap());
+    w.pass();
+    w.drop_set(1);
+    w.pass();
+
+    let set = w.state().sets[&2].clone();
+    assert!(set.park.is_none() && set.lines_only.is_empty());
+    assert_eq!(w.file_at(&set.tip, "NOTES").as_deref(), Some("two\n2\n"));
 }

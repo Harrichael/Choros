@@ -136,9 +136,9 @@ fn a_rebuilt_merge_head_keeps_a_fix_from_earlier_in_the_pass() {
     w.land_plain(&one).unwrap();
     git(&two.join(REPO), &["rm", "--quiet", "a.txt"]);
     git(&two.join(REPO), &["commit", "--quiet", "-m", "remove a.txt"]);
-    w.land_plain(&two).unwrap();
+    w.land_with(&two, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
     w.commit(&three, "README", "three\n");
-    w.land_plain(&three).unwrap();
+    w.land_with(&three, Some(vec![]), Some(OnConflict::MergeHead), None).unwrap();
 
     // Settles a.txt, which the check passes; the same fix in README fails it.
     *w.agent.fix.lock().unwrap() = Some("fixed\n".into());

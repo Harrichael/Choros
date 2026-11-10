@@ -85,6 +85,8 @@ pub enum By {
     Regenerate(String),
     Agent,
     Hand,
+    /// Git's own memory of a fix made here before, whoever made it.
+    Rerere,
 }
 
 impl By {
@@ -103,6 +105,7 @@ impl By {
             By::Regenerate(_) => "regenerate",
             By::Agent => "agent",
             By::Hand => "hand",
+            By::Rerere => "rerere",
         }
     }
 
@@ -120,6 +123,7 @@ impl By {
             "regenerate" => By::Regenerate(tool),
             "agent" => By::Agent,
             "hand" => By::Hand,
+            "rerere" => By::Rerere,
             other => {
                 return Err(eyre!(
                     "queue.db names an unknown way to settle a file: {other}"

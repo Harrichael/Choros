@@ -276,6 +276,7 @@ pub fn splice_out(state: &mut QueueState, n: u32) {
     let ids: Vec<u32> = state.sets.keys().copied().collect();
     for m in ids {
         let set = state.sets.get_mut(&m).unwrap();
+        set.lines_only.retain(|d| *d != n);
         if set.deps.contains(&Dep::Set(n)) {
             set.deps.retain(|d| *d != Dep::Set(n));
             for d in &inherited {

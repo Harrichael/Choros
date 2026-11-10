@@ -778,6 +778,7 @@ fn land_fork(
             }
 
             let mut set = new_set(n, graph::reduce(&work.st, &deps), spec, base, tip, ws, repo, req);
+            set.landed_as(&through, &head);
             set.conflicts_with = clashes;
             work.st.sets.insert(n, set);
             work.publish(n)?;
@@ -828,15 +829,17 @@ enum Least {
     Fallback(Option<String>),
 }
 
-/// Where the commits sit on a given start: the sets they depend on, and
-/// why each, grown until they replay whole; and the sets beside them they
-/// clash with, which they land beside all the same.
+/// Where the commits sit on a given start: the sets they go behind, and
+/// why each, grown until they replay whole and clash with nothing beside
+/// them.
 struct Placed {
     why: BTreeMap<u32, String>,
+    /// Those of `why` the commits replayed whole without: they went
+    /// behind them only because the two change the same lines.
+    lines_only: BTreeSet<u32>,
     spec: BaseSpec,
     base: String,
     tip: String,
-    clashes: Vec<(u32, Vec<String>)>,
 }
 
 /// What `place` needs that doesn't change within a round.
@@ -851,9 +854,10 @@ struct Commits<'a> {
 
 /// Land on as little of the queue as the commits need. Start on main and the
 /// workspace's own earlier sets; take in a queued set only when the commits
-/// don't replay whole without it. One they merely clash with side by side
-/// isn't needed: either could merge first, so the land goes beside it, and
-/// the merge head holds the pair's resolution (the resync agent's). Not conflicting
+/// don't replay whole without it, or change the same lines as it. Two sets
+/// that clash can't both be at the front: whichever merged second would
+/// conflict on GitHub and need a push, which costs its approvals. So the
+/// land goes behind the set, though it doesn't build on it. Not conflicting
 /// isn't the same as not needing (the commits may call what a set adds), so
 /// the result must pass the repo's check too. When it doesn't, look for what
 /// it was missing: each line of skipped work added alone, newest first, and
@@ -887,7 +891,7 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
         let c = Commits { repo, sync: &sync, live: &live, through: &through, head: &head, own: &own };
         let mut touched = BTreeMap::new();
 
-        let first = match place(&mut work, &c, start.clone(), &mut touched)? {
+        let first = match place(&mut work, &c, start.clone(), BTreeSet::new(), &mut touched)? {
             Ok(p) => p,
             Err(why) => return Ok(Least::Fallback(why)),
         };
@@ -907,14 +911,15 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
             }
         };
 
-        let Placed { why, spec, base, tip, clashes } = chosen;
+        let Placed { why, lines_only, spec, base, tip } = chosen;
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
         let n = work.st.next_n.max(1);
         work.st.next_n = n + 1;
-        let deps_of_set = graph::leaves(&work.st, &deps).into_iter().map(Dep::Set).collect();
-        let mut set = new_set(n, deps_of_set, spec, base, tip, ws, repo, req);
-        set.conflicts_with = clashes.iter().map(|(m, _)| *m).collect();
+        let leaves = graph::leaves(&work.st, &deps);
+        let mut set = new_set(n, leaves.iter().copied().map(Dep::Set).collect(), spec, base, tip, ws, repo, req);
+        set.lines_only = leaves.into_iter().filter(|m| lines_only.contains(m)).collect();
+        set.landed_as(c.through, c.head);
         work.st.sets.insert(n, set);
         work.publish(n)?;
         work.rebuild_merge_head(repo)?;
@@ -926,14 +931,6 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
 
         let mut notes: Vec<String> =
             why.iter().map(|(m, w)| format!("on {}: {w}", crate::state::branch(&q.name, *m))).collect();
-        for (m, files) in &clashes {
-            notes.push(format!(
-                "beside {}: they clash in {}, but either can merge first; the resync agent settles the pair \
-                 in the merge head",
-                crate::state::branch(&q.name, *m),
-                files.join(", ")
-            ));
-        }
         let ahead: Vec<u32> = live.iter().copied().filter(|m| !mine.contains(m)).collect();
         if !ahead.is_empty() {
             notes.push(match checker.check {
@@ -969,7 +966,7 @@ fn search(
         for m in graph::leaves(&work.st, extra) {
             start.entry(m).or_insert_with(|| "the check fails without it".into());
         }
-        let Ok(p) = place(work, c, start, touched)? else {
+        let Ok(p) = place(work, c, start, first.lines_only.clone(), touched)? else {
             return Ok(Probe::Fail);
         };
         Ok(match checker.verdict(c.sync, &p.tip)? {
@@ -1040,13 +1037,14 @@ enum Probe {
     Run(String),
 }
 
-/// Grow `why` from conflicts until the commits replay onto it whole, and
-/// note what they clash with beside it. `Err` when only everything queued will do,
+/// Grow `why` until the commits replay onto it whole and clash with nothing
+/// beside it. `Err` when only everything queued will do,
 /// with why when that's news: needing every set is just where it belongs.
 fn place(
     work: &mut Work,
     c: &Commits,
     mut why: BTreeMap<u32, String>,
+    mut lines_only: BTreeSet<u32>,
     touched: &mut BTreeMap<u32, BTreeSet<String>>,
 ) -> Result<std::result::Result<Placed, Option<String>>> {
     let what = format!("{}'s land", c.repo);
@@ -1055,7 +1053,10 @@ fn place(
         let mine = graph::ancestors_of_deps(&work.st, &deps);
         // Needing every live set is landing on the merge head, unless it
         // also needs a parked one the merge head goes without.
-        if c.live.iter().all(|m| mine.contains(m)) && deps.iter().all(|d| c.live.contains(d)) {
+        // Not so behind a set whose lines they change: the fallback moves
+        // the workspace onto the merge head with plain git, and here the
+        // replay may be settled without anyone.
+        if lines_only.is_empty() && c.live.iter().all(|m| mine.contains(m)) && deps.iter().all(|d| c.live.contains(d)) {
             return Ok(Err(None));
         }
         let main = work.root(c.repo)?;
@@ -1077,8 +1078,11 @@ fn place(
             Err(files) => {
                 let owners = owners(&work.st, c.sync, c.live, &mine, touched, &files)?;
                 if owners.is_empty() {
+                    // On top of a set whose lines they change, and no tool
+                    // could put the two together.
+                    let with = if lines_only.is_empty() { "main itself" } else { "what they went behind" };
                     return Ok(Err(Some(format!(
-                        "landed on everything queued: its commits conflict with main itself in {}",
+                        "landed on everything queued: its commits conflict with {with} in {}",
                         files.join(", ")
                     ))));
                 }
@@ -1091,7 +1095,11 @@ fn place(
         // A replay can go through clean and still lose changes: deleting or
         // re-deleting lines a skipped set added is "already done" without
         // that set, so the hunk vanishes. Such commits need the set.
-        let lost = lost_changes(c.sync, (c.through, c.head), (&base, &tip))?;
+        // Not in a file the replay settled where two sets' lines met: what
+        // it changes there is meant to differ from what was written.
+        let settled = work.q.settled_in(c.repo, &c.sync.commits(&base, &tip)?)?;
+        let mut lost = lost_changes(c.sync, (c.through, c.head), (&base, &tip))?;
+        lost.retain(|f| !settled.iter().any(|s| s.path == *f));
         let owners = owners(&work.st, c.sync, c.live, &mine, touched, &lost)?;
         if !owners.is_empty() {
             for m in owners {
@@ -1099,8 +1107,19 @@ fn place(
             }
             continue;
         }
-        let clashes = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
-        return Ok(Ok(Placed { why, spec, base, tip, clashes }));
+        // A clash a set under these commits already has, beside the same
+        // set, is that pair's to settle; these only inherit it.
+        let inherited = |m: &u32| mine.iter().any(|a| work.st.sets[a].conflicts_with.contains(m));
+        let mut clashes = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
+        clashes.retain(|(m, _)| !inherited(m));
+        if !clashes.is_empty() {
+            for (m, files) in clashes {
+                why.insert(m, format!("they change the same lines ({}), so it goes behind", files.join(", ")));
+                lines_only.insert(m);
+            }
+            continue;
+        }
+        return Ok(Ok(Placed { why, lines_only, spec, base, tip }));
     }
 }
 
@@ -1202,6 +1221,7 @@ fn new_set(
         labels: req.labels.clone(),
         sessions: Vec::new(),
         conflicts_with: Vec::new(),
+        lines_only: Vec::new(),
         pending: None,
         change: None,
     };
