@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Context, Result, eyre};
 use rusqlite::{Connection, OpenFlags, params};
 
+use crate::mend::{By, Mended, Side, Sides};
 use crate::state::{
     self, Change, DiffbaseState, LandingSet, Placement, QueueConfig, QueueState, RepoState,
     now_secs,
@@ -45,6 +46,19 @@ const LAYOUT: &[&str] = &[
          onto TEXT NOT NULL, base TEXT NOT NULL, tip TEXT NOT NULL,
          at INTEGER NOT NULL) STRICT;
      CREATE INDEX placements_of ON placements (n, id);",
+    // `resolutions`: what a conflicted file came to, by its three versions
+    // (blobs; '' where a side has no file), so the same conflict is settled
+    // the same way again. `settled`: which files each commit the queue made
+    // had settled, and by what.
+    "CREATE TABLE resolutions (
+         repo TEXT NOT NULL, path TEXT NOT NULL,
+         base TEXT NOT NULL, ours TEXT NOT NULL, theirs TEXT NOT NULL,
+         result TEXT NOT NULL, by TEXT NOT NULL, tool TEXT NOT NULL, at INTEGER NOT NULL,
+         PRIMARY KEY (repo, path, base, ours, theirs)) STRICT;
+     CREATE TABLE settled (
+         repo TEXT NOT NULL, made TEXT NOT NULL, path TEXT NOT NULL,
+         by TEXT NOT NULL, tool TEXT NOT NULL, remembered INTEGER NOT NULL, at INTEGER NOT NULL,
+         PRIMARY KEY (repo, made, path)) STRICT;",
 ];
 
 pub struct Store {
@@ -331,4 +345,105 @@ impl Store {
             placements,
         })
     }
+}
+
+/// A file a commit of the queue's had settled.
+pub struct Settled {
+    pub path: String,
+    pub by: By,
+    /// The queue had the answer already.
+    pub remembered: bool,
+}
+
+impl Store {
+    /// What this queue settled `sides` as before, if it has.
+    pub fn resolution(&self, repo: &str, sides: &Sides) -> Result<Option<Mended>> {
+        let mut found = self.conn.prepare(
+            "SELECT result, by, tool FROM resolutions WHERE repo = ?1 AND path = ?2 AND base = ?3 AND ours = ?4 AND theirs = ?5",
+        )?;
+        let mut rows = found.query(params![
+            repo,
+            sides.path,
+            blob(&sides.base),
+            blob(&sides.ours),
+            blob(&sides.theirs)
+        ])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let result: String = row.get(0)?;
+        Ok(Some(Mended {
+            path: sides.path.clone(),
+            result: (!result.is_empty()).then_some(result),
+            by: By::named(&row.get::<_, String>(1)?, row.get(2)?)?,
+            remembered: true,
+        }))
+    }
+
+    /// Note that the commit `made` settled these files, and keep each
+    /// newly given answer for the next time its three versions meet.
+    pub fn settle(&mut self, repo: &str, made: &str, files: &[(&Sides, &Mended)]) -> Result<()> {
+        let at = now_secs() as i64;
+        let tx = self.conn.transaction()?;
+        for (sides, m) in files {
+            tx.execute(
+                "INSERT OR REPLACE INTO settled (repo, made, path, by, tool, remembered, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![repo, made, m.path, m.by.name(), m.by.tool(), m.remembered, at],
+            )?;
+            // What a command made of the whole tree says nothing about
+            // these three versions in another.
+            if m.remembered || matches!(m.by, By::Regenerate(_)) {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO resolutions (repo, path, base, ours, theirs, result, by, tool, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    repo,
+                    m.path,
+                    blob(&sides.base),
+                    blob(&sides.ours),
+                    blob(&sides.theirs),
+                    m.result.as_deref().unwrap_or_default(),
+                    m.by.name(),
+                    m.by.tool(),
+                    at
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The files settled in any of the commits `made`.
+    pub fn settled_in(&self, repo: &str, made: &[String]) -> Result<Vec<Settled>> {
+        if layout_steps(&self.conn)? < LAYOUT.len() {
+            return Ok(Vec::new());
+        }
+        let mut found = self.conn.prepare(
+            "SELECT path, by, tool, remembered FROM settled
+             WHERE repo = ?1 AND made IN (SELECT value FROM json_each(?2)) ORDER BY path",
+        )?;
+        let rows = found.query_map(params![repo, serde_json::to_string(made)?], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (path, by, tool, remembered) = row?;
+            Ok(Settled {
+                path,
+                by: By::named(&by, tool)?,
+                remembered,
+            })
+        })
+        .collect()
+    }
+}
+
+fn blob(side: &Option<Side>) -> &str {
+    side.as_ref().map_or("", |s| &s.blob)
 }

@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 
 use crate::engine::{Conflict, ConflictHandler, Handled, OnConflict};
 use crate::git::Git;
+use crate::mend::By;
 use crate::queue::Queue;
 use crate::repos;
 
@@ -91,7 +92,7 @@ impl AutoResolve {
         }
         if let Some(tree) = self.settled.get(&key) {
             git.run(&["read-tree", "--reset", "-u", tree])?;
-            return Ok(Handled::Resolved { session: None });
+            return Ok(Handled::Resolved { session: None, by: By::Agent });
         }
         if ledger.tried.contains(&key) {
             self.notes
@@ -162,7 +163,7 @@ impl AutoResolve {
         self.settled.insert(key, tree);
         self.notes
             .push(format!("the agent settled {what}; `{check}` passed"));
-        Ok(Handled::Resolved { session: Some(session) })
+        Ok(Handled::Resolved { session: Some(session), by: By::Agent })
     }
 }
 

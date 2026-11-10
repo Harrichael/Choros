@@ -154,6 +154,11 @@ impl Queue {
         Store::open(&self.dir())?.history(n)
     }
 
+    /// The files settled in any of the commits `made`.
+    pub fn settled_in(&self, repo: &str, made: &[String]) -> Result<Vec<store::Settled>> {
+        Store::open(&self.dir())?.settled_in(repo, made)
+    }
+
     pub fn write_state(&self, state: &QueueState) -> Result<()> {
         Store::open(&self.dir())?.write_state(state)
     }

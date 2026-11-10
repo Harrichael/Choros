@@ -10,6 +10,7 @@ use choros_land::agent::{self, AgentSlot, Claude, ConflictBrief};
 use choros_land::engine::{Conflict, ConflictHandler, Env, Handled, OnConflict, PassReport};
 use choros_land::forge::Gh;
 use choros_land::land::{self, Deps, LandRequest};
+use choros_land::mend::By;
 use choros_land::queue::{self, Queue};
 use choros_land::state::{ChangeBy, Dep, LandMode, ParkOp, PrSpec, QueueConfig, Scope, parse_pr_list};
 use choros_land::{admin, diffbase, status};
@@ -910,6 +911,31 @@ fn print_log(trunk: &Path, queue: &str, n: u32) -> Result<()> {
         let row = format!("  {}  {by:<w0$}  {commits:<w1$}  {moved}", c.rev, w0 = width(0), w1 = width(1));
         println!("{}", row.trim_end());
     }
+    // Conflicts settled in the commits the queue made to put it where it
+    // sits: those of its own replay, and the merges that built its base.
+    let mut made = vec![set.tip.clone()];
+    let below: Vec<&String> = set.base.main.iter().chain(set.base.deps.iter().map(|(_, tip)| tip)).collect();
+    let below = if below.is_empty() { vec![&set.base_sha] } else { below };
+    made.extend(below.iter().map(|b| format!("^{b}")));
+    let mut args = vec!["rev-list"];
+    args.extend(made.iter().map(String::as_str));
+    let made: Vec<String> = git.run(&args).unwrap_or_default().lines().map(str::to_string).collect();
+    let settled = q.settled_in(set.repo(), &made)?;
+    if !settled.is_empty() {
+        println!("  conflicts settled where it sits:");
+        let width = settled.iter().map(|m| m.path.chars().count()).max().unwrap_or(0);
+        for m in settled {
+            let by = match &m.by {
+                By::Agent => "by the agent".to_string(),
+                By::Hand => "by hand".to_string(),
+                By::Union => "both sides' lines kept".to_string(),
+                By::Regenerate(command) => format!("made again by `{command}`"),
+                By::Mergiraf(tool) => format!("by {tool}"),
+            };
+            let again = if m.remembered { ", as settled before" } else { "" };
+            println!("    {:<width$}  {by}{again}", m.path);
+        }
+    }
     Ok(())
 }
 
@@ -1026,9 +1052,10 @@ impl ConflictHandler for Interactive {
             .next()
             .unwrap_or('s'),
         };
-        let resolved = |s: AgentSlot| Handled::Resolved { session: Some(s) };
+        // A fix is the agent's unless a person took over the session.
+        let resolved = |s: AgentSlot, by: By| Handled::Resolved { session: Some(s), by };
         match choice {
-            'a' => Ok(resolved(c.agent.resolve(&c.brief())?)),
+            'a' => Ok(resolved(c.agent.resolve(&c.brief())?, By::Agent)),
             'b' => {
                 let session = c.agent.resolve(&c.brief())?;
                 let _ = Command::new("git")
@@ -1037,7 +1064,7 @@ impl ConflictHandler for Interactive {
                     .args(["--no-pager", "diff", "--cached"])
                     .status();
                 match ask("push this resolution? [y] push / [i] intervene / [s] skip > ")?.as_str() {
-                    "y" | "" => Ok(resolved(session)),
+                    "y" | "" => Ok(resolved(session, By::Agent)),
                     "i" => {
                         // The agent's run made the session, even one it was
                         // told to create: drive it as a resume.
@@ -1047,12 +1074,12 @@ impl ConflictHandler for Interactive {
                         };
                         let mut brief = c.brief();
                         brief.session = &existing;
-                        drive(&brief).map(|_| resolved(session))
+                        drive(&brief).map(|_| resolved(session, By::Hand))
                     }
                     _ => Ok(Handled::Declined),
                 }
             }
-            'c' => drive(&c.brief()).map(resolved),
+            'c' => drive(&c.brief()).map(|s| resolved(s, By::Hand)),
             _ => Ok(Handled::Declined),
         }
     }

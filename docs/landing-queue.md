@@ -73,6 +73,14 @@ user_claude_md = true               # false: the agent skips your ~/.claude CLAU
 [stack]
 enabled = false                     # open PRs behind the front as GitHub stacked PRs (see Stacked PRs)
 max_open = 5                        # stacking stops once a repo has this many open PRs in the queue
+[merge]
+structural = true                   # merge a conflicted file by its syntax tree, with Mergiraf if installed
+[[merge.rule]]                      # the first rule a file matches is the one it gets (see Conflicts)
+files = "CHANGELOG.md"              # a glob; with no `/` it names a file wherever it is
+union = true                        # keep both sides' lines
+[[merge.rule]]
+files = "pnpm-lock.yaml"
+regenerate = "pnpm install --lockfile-only"   # the file is made from the rest of the tree: make it again
 ```
 
 Each repo lands on its origin's default branch. Queues made when a queue held
@@ -411,6 +419,33 @@ sets and the merge head of a deleted queue.
 
 A conflict can arise in a fork land's replay, a daemon re-sync, a
 multi-dependency base, the merge head, or merging main into a public set.
+
+**A conflict that needs no judgment is settled first**, at a land and in the
+daemon alike. Each conflicted file is tried from its three versions alone:
+
+1. the way this queue settled those same three versions before, whoever
+   first did (kept in `queue.db`, so it holds where git's rerere does not: a
+   delete against an edit, a clone made afresh);
+2. a `[[merge.rule]]` with `union`: both sides' lines are kept;
+3. [Mergiraf](https://mergiraf.org), when it is installed and
+   `merge.structural` is on: a merge of the file's syntax tree, which
+   settles two changes that touch neighbouring lines and nothing in common.
+
+A file with a `regenerate` rule is made again by its command, run in the
+sync clone once every other file is settled. Only regular files are tried:
+not symlinks, not submodules.
+
+It is all or nothing. If every file has an answer and the result can be
+trusted, the step goes on; otherwise the conflict goes, as git left it, to
+the agent or to you. Trusted means the repo's check passes on the result.
+The one thing taken without it is an answer this queue took before from a
+`union` rule or from Mergiraf: those follow from the three versions alone,
+and passed the check when first given. An answer the agent or a person
+gave before, or a command made, is checked again: it was right for the
+tree it was given in. So a repo with no check has nothing settled this way.
+
+Whoever settles a file, `queue.db` records what did, and `choros landing
+log N` lists it for the conflicts settled where landing-N now sits.
 
 **The daemon resolves on its own** with the resync agent, unless the queue's
 `agent.auto_resolve` is off. It trusts a fix only once the repo's check passes

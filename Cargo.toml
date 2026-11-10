@@ -11,6 +11,7 @@ choros-core = { path = "crates/choros-core" }
 choros-land = { path = "crates/choros-land" }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
+globset = "0.4.16"
 ignore = "0.4.33"
 ratatui = "0.30.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

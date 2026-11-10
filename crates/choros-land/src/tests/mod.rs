@@ -8,6 +8,7 @@ mod branches;
 mod deps;
 mod diffbase;
 mod invariants;
+mod mend;
 mod regressions;
 mod repos;
 mod stacks;
@@ -479,7 +480,7 @@ impl ConflictHandler for Scripted {
             recorded: c.recorded.len(),
             prompt: crate::agent::conflict_prompt(&c.brief()),
         });
-        Ok(Handled::Resolved { session: None })
+        Ok(Handled::Resolved { session: None, by: crate::mend::By::Hand })
     }
 
     fn fork_conflict(&mut self, _fork: u32, _with: &[u32]) -> Result<Option<OnConflict>> {

@@ -13,11 +13,13 @@ use crate::agent::{Agent, AgentSlot};
 use crate::forge::{Forge, PrRequest, PrState, RepoSettings};
 use crate::git::{Git, Step};
 use crate::graph;
+use crate::mend::{self, By, Mended, Sides};
 use crate::queue::{Queue, QueueLock};
 use crate::state::{
     AgentSession, BaseSpec, ChangeBy, LandingSet, Composition, Dep, MergeHead, Park, ParkOp, PendingPush, QueueState, RepoState,
     Resolution, SetStatus, branch, now_secs,
 };
+use crate::store::Store;
 
 /// How long after a merge GitHub is left to rebase the stack above it
 /// before Choros replays what it left alone. A long stack takes GitHub
@@ -86,7 +88,8 @@ impl Conflict<'_> {
 pub enum Handled {
     /// `session`: the resync agent's session that was started or resumed
     /// (by the agent, or by you driving it), so it now exists to resume.
-    Resolved { session: Option<AgentSlot> },
+    /// `by`: whose fix it is, [`By::Agent`] or [`By::Hand`].
+    Resolved { session: Option<AgentSlot>, by: By },
     /// It had its go and left the conflict as it was.
     Declined,
     /// It didn't look at it this time; the park waits for a later go.
@@ -288,7 +291,8 @@ impl<'q, 'h> Work<'q, 'h> {
 
     /// Bring a conflicting step in `repo`'s sync clone to a conclusion:
     /// resolved and committed (`None`), or aborted (`Some(files)`) for the
-    /// caller to park.
+    /// caller to park. A conflict that can be settled whole without
+    /// judgment is; any other goes to the handler as git left it.
     fn settle(&mut self, repo: &str, step: Step, operation: &str) -> Result<Option<Vec<String>>> {
         let Step::Conflict(files) = step else {
             return Ok(None);
@@ -301,6 +305,10 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(None);
         }
         self.conflict_tried = false;
+        let sides = git.conflict_sides()?;
+        if let Some(mended) = self.mend(repo, &sides)? {
+            return self.conclude(repo, &sides, mended).map(|()| None);
+        }
         let Some(handler) = self.handler.as_deref_mut() else {
             git.abort_in_progress()?;
             return Ok(Some(files));
@@ -308,7 +316,7 @@ impl<'q, 'h> Work<'q, 'h> {
         let rs = self.st.repos.get(repo).ok_or_else(|| eyre!("queue {} has nothing in {repo}", self.q.name))?;
         let slot = agent_slot(rs, self.q.config.agent.resolver.rotate_after);
         let recorded = recorded_for(&git, rs, &files);
-        let sides = crate::context::sides(self.q, &self.st, repo, &files);
+        let context = crate::context::sides(self.q, &self.st, repo, &files);
         let handled = handler.resolve(&Conflict {
             queue: &self.q.name,
             repo,
@@ -316,12 +324,12 @@ impl<'q, 'h> Work<'q, 'h> {
             operation: operation.to_string(),
             files: files.clone(),
             recorded,
-            sides,
+            sides: context,
             slot: &slot,
             agent: self.agent,
             settings: &self.q.config.agent.resolver,
         })?;
-        if let Handled::Resolved { session } = &handled {
+        if let Handled::Resolved { session, by } = &handled {
             if let Some(session) = session {
                 record_session(self.st.repos.get_mut(repo).unwrap(), session);
             }
@@ -329,13 +337,121 @@ impl<'q, 'h> Work<'q, 'h> {
                 git.abort_in_progress()?;
                 return Err(eyre!("the resolution was not accepted: {problem}"));
             }
-            git.conclude()?;
-            self.record_resolution(repo, &files)?;
-            return Ok(None);
+            let mut mended = Vec::new();
+            for s in &sides {
+                mended.push(Mended {
+                    path: s.path.clone(),
+                    result: git.rev_parse_any(&format!(":0:{}", s.path))?,
+                    by: by.clone(),
+                    remembered: false,
+                });
+            }
+            return self.conclude(repo, &sides, mended).map(|()| None);
         }
         self.conflict_tried = handled == Handled::Declined;
         git.abort_in_progress()?;
         Ok(Some(files))
+    }
+
+    /// Settle the conflict in progress if every file in it can be settled
+    /// without judgment (see [`crate::mend`]) and the result can be
+    /// trusted, leaving it staged. Otherwise `None`, with the conflict as
+    /// git left it.
+    ///
+    /// An answer that follows from the file's three versions alone, and
+    /// that this queue has trusted before, is trusted again. Anything else
+    /// must pass the repo's check here: a new answer, and one that took
+    /// judgment or the rest of the tree, which was right for another tree.
+    fn mend(&self, repo: &str, sides: &[Sides]) -> Result<Option<Vec<Mended>>> {
+        let git = self.git(repo);
+        let store = Store::open(&self.q.dir())?;
+        let config = &self.q.config.merge;
+        let command = |s: &Sides| config.rule_for(&s.path).and_then(|r| r.regenerate.as_ref());
+        // Nothing left conflicted, yet not accepted as resolved: not ours
+        // to pass.
+        if sides.is_empty() {
+            return Ok(None);
+        }
+        let mut mended = Vec::new();
+        for s in sides.iter().filter(|s| command(s).is_none()) {
+            match mend::mend(&git, config, &store, repo, s)? {
+                Some(m) => mended.push(m),
+                None => return Ok(None),
+            }
+        }
+        let made_again: Vec<(&Sides, &String)> = sides.iter().filter_map(|s| Some((s, command(s)?))).collect();
+        // Putting a conflict back, should the check fail once the commands
+        // have run, takes a regular file both sides have.
+        if !made_again.is_empty() && sides.iter().any(|s| s.ours.is_none() || s.theirs.is_none() || !s.regular()) {
+            return Ok(None);
+        }
+        let trusted = mended.iter().all(|m| m.remembered && m.by.from_the_file_alone()) && made_again.is_empty();
+        let check = crate::repos::read(&self.q.trunk, repo)?.check;
+        if !trusted && check.is_none() {
+            return Ok(None);
+        }
+        let mode = |path: &str| sides.iter().find(|s| s.path == path).map_or("100644", Sides::mode);
+        if made_again.is_empty() {
+            let settled: Vec<(&str, &str, Option<&str>)> =
+                mended.iter().map(|m| (m.path.as_str(), mode(&m.path), m.result.as_deref())).collect();
+            if !trusted && !self.passes(repo, &git.tree_settled(&settled)?, check.as_deref().unwrap(), &mended)? {
+                return Ok(None);
+            }
+            for m in &mended {
+                git.stage_blob(&m.path, mode(&m.path), m.result.as_deref())?;
+            }
+            return Ok(Some(mended));
+        }
+        // A command needs the tree as it will be, so everything else is
+        // staged first, and put back if what comes of it can't be trusted.
+        for m in &mended {
+            git.stage_blob(&m.path, mode(&m.path), m.result.as_deref())?;
+        }
+        let made: Result<Vec<Mended>> = made_again.iter().map(|(s, command)| mend::regenerate(&git, &s.path, command)).collect();
+        // Whatever else the commands touched is not part of the fix.
+        git.discard_unstaged()?;
+        let made = made.and_then(|made| {
+            mended.extend(made);
+            self.passes(repo, &git.run(&["write-tree"])?, check.as_deref().unwrap(), &mended)
+        });
+        match made {
+            Ok(true) => Ok(Some(mended)),
+            other => {
+                if let Err(e) = other {
+                    eprintln!("{}: {e:#}", self.q.name);
+                }
+                git.unresolve(&sides.iter().map(|s| s.path.clone()).collect::<Vec<_>>())?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Whether `check` passes on `tree` as the step in progress would
+    /// commit it.
+    fn passes(&self, repo: &str, tree: &str, check: &str, mended: &[Mended]) -> Result<bool> {
+        let paths: Vec<&str> = mended.iter().map(|m| m.path.as_str()).collect();
+        eprintln!("{}: running `{check}` on {} as settled without judgment…", self.q.name, paths.join(", "));
+        // The check needs a commit to stand on.
+        let fix = self
+            .git(repo)
+            .run(&["commit-tree", tree, "-p", "HEAD", "-m", "choros: a fix made without judgment, for the check"])?;
+        let passed = self.q.check(repo, &fix, check)?.is_ok();
+        if !passed {
+            eprintln!("{}: it failed; the conflict goes on as it was", self.q.name);
+        }
+        Ok(passed)
+    }
+
+    /// Finish the step whose conflict is settled, and record what settled
+    /// each file.
+    fn conclude(&mut self, repo: &str, sides: &[Sides], mended: Vec<Mended>) -> Result<()> {
+        let git = self.git(repo);
+        git.conclude()?;
+        let files: Vec<String> = mended.iter().map(|m| m.path.clone()).collect();
+        self.record_resolution(repo, &files)?;
+        let settled: Vec<(&Sides, &Mended)> =
+            mended.iter().filter_map(|m| Some((sides.iter().find(|s| s.path == m.path)?, m))).collect();
+        Store::open(&self.q.dir())?.settle(repo, &git.head()?, &settled)
     }
 
     fn record_resolution(&mut self, repo: &str, files: &[String]) -> Result<()> {

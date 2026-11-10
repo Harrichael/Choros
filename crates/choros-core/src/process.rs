@@ -68,7 +68,14 @@ pub fn output_within(mut cmd: Command, limit: std::time::Duration) -> Result<Opt
 /// Ask first: on SIGTERM git drops its lock files and a half-made clone,
 /// which a SIGKILL would leave to break every later fetch.
 fn stop(child: &mut std::process::Child) {
-    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+    // A child started as the leader of its own process group takes what it
+    // started with it; for any other, there is no such group to signal.
+    let group = format!("-{}", child.id());
+    let signal = |sig: &str, to: &str| {
+        let _ = Command::new("kill").args([sig, "--", to]).stderr(std::process::Stdio::null()).status();
+    };
+    signal("-TERM", &group);
+    signal("-TERM", &child.id().to_string());
     let grace = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < grace {
         if let Ok(Some(_)) = child.try_wait() {
@@ -76,6 +83,7 @@ fn stop(child: &mut std::process::Child) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    signal("-KILL", &group);
     let _ = child.kill();
     let _ = child.wait();
 }

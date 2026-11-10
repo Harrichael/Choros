@@ -55,6 +55,13 @@ impl Git {
         Ok(self.command().args(args).output()?)
     }
 
+    /// `run` for output where a leading or trailing blank matters.
+    fn run_raw(&self, args: &[&str]) -> Result<String> {
+        let out = self.output(args)?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        self.finish(args, out).map(|_| text)
+    }
+
     pub fn run(&self, args: &[&str]) -> Result<String> {
         let out = self.output(args)?;
         self.finish(args, out)
@@ -87,6 +94,15 @@ impl Git {
 
     pub fn rev_parse(&self, rev: &str) -> Result<Option<String>> {
         let out = self.output(&["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?;
+        Ok(out
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    }
+
+    /// `rev_parse` for what may name a blob or a tree.
+    pub fn rev_parse_any(&self, rev: &str) -> Result<Option<String>> {
+        let out = self.output(&["rev-parse", "--verify", "--quiet", rev])?;
         Ok(out
             .status
             .success()
@@ -293,9 +309,117 @@ impl Git {
         Ok(Step::Conflict(unmerged))
     }
 
+    /// Each file left conflicted by the step in progress, with what each
+    /// side has of it.
+    pub fn conflict_sides(&self) -> Result<Vec<crate::mend::Sides>> {
+        use crate::mend::{Side, Sides};
+        let mut sides: Vec<Sides> = Vec::new();
+        for entry in self.run_raw(&["ls-files", "--unmerged", "-z"])?.split('\0').filter(|e| !e.is_empty()) {
+            let (meta, path) = entry.split_once('\t').ok_or_else(|| eyre!("git ls-files -u: {entry}"))?;
+            let mut meta = meta.split(' ');
+            let (mode, blob, stage) = (meta.next(), meta.next(), meta.next());
+            let (Some(mode), Some(blob), Some(stage)) = (mode, blob, stage) else {
+                return Err(eyre!("git ls-files -u: {entry}"));
+            };
+            if sides.last().is_none_or(|s| s.path != path) {
+                sides.push(Sides {
+                    path: path.to_string(),
+                    base: None,
+                    ours: None,
+                    theirs: None,
+                });
+            }
+            let here = sides.last_mut().unwrap();
+            let side = Some(Side {
+                mode: mode.to_string(),
+                blob: blob.to_string(),
+            });
+            match stage {
+                "1" => here.base = side,
+                "2" => here.ours = side,
+                _ => here.theirs = side,
+            }
+        }
+        Ok(sides)
+    }
+
+    /// The tree the step in progress would commit with each conflicted
+    /// `path` settled as `blob` with `mode`, or as gone. Worked out in an
+    /// index of its own: the step in progress is not touched.
+    pub fn tree_settled(&self, settled: &[(&str, &str, Option<&str>)]) -> Result<String> {
+        let git_dir = PathBuf::from(self.run(&["rev-parse", "--absolute-git-dir"])?);
+        let scratch = tempfile::NamedTempFile::new_in(&git_dir)?;
+        std::fs::copy(git_dir.join("index"), scratch.path())?;
+        let run = |args: &[&str]| -> Result<String> {
+            let out = self.command().env("GIT_INDEX_FILE", scratch.path()).args(args).output()?;
+            self.finish(args, out)
+        };
+        for (path, mode, blob) in settled {
+            match blob {
+                Some(blob) => run(&["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")])?,
+                None => run(&["update-index", "--force-remove", "--", path])?,
+            };
+        }
+        run(&["write-tree"])
+    }
+
+    /// Settle a conflicted `path`, a regular file, as `blob` with `mode`,
+    /// or as gone: the same index entry `tree_settled` makes.
+    pub fn stage_blob(&self, path: &str, mode: &str, blob: Option<&str>) -> Result<()> {
+        match blob {
+            Some(blob) => {
+                self.run(&["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")])?;
+                self.run(&["checkout-index", "--force", "--", path])?;
+            }
+            None => {
+                self.run(&["rm", "--quiet", "--force", "--", path])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Put back the conflicts in `paths` as the step in progress left
+    /// them. Only for files both sides have: git can't rebuild the others.
+    pub fn unresolve(&self, paths: &[String]) -> Result<()> {
+        for path in paths {
+            self.run(&["update-index", "--unresolve", "--", path])?;
+            self.run(&["checkout", "--merge", "--", path])?;
+        }
+        Ok(())
+    }
+
+    /// Drop changes to tracked files that aren't staged, and untracked
+    /// files, leaving conflicted files as they are.
+    pub fn discard_unstaged(&self) -> Result<()> {
+        // A conflicted path is listed as changed too.
+        let unmerged = self.unmerged()?;
+        let changed = self.run_raw(&["diff", "--name-only", "-z"])?;
+        for path in changed.split('\0').filter(|p| !p.is_empty() && !unmerged.iter().any(|u| u == p)) {
+            self.run(&["checkout", "--", path])?;
+        }
+        self.run(&["clean", "--quiet", "-fd"])?;
+        Ok(())
+    }
+
+    pub fn has_object(&self, sha: &str) -> bool {
+        self.succeeds(&["cat-file", "-e", sha]).unwrap_or(false)
+    }
+
+    pub fn blob(&self, sha: &str) -> Result<Vec<u8>> {
+        let out = self.output(&["cat-file", "blob", sha])?;
+        if !out.status.success() {
+            return Err(eyre!("no blob {sha} in {}", self.dir.display()));
+        }
+        Ok(out.stdout)
+    }
+
+    pub fn write_blob(&self, file: &Path) -> Result<String> {
+        self.run(&["hash-object", "-w", "--", &file.to_string_lossy()])
+    }
+
     pub fn unmerged(&self) -> Result<Vec<String>> {
-        let out = self.run(&["diff", "--name-only", "--diff-filter=U"])?;
-        Ok(out.lines().map(str::to_string).collect())
+        let out = self.run_raw(&["diff", "--name-only", "--diff-filter=U", "-z"])?;
+        Ok(out.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
     }
 
     /// Is the conflict in progress fully and plausibly resolved: nothing

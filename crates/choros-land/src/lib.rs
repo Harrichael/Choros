@@ -12,6 +12,7 @@ pub mod git;
 pub mod graph;
 pub mod instant;
 pub mod land;
+pub mod mend;
 pub mod queue;
 pub mod repos;
 pub mod state;

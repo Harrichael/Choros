@@ -31,6 +31,49 @@ pub struct QueueConfig {
     /// the queue builds on main.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffbase: Vec<String>,
+    #[serde(default, skip_serializing_if = "MergeConfig::is_default")]
+    pub merge: MergeConfig,
+}
+
+/// How conflicts are settled without judgment; see [`crate::mend`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeConfig {
+    /// Merge a conflicted file by its syntax tree, with Mergiraf, when it
+    /// is installed.
+    #[serde(default = "yes")]
+    pub structural: bool,
+    /// The first rule a file matches is the one it gets.
+    #[serde(default, rename = "rule", skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<MergeRule>,
+}
+
+impl MergeConfig {
+    fn is_default(&self) -> bool {
+        *self == MergeConfig::default()
+    }
+}
+
+impl Default for MergeConfig {
+    fn default() -> Self {
+        MergeConfig {
+            structural: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+/// How to settle conflicts in the files a glob names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeRule {
+    pub files: String,
+    /// Keep both sides' lines.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub union: bool,
+    /// The file is made from the rest of the tree: run this to make it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regenerate: Option<String>,
 }
 
 /// A PR in a queue's diffbase.
@@ -93,6 +136,7 @@ impl QueueConfig {
             agent: Default::default(),
             stack: Default::default(),
             diffbase: Vec::new(),
+            merge: Default::default(),
         }
     }
 
@@ -667,7 +711,9 @@ pub fn branch(queue: &str, n: u32) -> String {
 
 pub fn read_config(path: &Path) -> Result<QueueConfig> {
     let body = std::fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    toml::from_str(&body).wrap_err_with(|| format!("parsing {}", path.display()))
+    let config: QueueConfig = toml::from_str(&body).wrap_err_with(|| format!("parsing {}", path.display()))?;
+    config.merge.validate().wrap_err_with(|| format!("in {}", path.display()))?;
+    Ok(config)
 }
 
 pub fn write_config(path: &Path, config: &QueueConfig) -> Result<()> {

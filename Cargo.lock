@@ -197,6 +197,7 @@ version = "0.1.0"
 dependencies = [
  "choros-core",
  "color-eyre",
+ "globset",
  "rusqlite",
  "serde",
  "serde_json",
