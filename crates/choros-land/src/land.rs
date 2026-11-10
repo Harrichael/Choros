@@ -22,6 +22,7 @@ use crate::repos;
 use crate::state::{ChangeBy, BaseSpec, Dep, LandMode, LandingSet, MergeHead, SessionFork, SetStatus, Source};
 use crate::workspace::{self, InstantPr, LandingOf, RepoLanding};
 
+#[derive(Clone)]
 pub struct LandRequest {
     /// Where `land` was run: a repo (land that repo) or the workspace root
     /// (land every repo with something to land).
@@ -110,6 +111,27 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         checks.insert(repo.clone(), check);
     }
 
+    // Asked before anything lands or the hook hears of an archive: one
+    // that can't happen mustn't be half done.
+    if req.mode == LandMode::Archive {
+        let mut left = Vec::new();
+        for repo in meta.repos.iter().filter(|r| !scope.contains(r)) {
+            if has_unlanded(&ws, repo)? {
+                left.push(repo.as_str());
+            }
+        }
+        if !left.is_empty() {
+            return Err(eyre!(
+                "nothing landed: archiving the workspace would leave unlanded commits in {}; \
+                 land from the workspace root to land every repo, or `choros land continue` this one",
+                left.join(", ")
+            ));
+        }
+    }
+
+    let hooked = crate::hook::before(&trunk, &ws, req)?;
+    let req = hooked.as_ref().unwrap_or(req);
+
     if req.body.is_none() && req.env_session.as_ref().is_some_and(|s| !s.is_empty()) {
         refuse_without_body(env, &trunk, &ws, &scope)?;
     }
@@ -132,6 +154,10 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
     }
     if landed.is_empty() {
         return Err(eyre!("nothing to land: no repo in scope has commits past its last landing"));
+    }
+    // Before the workspace is archived out from under where it runs.
+    if let Some(warning) = crate::hook::after(&trunk, &ws, req, &landed) {
+        landed[0].warnings.push(warning);
     }
 
     let archived_to = if req.mode == LandMode::Archive {

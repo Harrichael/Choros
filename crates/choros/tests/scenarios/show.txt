@@ -1,0 +1,72 @@
+# `choros landing show N` is one landing-set in full. Every command answers
+# --help with its own entries of the usage text, and takes --flag=value.
+
+$ choros work one app
+$ROOT/trunk/one/app
+mkdir $ROOT/trunk/one
+cloning app…
+copying agent templates…
+$ cd trunk/one/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue --label=tasks/a --priority=p1
+app → appq/landing-1, at the front: https://github.test/pull/1
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-1
+$ echo "a, again" > a.txt && git commit -qam "rewrite a"
+$ choros land continue --title="A second look at a"
+app → appq/landing-2, queued
+    landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
+    appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
+$ choros landing show 1
+appq/landing-1  front  write a
+  repo:     app
+  branch:   appq/landing-1
+  pr:       https://github.test/pull/1
+  priority: p1
+  labels:   tasks/a
+  folder:   $ROOT/trunk/.choros-config/queues/appq/landing/landing-1/app
+$ choros landing show 2
+appq/landing-2  queued  A second look at a
+  repo:     app
+  branch:   appq/landing-2
+  after:    landing-1
+  folder:   $ROOT/trunk/.choros-config/queues/appq/landing/landing-2/app
+$ choros landing show 9
+choros: appq has no landing-9
+[exit 1]
+$ choros status --help
+choros status [--prompt|--all] [--json]
+                                landing queues and their sets; --prompt prints one token
+                                (⇣sync / !resolve) for shell prompts; --json gives the
+                                whole report as JSON, merged sets included
+$ choros help landing
+choros landing show N [--queue Q]
+                                one landing-set: its PR, what it waits on, where its
+                                landing folder is, and what holds it up
+choros landing open N [--queue Q] [--session ID]
+                                open the landing's forked Claude Code session
+choros landing path N [--queue Q]
+                                the unmerged sets landing-N waits on, in rounds: the first
+                                can be reviewed and merged now, each next once those before
+choros landing log N [--queue Q]
+                                each change made to landing-N, by a land or on its branch
+                                and who wrote it, and how often the queue has moved it
+$ choros queue drop
+usage: choros queue NAME [--landing] | queue -i [NAME] | queue ls [--all] | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue restore NAME N | queue doctor NAME | queue base NAME | queue base add|rm NAME REPO#N[,N…]…
+[exit 2]
+
+# From anywhere but a workspace that is behind, those that are behind are
+# only counted.
+$ gh pr merge 1 --squash
+$ choros queue sync appq
+appq: merged landing-1
+appq: re-synced landing-2
+appq: opened PRs for landing-2
+$ cd trunk
+$ choros queue appq
+appq (app) @ $ROOT/trunk
+* landing-2  front   A second look at a (app)  #2
+* main
+  (1 merged)
+  ⇣ 1 other workspace behind the merge head; each needs `choros repo sync` before it lands

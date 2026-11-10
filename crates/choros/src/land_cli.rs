@@ -1,7 +1,7 @@
 //! `choros land`, `sync`, `status`, `queue …` and `landing open`: the CLI
 //! over the landing queue engine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -453,10 +453,24 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
         return;
     }
     print_diffbase(q);
-    for ns in &q.needs_sync {
+    // Only the workspace you're in is yours to sync now.
+    let here = std::env::current_dir().ok().and_then(|cwd| choros::find_workspace(&cwd).ok()).map(|(_, ws)| ws);
+    let (mine, others): (Vec<_>, Vec<_>) = q.needs_sync.iter().partition(|ns| Some(&ns.workspace) == here.as_ref());
+    for ns in mine {
         println!("  ⇣ {} ({}) needs `choros repo sync`", ns.workspace.display(), ns.repo);
     }
+    let workspaces: BTreeSet<&PathBuf> = others.iter().map(|ns| &ns.workspace).collect();
+    if !workspaces.is_empty() {
+        println!(
+            "  ⇣ {} behind the merge head; each needs `choros repo sync` before it lands",
+            count(workspaces.len(), "other workspace")
+        );
+    }
 }
+
+/// Not queue names: one of these with its arguments missing is a mistyped
+/// command.
+const QUEUE_VERBS: [&str; 9] = ["new", "ls", "bind", "base", "sync", "resolve", "drop", "restore", "doctor"];
 
 pub fn run_queue(args: Vec<String>) -> Result<()> {
     let trunk = trunk_here()?;
@@ -582,7 +596,7 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        [name] | [name, "--landing"] | ["--landing", name] if !name.starts_with('-') => {
+        [name] | [name, "--landing"] | ["--landing", name] if !name.starts_with('-') && !QUEUE_VERBS.contains(name) => {
             print_queue_status(&status::queue_status(&trunk, name)?, a.contains(&"--landing"));
             Ok(())
         }
@@ -837,13 +851,13 @@ fn print_report(name: &str, r: &PassReport) {
     }
 }
 
-const LANDING_USAGE: &str =
-    "choros landing open N [--queue Q] [--session ID] | landing path N [--queue Q] | landing log N [--queue Q]";
+const LANDING_USAGE: &str = "choros landing show N [--queue Q] | landing open N [--queue Q] [--session ID] \
+     | landing path N [--queue Q] | landing log N [--queue Q]";
 
 pub fn run_landing(args: Vec<String>) -> Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let (verb, n, rest) = match a.as_slice() {
-        [verb @ ("open" | "path" | "log"), n, rest @ ..] => (*verb, set_number(n)?, rest),
+        [verb @ ("show" | "open" | "path" | "log"), n, rest @ ..] => (*verb, set_number(n)?, rest),
         _ => usage(LANDING_USAGE),
     };
     let open = verb == "open";
@@ -869,6 +883,7 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
     match verb {
         "path" => return print_path(&trunk, &queue, n),
         "log" => return print_log(&trunk, &queue, n),
+        "show" => return print_set(&trunk, &queue, n),
         _ => {}
     }
     let q = Queue::open(&trunk, &queue)?;
@@ -882,6 +897,44 @@ pub fn run_landing(args: Vec<String>) -> Result<()> {
     let status = cmd.status()?;
     if !status.success() {
         return Err(eyre!("claude exited with {status}"));
+    }
+    Ok(())
+}
+
+fn print_set(trunk: &Path, queue: &str, n: u32) -> Result<()> {
+    let status = status::queue_status(trunk, queue)?;
+    let s = status.sets.iter().find(|s| s.n == n).ok_or_else(|| eyre!("{queue} has no landing-{n}"))?;
+    let title = s.pr_title.as_deref().or(s.title.as_deref()).unwrap_or("");
+    println!("{queue}/landing-{n}  {}  {title}", s.state);
+    let mut rows = vec![("repo", s.repo.clone()), ("branch", s.branch.clone())];
+    if let Some(pr) = &s.pr {
+        let review = s.review.as_ref().map_or(String::new(), |r| {
+            [(r.draft, " draft"), (r.unanswered, " unanswered"), (r.approved, " approved")]
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, word)| *word)
+                .collect()
+        });
+        rows.push(("pr", format!("{}{review}", pr.url)));
+    }
+    if let Some(p) = s.priority {
+        rows.push(("priority", format!("p{p}")));
+    }
+    if !s.labels.is_empty() {
+        rows.push(("labels", s.labels.join(", ")));
+    }
+    if s.state != "merged" && !s.deps.is_empty() {
+        rows.push(("after", s.deps.join(", ")));
+    }
+    let folder = Queue::open(trunk, queue)?.landing_dir(n).join(&s.repo);
+    if folder.exists() {
+        rows.push(("folder", folder.display().to_string()));
+    }
+    for (name, value) in rows {
+        println!("  {:<10}{value}", format!("{name}:"));
+    }
+    for note in set_notes(s) {
+        println!("  {note}");
     }
     Ok(())
 }

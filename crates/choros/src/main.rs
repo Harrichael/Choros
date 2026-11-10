@@ -31,9 +31,14 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).flat_map(split_flag);
     let sub = args.next();
     let rest: Vec<String> = args.collect();
+    if let Some(sub) = sub.as_deref().filter(|s| !s.starts_with('-'))
+        && rest.iter().any(|a| a == "--help" || a == "-h")
+    {
+        return cli::print_help(sub);
+    }
     match sub.as_deref() {
         None => {
             cli::print_usage();
@@ -68,10 +73,7 @@ fn run() -> Result<()> {
                 print!("{}", cli::AGENT_DOC);
                 Ok(())
             }
-            [t] => {
-                eprintln!("choros: no help topic `{t}`; `choros help` lists them");
-                std::process::exit(2);
-            }
+            [t] => cli::print_help(t),
             _ => {
                 eprintln!("choros: `choros help` takes at most one topic, got: {}", rest.join(" "));
                 std::process::exit(2);
@@ -90,6 +92,19 @@ fn run() -> Result<()> {
             eprintln!("choros: no command `{other}`; `choros --help` lists them");
             std::process::exit(2);
         }
+    }
+}
+
+/// `--flag=value` as `--flag value`, which is the form each command reads.
+/// Only what is spelled like a flag is split: a title may hold `=` too.
+fn split_flag(arg: String) -> Vec<String> {
+    let flag = |f: &str| {
+        f.strip_prefix("--")
+            .is_some_and(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+    };
+    match arg.split_once('=') {
+        Some((f, value)) if flag(f) => vec![f.to_string(), value.to_string()],
+        _ => vec![arg],
     }
 }
 

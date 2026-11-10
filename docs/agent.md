@@ -62,6 +62,8 @@ without one can't land short of `--force`:
 ## After landing
 
 `choros status` shows each set; `! parked` means a conflict to resolve.
+`choros landing show N` shows one: its PR, what it waits on, its landing
+folder and what holds it up. Every command answers `--help`.
 To change an open set, such as for review fixes, work in its landing folder,
 `<trunk>/.choros-config/queues/<queue>/landing/landing-N`: commit and `git push`, and the commits
 join the set (a rewrite doesn't). `choros landing open N` resumes the

@@ -207,7 +207,13 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             park: set.park.clone(),
             tip: set.tip.clone(),
             blocked: set.is_open() && set.park.is_none() && graph::blocked(&st, *n),
-            conflicts_with: set.conflicts_with.clone(),
+            // A set that has merged or gone is no longer clashed with.
+            conflicts_with: set
+                .conflicts_with
+                .iter()
+                .copied()
+                .filter(|m| st.sets.get(m).is_some_and(|s| s.is_open()))
+                .collect(),
             landing_dirty,
             unlinked: graph::stacked(&st, *n) && set.stack.is_none(),
             behind_in_stack: set.park.is_none() && graph::behind_in_stack(&st, *n).is_some(),

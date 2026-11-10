@@ -10,6 +10,7 @@ pub mod engine;
 pub mod forge;
 pub mod git;
 pub mod graph;
+pub mod hook;
 pub mod instant;
 pub mod land;
 pub mod mend;

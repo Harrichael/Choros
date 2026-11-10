@@ -13,6 +13,8 @@ use crate::{git, registry};
 const SHELL_INIT: &str = r#"# choros shell integration — works in bash and zsh
 choros() {
   local target
+  # Help is to read, not a folder to go to.
+  case " $* " in *" --help "*|*" -h "*) command choros "$@"; return ;; esac
   case "$1" in
     work)
       target="$(command choros "$@")" || return $?
@@ -101,8 +103,13 @@ INSIDE A WORKSPACE
                                     need; --deps SET,…|none (or -i to pick them) on those sets
                                     instead, --deps HEAD on everything queued. Each set must pass
                                     the repo's check from repos.toml on its own tip; --force skips
-                                    it. --title/--body-file set the PR text. Each land is a new
-                                    set; change an open one from its landing folder
+                                    it. --title/--body-file set the PR text, --label L names
+                                    what the set carries, --priority p0…p4 how urgent it is.
+                                    Each land is a new set; change an open one from its landing
+                                    folder
+    choros landing show N [--queue Q]
+                                    one landing-set: its PR, what it waits on, where its
+                                    landing folder is, and what holds it up
     choros landing open N [--queue Q] [--session ID]
                                     open the landing's forked Claude Code session
     choros landing path N [--queue Q]
@@ -155,6 +162,30 @@ AGENTS
 
 pub fn print_usage() {
     print!("{USAGE}");
+}
+
+/// The entries of the usage text for one command: `choros help land`, or
+/// `--help` after it.
+pub fn print_help(command: &str) -> Result<()> {
+    // `choros sync` is short for `choros repo sync`.
+    let command = if command == "sync" { "repo" } else { command };
+    let mut found = false;
+    let mut within = false;
+    for line in USAGE.lines() {
+        if let Some(entry) = line.strip_prefix("    choros ") {
+            within = entry.split([' ', '|']).next() == Some(command);
+        } else if !line.starts_with("     ") {
+            within = false;
+        }
+        if within {
+            println!("{}", line.strip_prefix("    ").unwrap_or(line));
+            found = true;
+        }
+    }
+    if !found {
+        return Err(eyre!("no command or help topic `{command}`; `choros --help` lists them"));
+    }
+    Ok(())
 }
 
 pub fn emit_shell_init() {

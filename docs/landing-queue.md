@@ -291,6 +291,34 @@ with the same commits is never opened. Each land, once on main, appends a
 line to `<trunk>/.choros-config/instant.jsonl` with its repo, workspace, last
 commit, PR, labels and sessions: the only record of it other tools can read.
 
+### The land hook
+
+A trunk can name a command that every land runs, so that whatever tracks
+the work can follow it. Choros still gives labels no meaning: the hook does.
+
+```toml
+# <trunk>/.choros-config/hooks.toml
+land = "tracker land-hook"   # run as `tracker land-hook before`, then `… after`
+```
+
+**Before** anything lands, it reads the land as JSON on stdin: `mode`
+(`continue` or `archive`), `labels`, `priority` (`p0`…`p4` or null), `title`,
+`body`, `session` (the Claude Code session, or null) and `workspace`. It may
+print a JSON object with any of `labels`, `priority`, `title` and `body`, and
+the land goes ahead with those instead; printing nothing changes nothing. If
+it fails, nothing lands, and what it wrote to stderr says why. A body it
+gives counts as given, so a hook that wants a session to write its own PR
+body leaves `body` out when there was none.
+
+**After** the sets are made, and before an `archive` moves the workspace, it
+reads the same JSON as the land went ahead with, plus `landed`: each set's
+`repo`, `queue` and `n` (the last two null for a land straight to main). The
+land stands whatever it does; a failure is shown as a warning.
+
+It runs where `land` was run, with its stderr on the terminal. A
+`hooks.toml` that can't be read refuses the land rather than skipping the
+hook.
+
 ## Diffbase
 
 A queue normally builds on main. Its diffbase lists PRs it builds on before
