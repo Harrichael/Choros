@@ -43,6 +43,7 @@ $ choros status --json
             }
           ],
           "labels": [],
+          "priority": null,
           "deps": [],
           "park": null,
           "blocked": false,
@@ -68,6 +69,7 @@ $ choros status --json
           },
           "sessions": [],
           "labels": [],
+          "priority": null,
           "deps": [
             "landing-1"
           ],

@@ -339,6 +339,7 @@ fn concurrent_lands_serialize() {
                         title: None,
                         body: None,
                         labels: Vec::new(),
+                        priority: None,
                         sessions: Vec::new(),
                         env_session: None,
                     };

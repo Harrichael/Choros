@@ -627,6 +627,7 @@ impl World {
             title: None,
             body: None,
             labels: Vec::new(),
+            priority: None,
             sessions: vec!["source-session".into()],
             env_session: None,
         }

@@ -2,6 +2,7 @@
 //! or straight onto main in instant mode. Also binding a repo to a queue, and
 //! syncing a workspace onto its queue's merge head for that repo.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -35,6 +36,9 @@ pub struct LandRequest {
     /// Kept on each set made, for other tools to read; choros never looks
     /// inside them.
     pub labels: Vec<String>,
+    /// How urgent the work is, 0 the most. A plain land goes ahead of a
+    /// less urgent set it meets only in its lines, if that set has no PR.
+    pub priority: Option<u8>,
     /// Sessions to fork into the landing; empty means "work it out".
     pub sessions: Vec<String>,
     /// The Claude Code session `land` is running inside, if any (the CLI
@@ -837,6 +841,9 @@ struct Placed {
     /// Those of `why` the commits replayed whole without: they went
     /// behind them only because the two change the same lines.
     lines_only: BTreeSet<u32>,
+    /// Sets the commits meet only in their lines and go ahead of, being
+    /// the more urgent: each is put behind the new set once it has landed.
+    ahead: BTreeSet<u32>,
     spec: BaseSpec,
     base: String,
     tip: String,
@@ -850,6 +857,11 @@ struct Commits<'a> {
     through: &'a str,
     head: &'a str,
     own: &'a [String],
+    priority: Option<u8>,
+    /// Whether a set replays whole on top of the commits at a given tip,
+    /// once tried: the trial may run the repo's check, and the same one
+    /// comes up again in every probe.
+    trials: &'a RefCell<BTreeMap<(u32, String), bool>>,
 }
 
 /// Land on as little of the queue as the commits need. Start on main and the
@@ -869,6 +881,7 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
     let through = landed_through(ws, repo)?;
     check_landable(&git, &through)?;
     let head = git.head()?;
+    let trials = RefCell::default();
     loop {
         // No handler: a conflict here says what the commits need; it isn't
         // there to be resolved.
@@ -888,10 +901,19 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
         let sync = work.git(repo);
         sync.fetch(repo_dir.to_str().unwrap(), &["+HEAD:refs/choros/incoming"])?;
         let own = sync.commits(&through, &head)?;
-        let c = Commits { repo, sync: &sync, live: &live, through: &through, head: &head, own: &own };
+        let c = Commits {
+            repo,
+            sync: &sync,
+            live: &live,
+            through: &through,
+            head: &head,
+            own: &own,
+            priority: req.priority,
+            trials: &trials,
+        };
         let mut touched = BTreeMap::new();
 
-        let first = match place(&mut work, &c, start.clone(), BTreeSet::new(), &mut touched)? {
+        let first = match place(&mut work, &c, start.clone(), Lines::default(), &mut touched)? {
             Ok(p) => p,
             Err(why) => return Ok(Least::Fallback(why)),
         };
@@ -911,7 +933,7 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
             }
         };
 
-        let Placed { why, lines_only, spec, base, tip } = chosen;
+        let Placed { why, lines_only, ahead, spec, base, tip } = chosen;
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
         let n = work.st.next_n.max(1);
@@ -921,6 +943,20 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
         set.lines_only = leaves.into_iter().filter(|m| lines_only.contains(m)).collect();
         set.landed_as(c.through, c.head);
         work.st.sets.insert(n, set);
+        for m in &ahead {
+            let mut deps = work.st.sets[m].deps.clone();
+            deps.push(Dep::Set(n));
+            let deps = graph::reduce(&work.st, &deps);
+            let behind = work.st.sets.get_mut(m).unwrap();
+            behind.lines_only.retain(|d| deps.contains(&Dep::Set(*d)));
+            if deps.contains(&Dep::Set(n)) {
+                behind.lines_only.push(n);
+            }
+            behind.deps = deps;
+        }
+        if graph::has_cycle(&work.st) {
+            return Err(eyre!("landing-{n} would both wait on and go ahead of the same set; nothing was landed"));
+        }
         work.publish(n)?;
         work.rebuild_merge_head(repo)?;
         work.save()?;
@@ -931,7 +967,15 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
 
         let mut notes: Vec<String> =
             why.iter().map(|(m, w)| format!("on {}: {w}", crate::state::branch(&q.name, *m))).collect();
-        let ahead: Vec<u32> = live.iter().copied().filter(|m| !mine.contains(m)).collect();
+        for m in &ahead {
+            notes.push(format!(
+                "ahead of {}, which changes the same lines and is less urgent; it moves behind this set",
+                crate::state::branch(&q.name, *m)
+            ));
+        }
+        let moved: BTreeSet<u32> = ahead.iter().flat_map(|a| graph::dependents(&work.st, *a)).chain(ahead.iter().copied()).collect();
+        let skipped: Vec<u32> = live.iter().copied().filter(|m| !mine.contains(m) && !moved.contains(m)).collect();
+        let ahead = skipped;
         if !ahead.is_empty() {
             notes.push(match checker.check {
                 Some(check) => format!("ahead of {}; `{check}` passed without them", names(q, &ahead)),
@@ -966,7 +1010,11 @@ fn search(
         for m in graph::leaves(&work.st, extra) {
             start.entry(m).or_insert_with(|| "the check fails without it".into());
         }
-        let Ok(p) = place(work, c, start, first.lines_only.clone(), touched)? else {
+        let lines = Lines {
+            behind: first.lines_only.clone(),
+            ahead: first.ahead.clone(),
+        };
+        let Ok(p) = place(work, c, start, lines, touched)? else {
             return Ok(Probe::Fail);
         };
         Ok(match checker.verdict(c.sync, &p.tip)? {
@@ -1044,13 +1092,19 @@ fn place(
     work: &mut Work,
     c: &Commits,
     mut why: BTreeMap<u32, String>,
-    mut lines_only: BTreeSet<u32>,
+    lines: Lines,
     touched: &mut BTreeMap<u32, BTreeSet<String>>,
 ) -> Result<std::result::Result<Placed, Option<String>>> {
+    let Lines {
+        behind: mut lines_only,
+        mut ahead,
+    } = lines;
     let what = format!("{}'s land", c.repo);
     loop {
         let deps: Vec<u32> = why.keys().copied().collect();
         let mine = graph::ancestors_of_deps(&work.st, &deps);
+        // A set the commits turned out to need is under them after all.
+        ahead.retain(|a| !mine.contains(a));
         // Needing every live set is landing on the merge head, unless it
         // also needs a parked one the merge head goes without.
         // Not so behind a set whose lines they change: the fallback moves
@@ -1110,17 +1164,68 @@ fn place(
         // A clash a set under these commits already has, beside the same
         // set, is that pair's to settle; these only inherit it.
         let inherited = |m: &u32| mine.iter().any(|a| work.st.sets[a].conflicts_with.contains(m));
-        let mut clashes = clashes(&work.st, c.sync, c.live, &mine, &tip)?;
+        // What the commits go ahead of, and what sits on that, will be
+        // behind them: the sets under it are the ones to look at then.
+        let after: BTreeSet<u32> = ahead.iter().flat_map(|a| graph::dependents(&work.st, *a)).chain(ahead.iter().copied()).collect();
+        let beside: Vec<u32> = c.live.iter().copied().filter(|m| !after.contains(m)).collect();
+        let mut clashes = clashes(&work.st, c.sync, &beside, &mine, &tip)?;
         clashes.retain(|(m, _)| !inherited(m));
-        if !clashes.is_empty() {
-            for (m, files) in clashes {
+        // Either way there is more to look at: on top of a set it went
+        // behind, or at the sets under one it went ahead of.
+        let found = !clashes.is_empty();
+        for (m, files) in clashes {
+            if goes_ahead(work, c, m, &tip)? {
+                ahead.insert(m);
+            } else {
                 why.insert(m, format!("they change the same lines ({}), so it goes behind", files.join(", ")));
                 lines_only.insert(m);
             }
+        }
+        if found {
             continue;
         }
-        return Ok(Ok(Placed { why, lines_only, spec, base, tip }));
+        return Ok(Ok(Placed { why, lines_only, ahead, spec, base, tip }));
     }
+}
+
+/// The sets a land meets only in their lines, by which side it takes.
+#[derive(Default)]
+struct Lines {
+    behind: BTreeSet<u32>,
+    ahead: BTreeSet<u32>,
+}
+
+/// Whether the commits, replayed to `tip` without set `m` and clashing
+/// with it there, go ahead of it: they are the more urgent, `m` is only
+/// queued (a set with a PR is public, and is not reordered), and `m`
+/// replays whole on top of them. That replay settles where the lines meet,
+/// so the queue has the answer when it moves `m` for real.
+fn goes_ahead(work: &mut Work, c: &Commits, m: u32, tip: &str) -> Result<bool> {
+    let urgency = |p: Option<u8>| p.unwrap_or(u8::MAX);
+    let set = work.st.sets[&m].clone();
+    let public = |n: &u32| work.st.sets[n].pr.is_some();
+    if urgency(c.priority) >= urgency(set.priority)
+        || set.park.is_some()
+        || public(&m)
+        || graph::dependents(&work.st, m).iter().any(public)
+    {
+        return Ok(false);
+    }
+    let key = (m, tip.to_string());
+    if let Some(known) = c.trials.borrow().get(&key) {
+        return Ok(*known);
+    }
+    let what = format!("{} behind {}'s land", set.branch(&work.q.name), c.repo);
+    let own = c.sync.replayable(&set.base_sha, &set.tip, &what)?;
+    let main = work.root(c.repo)?;
+    let mut tips: Vec<String> = set.base.deps.iter().map(|(_, t)| t.clone()).collect();
+    tips.push(tip.to_string());
+    let whole = match work.build(c.repo, &main, &tips, &what)? {
+        Ok(base) => work.replay(c.repo, &base, &own, &what)?.is_ok(),
+        Err(_) => false,
+    };
+    c.trials.borrow_mut().insert(key, whole);
+    Ok(whole)
 }
 
 /// The live sets outside `mine` that change any of `files`.
@@ -1221,6 +1326,7 @@ fn new_set(
         labels: req.labels.clone(),
         sessions: Vec::new(),
         conflicts_with: Vec::new(),
+        priority: req.priority,
         lines_only: Vec::new(),
         pending: None,
         change: None,

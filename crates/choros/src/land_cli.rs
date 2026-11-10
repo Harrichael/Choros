@@ -74,7 +74,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mode = match it.next().as_deref() {
         Some("continue") => LandMode::Continue,
         Some("archive") => LandMode::Archive,
-        _ => usage("choros land continue|archive [--deps SET,…|none|HEAD | -i] [--force] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--session ID]…"),
+        _ => usage("choros land continue|archive [--deps SET,…|none|HEAD | -i] [--force] [--on-conflict depend|merge-head] [--title T] [--body-file F] [--label L]… [--priority pN] [--session ID]…"),
     };
     let mut pick = false;
     let mut deps: Option<Deps> = None;
@@ -83,6 +83,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     let mut title = None;
     let mut body = None;
     let mut labels: Vec<String> = Vec::new();
+    let mut priority = None;
     let mut sessions = Vec::new();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -114,6 +115,13 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
                 Some(l) => labels.push(l),
                 None => return Err(eyre!("--label needs text")),
             },
+            "--priority" => {
+                let given = it.next().unwrap_or_default();
+                priority = match given.as_str() {
+                    "p0" | "p1" | "p2" | "p3" | "p4" => Some(given.as_bytes()[1] - b'0'),
+                    _ => return Err(eyre!("--priority takes p0 (most urgent) to p4, got `{given}`")),
+                };
+            }
             "--session" => sessions.push(it.next().ok_or_else(|| eyre!("--session needs an id"))?),
             other => return Err(eyre!("unknown option {other}")),
         }
@@ -139,6 +147,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         title,
         body,
         labels,
+        priority,
         sessions,
         env_session: std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
     };
@@ -339,6 +348,9 @@ fn set_line(s: &status::SetLine, head: &str, columns: Option<usize>) -> String {
                 line.push_str(&format!(" {word}"));
             }
         }
+    }
+    if let Some(p) = s.priority {
+        line.push_str(&format!("  p{p}"));
     }
     if !s.labels.is_empty() {
         line.push_str(&format!("  [{}]", s.labels.join(", ")));

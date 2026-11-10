@@ -32,6 +32,9 @@ the commits since the last land. Keep working and land again as you go.
                                 (repeatable); choros never reads it, but a
                                 trunk's context hook may show it to whoever
                                 resolves a conflict
+    --priority pN               how urgent, p0 the most to p4; a plain land
+                                goes ahead of a less urgent set it meets
+                                only in its lines, if that set has no PR
     --session ID                the session to fork into the landing folder;
                                 by default, the one running the land
 

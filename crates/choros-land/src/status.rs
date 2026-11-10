@@ -60,6 +60,7 @@ pub struct SetLine {
     pub review: Option<PrReview>,
     pub sessions: Vec<SessionFork>,
     pub labels: Vec<String>,
+    pub priority: Option<u8>,
     pub deps: Vec<String>,
     pub park: Option<Park>,
     /// Where Choros last had the branch: what a pushed merge goes back to.
@@ -194,6 +195,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
             review: set.review.clone().filter(|_| set.is_open()),
             sessions: set.sessions.clone(),
             labels: set.labels.clone(),
+            priority: set.priority,
             deps: set
                 .deps
                 .iter()

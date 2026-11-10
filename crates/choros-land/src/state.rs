@@ -461,6 +461,10 @@ pub struct LandingSet {
     /// left beside rather than behind.
     #[serde(default)]
     pub conflicts_with: Vec<u32>,
+    /// How urgent the land said it is, 0 the most; `None` gives way to
+    /// any. It orders sets that meet only in their lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     /// Sets among `deps` its commits replayed whole without: it went behind
     /// them only because the two change the same lines. Whether it would
     /// pass its check ahead of one is not known until that is tried.

@@ -131,8 +131,8 @@ via = "push"          # or "pr": open a PR and merge it at once (keeps a PR reco
 ## Landing
 
 ```
-choros land continue [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--session UUID]...
-choros land archive  [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--session UUID]...
+choros land continue [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--priority pN] [--session UUID]...
+choros land archive  [--deps SET,...|none|HEAD | -i] [--force] [--title T] [--body-file F] [--label L]... [--priority pN] [--session UUID]...
 ```
 
 **Scope.** Inside a repo: that repo. At the workspace root: every repo with
@@ -264,6 +264,15 @@ every set.
 the text it proposes at land time; it is stored with the set. A raw-terminal
 land stores none: the body is blank and the title falls back to the set's
 first commit subject (GitHub requires one).
+
+**Priority.** `--priority p0` (most urgent) to `p4` is kept on each set made;
+a set without one gives way to any with one. It orders sets that meet only
+in their lines (`lines_only`), where either could go first. A plain land
+goes ahead of a less urgent set it clashes with, instead of behind it, when
+neither that set nor anything on it has a PR and it replays whole on top
+of the new set; the set is then put behind the new one, and the next pass
+moves it there. A set with a PR is public and keeps its place. The priority
+is fixed at the land.
 
 **Labels.** Each `--label` is kept, in order and without repeats, on every
 set the land makes, and shown by `choros status`. Choros never reads them;

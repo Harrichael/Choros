@@ -62,6 +62,7 @@ fn landing_from_a_landing_folder_is_refused() {
         title: None,
         body: None,
         labels: Vec::new(),
+        priority: None,
         sessions: Vec::new(),
         env_session: None,
     };

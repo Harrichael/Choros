@@ -354,3 +354,114 @@ fn dropping_what_a_set_went_behind_for_its_lines_leaves_none_of_it() {
     assert!(set.park.is_none() && set.lines_only.is_empty());
     assert_eq!(w.file_at(&set.tip, "NOTES").as_deref(), Some("two\n2\n"));
 }
+
+/// Two sets that meet only in their lines could go in either order. The
+/// more urgent goes first while the other is only queued; a set with a PR
+/// is public and keeps its place whatever lands.
+#[test]
+fn the_more_urgent_of_two_that_meet_in_their_lines_goes_first() {
+    let w = World::new();
+    w.push_to_main("NOTES", "1\n2\n");
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "NOTES".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
+    let (front, later, urgent) = (w.workspace("front"), w.workspace("later"), w.workspace("urgent"));
+    w.commit(&front, "NOTES", "front\n2\n");
+    w.land_plain(&front).unwrap();
+    w.commit(&later, "NOTES", "later\n2\n");
+    w.land_plain(&later).unwrap();
+    assert!(w.state().sets[&1].pr.is_some() && w.state().sets[&2].pr.is_none());
+    w.commit(&urgent, "NOTES", "urgent\n2\n");
+
+    let req = LandRequest {
+        priority: Some(0),
+        ..w.request(&urgent, Deps::Least, None)
+    };
+    w.land_req(&req, None).unwrap();
+    w.pass();
+
+    let st = w.state();
+    assert_eq!(st.sets[&3].deps, [Dep::Set(1)], "behind the set with a PR");
+    assert_eq!(st.sets[&2].deps, [Dep::Set(3)], "ahead of the one only queued");
+    assert!(st.sets.values().all(|s| s.park.is_none()));
+    assert_eq!(w.file_at(&st.sets[&3].tip, "NOTES").as_deref(), Some("front\nurgent\n2\n"));
+    assert_eq!(w.file_at(&st.sets[&2].tip, "NOTES").as_deref(), Some("front\nurgent\nlater\n2\n"));
+}
+
+/// An urgent land going ahead of a line of queued sets goes ahead of the
+/// whole line, and still behind the set with a PR at the bottom of it: it
+/// never ends up at the front beside a set it clashes with.
+#[test]
+fn an_urgent_land_goes_ahead_of_a_whole_line_and_behind_the_pr_under_it() {
+    let w = World::new();
+    w.push_to_main("NOTES", "1\n2\n");
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "NOTES".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
+    for name in ["front", "a", "b", "c"] {
+        let ws = w.workspace(name);
+        w.commit(&ws, "NOTES", &format!("{name}\n2\n"));
+        w.land_plain(&ws).unwrap();
+    }
+    let urgent = w.workspace("urgent");
+    w.commit(&urgent, "NOTES", "urgent\n2\n");
+
+    let req = LandRequest {
+        priority: Some(0),
+        ..w.request(&urgent, Deps::Least, None)
+    };
+    w.land_req(&req, None).unwrap();
+    w.pass();
+
+    let st = w.state();
+    let deps = |n: u32| st.sets[&n].deps.clone();
+    assert_eq!((deps(5), deps(2), deps(3), deps(4)), (vec![Dep::Set(1)], vec![Dep::Set(5)], vec![Dep::Set(2)], vec![Dep::Set(3)]));
+    assert!(st.sets[&5].pr.is_none() && st.sets.values().all(|s| s.park.is_none()));
+    assert!(st.sets.values().all(|s| s.lines_only.iter().all(|d| s.deps.contains(&Dep::Set(*d)))));
+}
+
+/// A land that would go ahead of a set for its lines, and turns out to
+/// need that set for its check, goes behind it: the queue never holds two
+/// sets that each wait on the other.
+#[test]
+fn a_land_that_needs_the_set_it_would_go_ahead_of_goes_behind_it() {
+    let w = World::new();
+    w.push_to_main("NOTES", "1\n2\n");
+    w.repos_toml("[app]\ncheck = \"test -f a.txt -o ! -f b.txt\"\n");
+    let mut config = w.queue().config;
+    config.merge.rules.push(crate::state::MergeRule {
+        files: "NOTES".into(),
+        union: true,
+        regenerate: None,
+    });
+    crate::state::write_config(&w.queue().dir().join("queue.toml"), &config).unwrap();
+    let (y, m, other, urgent) = (w.workspace("y"), w.workspace("m"), w.workspace("other"), w.workspace("urgent"));
+    w.commit(&y, "c.txt", "c\n");
+    w.land_plain(&y).unwrap();
+    w.commit(&m, "NOTES", "m\n2\n");
+    w.commit(&m, "a.txt", "a\n");
+    w.land_req(&w.request(&m, Deps::Picked(vec![Dep::Set(1)]), None), None).unwrap();
+    w.commit(&other, "d.txt", "d\n");
+    w.land_plain(&other).unwrap();
+    w.commit(&urgent, "NOTES", "urgent\n2\n");
+    w.commit(&urgent, "b.txt", "uses a\n");
+
+    let req = LandRequest {
+        priority: Some(0),
+        ..w.request(&urgent, Deps::Least, None)
+    };
+    w.land_req(&req, None).unwrap();
+
+    let st = w.state();
+    assert!(!crate::graph::has_cycle(&st));
+    assert_eq!(st.sets[&4].deps, [Dep::Set(2)]);
+    assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);
+}

@@ -69,6 +69,7 @@ fn land_archive_retires_the_workspace_it_ran_in() {
         title: None,
         body: None,
         labels: Vec::new(),
+        priority: None,
         sessions: vec![],
         env_session: None,
     };
