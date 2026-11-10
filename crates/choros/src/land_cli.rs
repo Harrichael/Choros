@@ -572,6 +572,17 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
+        ["restore", name, n] => {
+            let n = set_number(n)?;
+            let q = Queue::open(&trunk, name)?;
+            let report = admin::restore(&env, &q, n)?;
+            println!("{name}: origin's landing-{n} is as the queue has it");
+            if q.read_state()?.sets.get(&n).is_some_and(|s| s.status == choros_land::state::SetStatus::Closed) {
+                println!("{name}: landing-{n}'s PR is closed; reopen it on GitHub for the queue to go on");
+            }
+            print_report(name, &report);
+            Ok(())
+        }
         ["doctor", name] => {
             for note in admin::doctor(&env, &Queue::open(&trunk, name)?)? {
                 println!("{note}");
@@ -584,7 +595,7 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
         }
         _ => usage(
             "choros queue NAME [--landing] | queue -i [NAME] | queue ls [--all] \
-             | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue doctor NAME \
+             | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue restore NAME N | queue doctor NAME \
              | queue base NAME | queue base add|rm NAME REPO#N[,N…]…",
         ),
     }

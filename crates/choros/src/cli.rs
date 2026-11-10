@@ -130,6 +130,9 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
                                     retry parked conflicts, asking how to resolve each
     choros queue drop NAME N        remove a queued landing-set; its commits go back to the
                                     workspace that landed them, unlanded, on its next sync or land
+    choros queue restore NAME N     put landing-N's branch on origin back to what the queue has:
+                                    for a branch rewritten or mangled there (`queue resolve`
+                                    takes origin's instead)
     choros queue doctor NAME        compare the queue's state with origin, then sync
     choros queue base NAME          the PRs the queue builds on before they reach main
     choros queue base add|rm NAME REPO#N[,N…]…

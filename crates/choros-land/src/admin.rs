@@ -115,6 +115,61 @@ pub struct Dropped {
     pub returned_to: Option<PathBuf>,
 }
 
+/// Put landing-`n`'s branch on origin back to what the queue has for it:
+/// the other answer to a branch rewritten there, which `queue resolve`
+/// settles by taking origin's; and the answer to one deleted there. The
+/// queue's record of a set (its commits, held in the sync clone, and what
+/// it sits on) doesn't depend on origin, so the branch can be made again
+/// from it.
+///
+/// Only those two cases: commits added to the branch are part of the set,
+/// and GitHub's rebase of a stack is taken as it is, so there origin is
+/// not wrong and writing over it would lose work or approvals.
+pub fn restore(env: &Env, q: &Queue, n: u32) -> Result<PassReport> {
+    let mut work = Work::begin(q, env.agent, None, true)?.unwrap();
+    // A set whose PR GitHub closed when its branch went is still one to
+    // put back; the PR is reopened by hand after.
+    if !work.st.sets.get(&n).is_some_and(|s| matches!(s.status, SetStatus::Queued | SetStatus::Closed)) {
+        return Err(eyre!("{} has no landing-{n} to put back", q.name));
+    }
+    // What origin has now is taken in first, as a pass would: a push on
+    // top of the set joins it, and only a rewrite is left to answer.
+    work.observe_pushes(&mut PassReport::default())?;
+    work.save()?;
+    let set = &work.st.sets[&n];
+    let (branch, tip) = (set.branch(&q.name), set.tip.clone());
+    let git = work.set_git(n);
+    if git.rev_parse(&tip)?.is_none() {
+        return Err(eyre!("landing-{n}'s tip {tip:.12} is missing from the sync clone; there is nothing to put back"));
+    }
+    let there = git.rev_parse(&format!("refs/remotes/origin/{branch}"))?;
+    let rewritten = set.park.as_ref().filter(|p| matches!(p.op, ParkOp::Diverged | ParkOp::PushedMerge));
+    let pushed = q.config.push.private_sets || set.pr.is_some();
+    // The lease is on the version the park showed: one pushed since has
+    // not been looked at.
+    let expect = match (rewritten, &there) {
+        (Some(park), _) => Some(park.on.clone()),
+        (None, None) if pushed => None,
+        (None, None) => return Err(eyre!("landing-{n} is not one the queue pushes, so there is nothing on origin to put back")),
+        (None, Some(_)) => {
+            return Err(eyre!(
+                "origin's {branch} is not rewritten: what was pushed onto it is part of landing-{n}; there is nothing to put back"
+            ));
+        }
+    };
+    let rewritten = rewritten.is_some();
+    git.push_lease("origin", &tip, &branch, expect.as_deref())?;
+    let set = work.st.sets.get_mut(&n).unwrap();
+    set.remote = Some(tip);
+    if rewritten {
+        set.park = None;
+    }
+    work.save()?;
+    let report = work.pass(env.forge)?;
+    work.save()?;
+    Ok(report)
+}
+
 /// Differences between the queue's state and origin that a pass would not fix on
 /// its own, then a pass.
 pub fn doctor(env: &Env, q: &Queue) -> Result<Vec<String>> {

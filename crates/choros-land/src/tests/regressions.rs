@@ -519,3 +519,45 @@ fn a_squashed_replay_leaves_out_what_merges_brought() {
     let changed = git(&repo, &["diff-tree", "--no-commit-id", "--name-only", "-r", &picks[0]]);
     assert_eq!(changed, "own.txt");
 }
+
+/// A set's branch rewritten on origin by someone else parks the set. The
+/// queue's own record of it doesn't depend on origin, so it can be put
+/// back as the queue has it. Commits pushed on top are not a rewrite: they
+/// are part of the set, and there is nothing to put back over them.
+#[test]
+fn a_branch_mangled_on_origin_is_put_back_from_the_queues_record() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    let branch = format!("{QUEUE}/landing-1");
+    let tip = w.state().sets[&1].tip.clone();
+    let push = |file: &str, onto: &str, force: bool| {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("w");
+        git(tmp.path(), &["clone", "--quiet", "--branch", onto, w.origin.to_str().unwrap(), "w"]);
+        std::fs::write(work.join(file), "x\n").unwrap();
+        git(&work, &["add", file]);
+        git(&work, &["commit", "--quiet", "-m", file]);
+        let mut args = vec!["push", "--quiet", "origin"];
+        if force {
+            args.push("--force");
+        }
+        let to = format!("HEAD:{branch}");
+        args.push(&to);
+        git(&work, &args);
+        git(&work, &["rev-parse", "HEAD"])
+    };
+
+    push("junk.txt", "main", true);
+    w.pass();
+    assert_eq!(w.state().sets[&1].park.as_ref().map(|p| p.op), Some(ParkOp::Diverged));
+    crate::admin::restore(&w.env(), &w.queue(), 1).unwrap();
+    assert!(w.state().sets[&1].park.is_none());
+    assert_eq!(git(&w.origin, &["rev-parse", &branch]), tip);
+
+    let fix = push("fix.txt", &branch, false);
+    assert!(crate::admin::restore(&w.env(), &w.queue(), 1).is_err());
+    assert_eq!(git(&w.origin, &["rev-parse", &branch]), fix);
+    assert_eq!(w.state().sets[&1].tip, fix);
+}

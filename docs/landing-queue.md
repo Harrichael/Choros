@@ -410,6 +410,21 @@ steps, never while waiting on a person.
 failed lease on a private branch means an external push (step 2), not
 corruption. `choros queue doctor` reconciles the two by hand.
 
+**Origin holds a copy.** The graph, each set's change, where it sits and
+what settled it are in `queue.db`, and the commits are in the sync clone.
+What origin has comes in only as a difference from that record, looked at
+before it is taken: commits added to a set's branch join the set, GitHub's
+rebase of a stack is taken as a move, and a rewrite is not taken without
+asking. A rewritten branch parks its set (`diverged`) for you to say which
+stands: `choros queue resolve` takes origin's as a change to the set,
+`choros queue restore NAME N` puts the queue's back. A branch deleted there
+is pushed again when the set next moves, or at once by `queue restore`; if
+GitHub closed its PR with it, reopen the PR after. Two limits: junk pushed
+on top of a branch looks like an addition and is taken as one (the earlier
+tips stay held in the sync clone, under `refs/choros/kept/`), and what only
+origin knows still comes from it: whether a PR merged, its reviews, and
+what main is.
+
 **A set's change and where it sits are kept apart.** The change is the set's
 own commits as someone last left them: by the land, as they were written in
 the workspace, or by a push to its branch, whoever made it (commits added are taken as part of the set; a
