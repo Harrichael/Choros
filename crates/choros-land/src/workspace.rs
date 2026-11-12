@@ -31,6 +31,9 @@ pub struct WorkspaceLanding {
     /// [`crate::hook`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub land_hook: Option<String>,
+    /// Set while the workspace waits to be archived; see [`crate::archive`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after: Option<crate::archive::After>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

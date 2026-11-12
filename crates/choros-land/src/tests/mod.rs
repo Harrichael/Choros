@@ -629,6 +629,7 @@ impl World {
             priority: None,
             sessions: vec!["source-session".into()],
             env_session: None,
+            session_process: None,
         }
     }
 

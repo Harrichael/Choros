@@ -71,9 +71,57 @@ fn land_archive_retires_the_workspace_it_ran_in() {
         priority: None,
         sessions: vec![],
         env_session: None,
+        session_process: None,
     };
     let out = w.land_req(&req, None).unwrap();
     assert_eq!(out.archived_to, Some(w.trunk.join(".choros-config/archive/epic-x/login")));
     assert!(!in_epic.exists());
     assert!(at_trunk.exists());
+}
+
+/// `land archive` from a session leaves the workspace where it is until
+/// the session closes, and the daemon archives it then. Commits made after
+/// the land and not landed keep it.
+#[test]
+fn land_archive_from_a_session_waits_for_it_to_close() {
+    use choros_core::process::Proc;
+
+    let w = World::new();
+    let session = |ws: &std::path::Path| {
+        let mut child = std::process::Command::new("sleep").arg("600").spawn().unwrap();
+        let mut req = w.request(ws, crate::land::Deps::Head);
+        req.mode = LandMode::Archive;
+        req.session_process = Proc::of(child.id());
+        let out = w.land_req(&req, None).unwrap();
+        assert!(out.archive_waits);
+        assert_eq!(out.archived_to, None);
+
+        let swept = crate::archive::sweep(&w.trunk).unwrap();
+        assert!(swept.archived.is_empty() && swept.kept.is_empty(), "{swept:?}");
+        assert!(ws.exists());
+        move || {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    };
+
+    let done = w.workspace("done");
+    w.commit(&done, "a.txt", "a\n");
+    let mut close_done = session(&done);
+    let more = w.workspace("more");
+    w.commit(&more, "b.txt", "b\n");
+    let mut close_more = session(&more);
+    w.commit(&more, "c.txt", "c\n");
+
+    close_done();
+    close_more();
+    let swept = crate::archive::sweep(&w.trunk).unwrap();
+    assert_eq!(swept.archived, vec![done.clone()]);
+    assert_eq!(swept.kept, vec![(more.clone(), format!("unlanded commits in {REPO}"))]);
+    assert!(w.trunk.join(".choros-config/archive/done").exists());
+    assert!(more.exists());
+
+    // Kept is kept: it isn't asked about again.
+    let swept = crate::archive::sweep(&w.trunk).unwrap();
+    assert!(swept.archived.is_empty() && swept.kept.is_empty(), "{swept:?}");
 }

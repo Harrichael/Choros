@@ -114,3 +114,50 @@ mod tests {
         assert!(err.starts_with("sleep 5 gave no answer"), "{err}");
     }
 }
+
+/// A running process. A pid is reused once its process is gone, so when it
+/// began tells this one from a later one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Proc {
+    pub pid: u32,
+    pub started: String,
+}
+
+impl Proc {
+    pub fn of(pid: u32) -> Option<Proc> {
+        let started = ps(pid, "lstart=")?;
+        Some(Proc { pid, started })
+    }
+
+    pub fn alive(&self) -> bool {
+        Proc::of(self.pid).as_ref() == Some(self)
+    }
+}
+
+/// The agent session this process runs under: the nearest process above
+/// it named `claude`.
+pub fn agent_above() -> Option<Proc> {
+    let mut pid = std::process::id();
+    // Deeper than any shell nests; a guard against a loop in what ps says.
+    for _ in 0..64 {
+        pid = ps(pid, "ppid=")?.parse().ok().filter(|&p| p > 1)?;
+        let name = ps(pid, "comm=")?;
+        if name.rsplit('/').next() == Some("claude") {
+            return Proc::of(pid);
+        }
+    }
+    None
+}
+
+fn ps(pid: u32, field: &str) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", field, "-p", &pid.to_string()])
+        // `lstart` is written in the caller's zone and tongue, and the
+        // daemon's may not be the session's.
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}

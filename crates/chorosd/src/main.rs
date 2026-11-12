@@ -1,6 +1,7 @@
 //! chorosd: runs every landing queue's pass on a timer — notices merged and
 //! closed PRs, re-syncs what is behind them, rebuilds merge heads, opens the
-//! next PRs — and logs instant PRs that merged after their land. A conflict
+//! next PRs — logs instant PRs that merged after their land, and archives
+//! workspaces left for when their session closed. A conflict
 //! goes to the resync agent, within the queue's limits (see
 //! `choros_land::auto_resolve`), and parks when it can't be settled; it never
 //! asks anything.
@@ -54,6 +55,20 @@ fn tick() -> Result<()> {
         }
         if let Err(e) = log_instant_merges(&trunk) {
             log(&format!("instant PRs @ {}: {e:#}", trunk.display()));
+        }
+        match choros_land::archive::sweep(&trunk) {
+            Ok(swept) => {
+                for ws in &swept.archived {
+                    log(&format!("{}: its session closed; archived it", ws.display()));
+                }
+                for (ws, why) in &swept.kept {
+                    log(&format!("{}: its session closed, but not archiving: {why}", ws.display()));
+                }
+                for e in &swept.errors {
+                    log(&format!("archiving: {e}"));
+                }
+            }
+            Err(e) => log(&format!("archiving @ {}: {e:#}", trunk.display())),
         }
     }
     Ok(())

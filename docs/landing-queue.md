@@ -258,6 +258,9 @@ every set.
 - `archive`: archive the workspace once every repo in scope has landed; refuse
   if another repo in the workspace still has unlanded commits outside the
   scope. The shell function `cd`s to the nearest space still there, as for `choros archive`.
+  Run by an agent session, the workspace is marked instead and the daemon
+  archives it once that session's process is gone, unless commits were made
+  since and not landed.
   `continue`: keep the workspace and its session for the next change.
 
 **PR text.** The land-the-plane skill passes `--title` and `--body-file` with

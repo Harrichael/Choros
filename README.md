@@ -200,6 +200,10 @@ without failing workspace creation.
 recoverable. Pass a name to archive a workspace in the space you're in, or
 omit it to archive the workspace your current directory is inside.
 
+Run by an agent session inside the workspace, it waits: the folder stays
+until the session closes, and `chorosd` archives it then. `--force` archives
+it at once. `choros land archive` waits the same way.
+
 Each new workspace also ships with a Claude Code skill at
 `.claude/skills/choros-archive/SKILL.md`. From inside the workspace, run
 `/choros-archive` and the AI will commit any pending work, push every cloned

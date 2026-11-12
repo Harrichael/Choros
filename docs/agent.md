@@ -34,9 +34,11 @@ the commits since the last land. Keep working and land again as you go.
     --session ID                the session to fork into the landing folder;
                                 by default, the one running the land
 
-`choros land archive` lands and then moves the workspace into
-`.choros-config/archive/`. Don't run it, or `choros archive`, on the
-workspace your own session runs in.
+`choros land archive` lands the last of a workspace's work and archives
+it (into `.choros-config/archive/`), as `choros archive` does without
+landing. Run on the workspace your own session is in, either leaves the
+folder where it is until the session closes; commits made after a
+`land archive` and not landed keep it from being archived.
 
 ## The check
 

@@ -28,6 +28,7 @@ fn landing_two_repos_makes_a_set_in_each() {
         priority: None,
         sessions: vec![],
         env_session: None,
+        session_process: None,
     };
     let out = w.land_req(&req, None).unwrap();
     let mut landed: Vec<(String, u32)> = out.landed.iter().map(|l| (l.repo.clone(), l.n.unwrap())).collect();
@@ -73,6 +74,7 @@ fn a_dependency_across_repos_orders_the_prs() {
         priority: None,
         sessions: vec![],
         env_session: None,
+        session_process: None,
     };
     crate::land::land(&w.env(), &lib_req, None).unwrap();
     w.commit(&ws, "uses.txt", "uses the api\n");

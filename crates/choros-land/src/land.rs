@@ -44,6 +44,9 @@ pub struct LandRequest {
     /// The Claude Code session `land` is running inside, if any (the CLI
     /// reads `CLAUDE_CODE_SESSION_ID`).
     pub env_session: Option<String>,
+    /// That session's process, if any: `land archive` leaves the workspace
+    /// to be archived once it is gone (see [`crate::archive`]).
+    pub session_process: Option<choros_core::process::Proc>,
 }
 
 /// What a land builds on. Whichever it is, the set must pass the repo's
@@ -76,6 +79,8 @@ pub struct LandOutcome {
     pub landed: Vec<Landed>,
     /// Where the workspace went, for `land archive`.
     pub archived_to: Option<PathBuf>,
+    /// `land archive` left the workspace for when its session closes.
+    pub archive_waits: bool,
 }
 
 pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<LandOutcome> {
@@ -173,11 +178,12 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
                 if left.len() == 1 { "has" } else { "have" }
             ));
         }
-        Some(core::archive_at(&ws)?)
+        crate::archive::archive(&ws, req.session_process.clone(), true)?
     } else {
         None
     };
-    Ok(LandOutcome { landed, archived_to })
+    let archive_waits = req.mode == LandMode::Archive && archived_to.is_none();
+    Ok(LandOutcome { landed, archived_to, archive_waits })
 }
 
 /// A landing folder's branch is already a landing-set: landing it again would
@@ -243,7 +249,7 @@ fn repo_of(ws: &Path, cwd: &Path, meta: &ChorosMeta) -> Option<String> {
     meta.repos.iter().find(|r| r.as_str() == first).cloned()
 }
 
-fn has_unlanded(ws: &Path, repo: &str) -> Result<bool> {
+pub(crate) fn has_unlanded(ws: &Path, repo: &str) -> Result<bool> {
     let git = Git::new(&ws.join(repo));
     let through = landed_through(ws, repo)?;
     Ok(through != git.head()? || !returned(ws, repo)?.is_empty())

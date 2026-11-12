@@ -345,6 +345,7 @@ fn concurrent_lands_serialize() {
                         priority: None,
                         sessions: Vec::new(),
                         env_session: None,
+                        session_process: None,
                     };
                     w.land_req(&req, None).map(|_| ()).map_err(|e| e.to_string())
                 })

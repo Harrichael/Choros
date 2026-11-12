@@ -143,6 +143,7 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
         priority,
         sessions,
         env_session: std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+        session_process: choros_core::process::agent_above(),
     };
     let handler: Option<&mut (dyn ConflictHandler + 'static)> =
         if interactive() { Some(&mut handler) } else { None };
@@ -177,6 +178,9 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
     // a workspace that has moved.
     if let Some(dst) = out.archived_to {
         println!("{}", dst.display());
+    }
+    if out.archive_waits {
+        eprintln!("{}", choros_land::archive::WAITS);
     }
     Ok(())
 }

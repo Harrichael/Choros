@@ -24,10 +24,10 @@ push past a failed test or a dirty repo whose state you can't explain.
       choros generates it for its build cache; it is not part of the work.
    3. `git push -u origin HEAD` to push the workspace branch to its remote.
 2. **Archive the workspace.** From the workspace directory (or any of its
-   repos), run `choros archive`. This moves the workspace under
-   `.choros-config/archive/<name>/` so it disappears from the active list but
-   remains recoverable.
+   repos), run `choros archive`. The workspace moves under
+   `.choros-config/archive/<name>/` once this session closes, so it
+   disappears from the active list but remains recoverable.
 3. **Hand off.** Print a short summary covering:
    - Each repo: branch pushed, remote URL, latest commit SHA.
-   - The path the workspace was archived to.
+   - That the workspace is archived once this session closes.
    - Any test failures or skipped checks the user should know about.

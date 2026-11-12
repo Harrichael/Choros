@@ -85,8 +85,10 @@ SPACES (in the trunk or a branch-space; acts where you are)
                                     workspace has uncommitted or unlanded work, unless --force
     choros ls [--all]               workspaces here and below, as a tree, most recent first,
                                     with what each space has landing; --all: the whole trunk
-    choros archive [NAME]           archive a workspace (to the same path under
-                                    .choros-config/archive/); NAME defaults to the one you're in
+    choros archive [NAME] [--force] archive a workspace (to the same path under
+                                    .choros-config/archive/); NAME defaults to the one you're in.
+                                    Run by an agent session in that workspace, it waits for the
+                                    session to close (chorosd then archives it); --force doesn't
 
 INSIDE A WORKSPACE
     choros repo ls [--git]          the repos cloned into it that hold unlanded commits or a
@@ -371,11 +373,27 @@ pub fn run_ls(args: Vec<String>) -> Result<()> {
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {
+    let mut force = false;
+    let mut name_arg = None;
+    for a in args {
+        match a.as_str() {
+            "--force" => force = true,
+            _ if name_arg.is_none() && !a.starts_with('-') => name_arg = Some(a),
+            _ => {
+                eprintln!("usage: choros archive [NAME] [--force]");
+                std::process::exit(2);
+            }
+        }
+    }
     let cwd = std::env::current_dir()?;
-    let name_arg = args.into_iter().next();
     let (space, name) = choros::resolve_target(&cwd, name_arg.as_deref())?;
-    let dst = choros::archive(&space, &name)?;
-    println!("{}", dst.display());
+    let ws = space.join(&name);
+    // Only a session at work in the workspace would lose its folder.
+    let session = choros_core::process::agent_above().filter(|_| !force && cwd.starts_with(&ws));
+    match choros_land::archive::archive(&ws, session, false)? {
+        Some(dst) => println!("{}", dst.display()),
+        None => eprintln!("{}", choros_land::archive::WAITS),
+    }
     Ok(())
 }
 

@@ -64,6 +64,7 @@ fn landing_from_a_landing_folder_is_refused() {
         priority: None,
         sessions: Vec::new(),
         env_session: None,
+        session_process: None,
     };
     let err = w.land_req(&req, None).unwrap_err();
     assert!(err.to_string().contains("push review fixes"), "{err}");

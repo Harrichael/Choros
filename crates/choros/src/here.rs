@@ -50,8 +50,12 @@ pub fn run() -> Result<()> {
                 None => println!("here: {what}"),
             }
             println!("trunk: {}", trunk.display());
-            if let Some(hook) = workspace::read(ws)?.land_hook {
+            let landing = workspace::read(ws)?;
+            if let Some(hook) = landing.land_hook {
                 println!("each land from here runs the hook `{hook}`");
+            }
+            if landing.archive_after.is_some() {
+                println!("to be archived once the session that asked closes");
             }
             let repos = match inside {
                 Some(repo) => {
