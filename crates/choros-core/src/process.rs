@@ -134,9 +134,10 @@ impl Proc {
     }
 }
 
-/// The agent session this process runs under: the nearest process above
-/// it named `claude`.
+/// The agent session this process runs under, if it says it runs under
+/// one: the nearest process above it named `claude`.
 pub fn agent_above() -> Option<Proc> {
+    std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty())?;
     let mut pid = std::process::id();
     // Deeper than any shell nests; a guard against a loop in what ps says.
     for _ in 0..64 {

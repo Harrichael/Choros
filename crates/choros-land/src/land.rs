@@ -81,6 +81,8 @@ pub struct LandOutcome {
     pub archived_to: Option<PathBuf>,
     /// `land archive` left the workspace for when its session closes.
     pub archive_waits: bool,
+    /// The land hook failed after the land, which stands.
+    pub hook_warning: Option<String>,
 }
 
 pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<LandOutcome> {
@@ -157,13 +159,13 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         };
         landed.push(out);
     }
-    if landed.is_empty() {
+    // An archive with it all landed already still ends the work here: the
+    // hook hears of it and the workspace goes.
+    if landed.is_empty() && req.mode != LandMode::Archive {
         return Err(eyre!("nothing to land: no repo in scope has commits past its last landing"));
     }
     // Before the workspace is archived out from under where it runs.
-    if let Some(warning) = crate::hook::after(&ws, req, &landed) {
-        landed[0].warnings.push(warning);
-    }
+    let hook_warning = crate::hook::after(&ws, req, &landed);
 
     let archived_to = if req.mode == LandMode::Archive {
         let left: Vec<&String> = meta
@@ -183,7 +185,7 @@ pub fn land(env: &Env, req: &LandRequest, mut handler: Handler<'_>) -> Result<La
         None
     };
     let archive_waits = req.mode == LandMode::Archive && archived_to.is_none();
-    Ok(LandOutcome { landed, archived_to, archive_waits })
+    Ok(LandOutcome { landed, archived_to, archive_waits, hook_warning })
 }
 
 /// A landing folder's branch is already a landing-set: landing it again would

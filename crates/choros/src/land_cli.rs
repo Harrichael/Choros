@@ -174,6 +174,12 @@ pub fn run_land(args: Vec<String>) -> Result<()> {
             eprintln!("    warning: {w}");
         }
     }
+    if out.landed.is_empty() {
+        eprintln!("nothing was left to land");
+    }
+    if let Some(w) = &out.hook_warning {
+        eprintln!("warning: {w}");
+    }
     // stdout carries only the archived path, for the shell function to leave
     // a workspace that has moved.
     if let Some(dst) = out.archived_to {

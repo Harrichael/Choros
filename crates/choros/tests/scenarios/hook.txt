@@ -51,7 +51,16 @@ $ choros land continue
 app → appq/landing-2, queued
     landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-2
     appq/landing-1 is still open; to change it, work in its landing folder (`choros landing open 1 --queue appq`)
-    warning: the land hook `sh $ROOT/trunk/one/app/../../hook.sh after` failed: the work landed, but what the hook keeps may not have followed
+warning: the land hook `sh $ROOT/trunk/one/app/../../hook.sh after` failed: the work landed, but what the hook keeps may not have followed
+
+# An archive with it all landed already still ends the work: the hook is
+# told, and the workspace goes.
+$ printf '%s\n' 'in=$(cat)' 'echo "hook $1: $in" >&2' > ../../hook.sh
+$ choros land archive
+$ROOT/trunk/.choros-config/archive/one
+hook before: {"mode":"archive","labels":[],"priority":null,"title":null,"body":null,"session":null,"workspace":"$ROOT/trunk/one"}
+hook after: {"mode":"archive","labels":[],"priority":null,"title":null,"body":null,"session":null,"workspace":"$ROOT/trunk/one","landed":[]}
+nothing was left to land
 $ cd trunk
 $ choros here --json
 {"kind":"trunk","trunk":"$ROOT/trunk","workspace":null,"land_hook":null}
