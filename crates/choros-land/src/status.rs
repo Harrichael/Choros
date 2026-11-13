@@ -172,51 +172,13 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
         if matches!(set.status, SetStatus::Dropped) {
             continue;
         }
-        let state = match set.status {
-            SetStatus::Merged => "merged",
-            SetStatus::Closed => "closed",
-            SetStatus::Dropped => "dropped",
-            SetStatus::Queued if graph::stacked(&st, *n) => "stacked",
-            SetStatus::Queued if set.pr.is_some() => "front",
-            SetStatus::Queued => "queued",
-        };
         let landing = q.landing_dir(*n).join(set.repo());
-        let landing_dirty = set.is_open()
-            && landing.exists()
-            && !Git::new(&landing).is_clean_tracked().unwrap_or(true);
         sets.push(SetLine {
-            n: *n,
-            repo: set.repo().to_string(),
-            branch: set.branch(name),
-            state,
-            title: set.title.clone(),
             pr_title: set.is_open().then(|| q.pr_title(set).ok()).flatten(),
-            pr: set.pr.clone(),
-            review: set.review.clone().filter(|_| set.is_open()),
-            sessions: set.sessions.clone(),
-            labels: set.labels.clone(),
-            priority: set.priority,
-            deps: set
-                .deps
-                .iter()
-                .map(|d| match d {
-                    crate::state::Dep::Set(m) => format!("landing-{m}"),
-                    crate::state::Dep::Cross { queue, n } => format!("{queue}/landing-{n}"),
-                })
-                .collect(),
-            park: set.park.clone(),
-            tip: set.tip.clone(),
-            blocked: set.is_open() && set.park.is_none() && graph::blocked(&st, *n),
-            // A set that has merged or gone is no longer clashed with.
-            conflicts_with: set
-                .conflicts_with
-                .iter()
-                .copied()
-                .filter(|m| st.sets.get(m).is_some_and(|s| s.is_open()))
-                .collect(),
-            landing_dirty,
-            unlinked: graph::stacked(&st, *n) && set.stack.is_none(),
-            behind_in_stack: set.park.is_none() && graph::behind_in_stack(&st, *n).is_some(),
+            landing_dirty: set.is_open()
+                && landing.exists()
+                && !Git::new(&landing).is_clean_tracked().unwrap_or(true),
+            ..set_line(name, &st, *n)
         });
     }
     let mut needs_sync = Vec::new();
@@ -255,6 +217,53 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
         diffbase,
         diffbase_park: st.diffbase.park.clone(),
     })
+}
+
+/// What the queue's own record says of landing-`n`: all of its line but
+/// what only the landing folder and the forge can tell.
+pub(crate) fn set_line(queue: &str, st: &crate::state::QueueState, n: u32) -> SetLine {
+    let set = &st.sets[&n];
+    SetLine {
+        n,
+        repo: set.repo().to_string(),
+        branch: set.branch(queue),
+        state: match set.status {
+            SetStatus::Merged => "merged",
+            SetStatus::Closed => "closed",
+            SetStatus::Dropped => "dropped",
+            SetStatus::Queued if graph::stacked(st, n) => "stacked",
+            SetStatus::Queued if set.pr.is_some() => "front",
+            SetStatus::Queued => "queued",
+        },
+        title: set.title.clone(),
+        pr_title: None,
+        pr: set.pr.clone(),
+        review: set.review.clone().filter(|_| set.is_open()),
+        sessions: set.sessions.clone(),
+        labels: set.labels.clone(),
+        priority: set.priority,
+        deps: set
+            .deps
+            .iter()
+            .map(|d| match d {
+                crate::state::Dep::Set(m) => format!("landing-{m}"),
+                crate::state::Dep::Cross { queue, n } => format!("{queue}/landing-{n}"),
+            })
+            .collect(),
+        park: set.park.clone(),
+        tip: set.tip.clone(),
+        blocked: set.is_open() && set.park.is_none() && graph::blocked(st, n),
+        // A set that has merged or gone is no longer clashed with.
+        conflicts_with: set
+            .conflicts_with
+            .iter()
+            .copied()
+            .filter(|m| st.sets.get(m).is_some_and(|s| s.is_open()))
+            .collect(),
+        landing_dirty: false,
+        unlinked: graph::stacked(st, n) && set.stack.is_none(),
+        behind_in_stack: set.park.is_none() && graph::behind_in_stack(st, n).is_some(),
+    }
 }
 
 /// `!resolve` when a queue this workspace uses is parked, `⇣sync` when its

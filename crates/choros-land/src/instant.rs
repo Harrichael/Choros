@@ -85,6 +85,7 @@ pub fn record(trunk: &Path, landed: &Landed) -> Result<()> {
         .append(true)
         .open(log_path(trunk))?
         .write_all(line.as_bytes())?;
+    crate::events::landed_instantly(trunk, landed);
     Ok(())
 }
 

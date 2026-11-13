@@ -61,6 +61,11 @@ fn run() -> Result<()> {
         Some("queue") => land_cli::run_queue(rest),
         Some("landing") => land_cli::run_landing(rest),
         Some("hook") => land_cli::run_hook(rest),
+        Some("events") => land_cli::run_events(rest),
+        Some("trunks") => {
+            reject_extra_args("trunks", &rest);
+            cli::run_trunks()
+        }
         Some("here") => match rest.as_slice() {
             [] => here::run(),
             [json] if json == "--json" => here::run_json(),

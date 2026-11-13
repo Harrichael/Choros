@@ -1,0 +1,44 @@
+# `choros events` is the trunk's log of what became of each landing-set,
+# for tools that keep their own picture of the queues: a set's whole line
+# again each time it changes, numbered so a reader can ask for what is new.
+
+$ choros trunks
+$ROOT/trunk
+$ choros work ws app
+...
+$ cd trunk/ws/app
+$ choros repo bind app appq
+app now lands into appq
+$ echo a > a.txt && git add a.txt && git commit -qm "write a"
+$ choros land continue --title "Write a" --label tasks/a
+...
+$ choros events
+{"queue":"appq","seq":1,"set":{"behind_in_stack":false,"blocked":false,"branch":"appq/landing-1","conflicts_with":[],"deps":[],"labels":["tasks/a"],"n":1,"park":null,"pr":null,"priority":null,"repo":"app","review":null,"sessions":[],"state":"queued","title":"Write a","unlinked":false},"trunk":"$ROOT/trunk"}
+{"queue":"appq","seq":2,"set":{"behind_in_stack":false,"blocked":false,"branch":"appq/landing-1","conflicts_with":[],"deps":[],"labels":["tasks/a"],"n":1,"park":null,"pr":{"number":1,"url":"https://github.test/pull/1"},"priority":null,"repo":"app","review":null,"sessions":[],"state":"front","title":"Write a","unlinked":false},"trunk":"$ROOT/trunk"}
+
+# Nothing new is nothing said; a number the log never reached is another
+# log's.
+$ choros events --since 2
+$ choros events --since 9
+choros: $ROOT/trunk/.choros-config/events.db holds no event 9: its last is 2. Read it again from 0
+[exit 1]
+
+$ gh pr merge 1 --squash
+$ choros queue sync appq
+...
+$ choros events --since 2
+{"queue":"appq","seq":3,"set":{"behind_in_stack":false,"blocked":false,"branch":"appq/landing-1","conflicts_with":[],"deps":[],"labels":["tasks/a"],"n":1,"park":null,"pr":{"number":1,"url":"https://github.test/pull/1"},"priority":null,"repo":"app","review":null,"sessions":[],"state":"merged","title":"Write a","unlinked":false},"trunk":"$ROOT/trunk"}
+
+# A set whose PR is closed, then dropped from the queue, is told once
+# more, as dropped.
+$ echo b > b.txt && git add b.txt && git commit -qm "write b"
+$ choros land continue --title "Write b"
+...
+$ gh pr close 2
+$ choros queue sync appq
+...
+$ choros queue drop appq 2
+...
+$ choros events --since 5
+{"queue":"appq","seq":6,"set":{"behind_in_stack":false,"blocked":false,"branch":"appq/landing-2","conflicts_with":[],"deps":[],"labels":[],"n":2,"park":null,"pr":{"number":2,"url":"https://github.test/pull/2"},"priority":null,"repo":"app","review":null,"sessions":[],"state":"closed","title":"Write b","unlinked":false},"trunk":"$ROOT/trunk"}
+{"queue":"appq","seq":7,"set":{"behind_in_stack":false,"blocked":false,"branch":"appq/landing-2","conflicts_with":[],"deps":[],"labels":[],"n":2,"park":null,"pr":{"number":2,"url":"https://github.test/pull/2"},"priority":null,"repo":"app","review":null,"sessions":[],"state":"dropped","title":"Write b","unlinked":false},"trunk":"$ROOT/trunk"}

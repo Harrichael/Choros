@@ -160,7 +160,12 @@ impl Queue {
     }
 
     pub fn write_state(&self, state: &QueueState) -> Result<()> {
-        Store::open(&self.dir())?.write_state(state)
+        let before = self.read_state().ok();
+        // A log begun after this write would tell of it twice.
+        crate::events::begin(&self.trunk);
+        Store::open(&self.dir())?.write_state(state)?;
+        crate::events::sets_changed(self, before.as_ref(), state);
+        Ok(())
     }
 
     pub fn lock(&self) -> Result<QueueLock> {

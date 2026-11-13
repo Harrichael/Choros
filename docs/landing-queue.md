@@ -859,6 +859,19 @@ lands in the same scope (by the workspace they came from), each
 `{repo, workspace, commit, pr, labels, sessions}`, with `pr` a number or
 null and `sessions` the source ids.
 
+`choros events [--since N] [--follow]` is for a tool that keeps its own
+picture of the queues, so it needn't ask for the whole report each time. A
+trunk logs, in `.choros-config/events.db`, each set's line again whenever
+it changes (as `status --json` gives it, less `landing_dirty`; a set that
+leaves the queue comes once more as `dropped`), and each instant-mode land:
+`{seq, trunk, queue, set}` or `{seq, trunk, instant}`, a line of JSON each,
+numbered from 1. A log begins with everything its trunk already held, so
+reading from 0 gives the whole picture. `--since N` gives what came after
+N, and fails when the log never reached N, which tells a reader its number
+is another log's. `--follow` keeps giving events as they come, until its
+reader is gone. Choros keeps no word of who reads. `choros trunks` lists
+every trunk, for a reader that follows them all.
+
 `choros status --prompt` prints one short token (`⇣sync`, `!resolve`, or
 nothing) from local files only — no git, no network, no lock — for the bash
 prompt and Gnomon.

@@ -8,6 +8,7 @@ pub mod branch;
 pub mod context;
 pub mod diffbase;
 pub mod engine;
+pub mod events;
 pub mod forge;
 pub mod git;
 pub mod graph;

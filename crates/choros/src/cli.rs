@@ -158,6 +158,14 @@ AGENTS
     choros here [--json]            what this folder is, where a land from it goes, whether each
                                     repo has a check, and where queue state lives; --json gives
                                     tools the kind of folder, its trunk, workspace and land hook
+    choros events [--since N] [--follow]
+                                    the trunk's event log, a line of JSON each: every landing-set
+                                    as `status --json` gives it, again each time it changes
+                                    (landed, PR opened, reviewed, merged, dropped), and each land
+                                    straight to main. Numbered by `seq`; --since N gives those
+                                    after N, --follow keeps giving them as they come. For tools
+                                    that keep their own picture of the queues
+    choros trunks                   every trunk on this machine, a path a line
     choros help agent               for an agent: making workspaces, landing and its flags,
                                     the check, and changing a landed set
     choros agent ls                 resumable claude / cursor sessions under the current directory
@@ -370,6 +378,14 @@ pub fn run_ls(args: Vec<String>) -> Result<()> {
     };
     let cwd = std::env::current_dir()?;
     crate::ls::run(&cwd, all)
+}
+
+pub fn run_trunks() -> Result<()> {
+    let trunks = choros_core::trunks::config_home().map(|c| choros_core::trunks::list(&c)).transpose()?.unwrap_or_default();
+    for trunk in trunks.iter().filter(|t| t.exists()) {
+        println!("{}", trunk.display());
+    }
+    Ok(())
 }
 
 pub fn run_archive(args: Vec<String>) -> Result<()> {

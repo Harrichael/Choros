@@ -1227,3 +1227,41 @@ pub fn bind_new(ws: &Path, repo: &str, queue: Option<&str>) -> Result<()> {
     let tools = Tools::for_trunk(&trunk);
     land::bind(&tools.env(), ws, repo, queue)
 }
+
+/// `choros events [--since N] [--follow]`: the trunk's event log, a line of
+/// JSON each (see `choros_land::events`).
+pub fn run_events(args: Vec<String>) -> Result<()> {
+    use std::io::Write;
+    const USAGE: &str = "choros events [--since N] [--follow]";
+    let (mut since, mut follow) = (0i64, false);
+    let mut args = args.into_iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--follow" => follow = true,
+            "--since" => match args.next().and_then(|n| n.parse().ok()) {
+                Some(n) => since = n,
+                None => usage(USAGE),
+            },
+            _ => usage(USAGE),
+        }
+    }
+    let trunk = choros_core::space::find_trunk(&std::env::current_dir()?)
+        .ok_or_else(|| eyre!("not under a choros trunk (no .choros-config above here)"))?;
+    let mut out = std::io::stdout().lock();
+    let reader = std::os::unix::process::parent_id();
+    loop {
+        for (seq, line) in choros_land::events::since(&trunk, since)? {
+            // Whoever was reading has gone.
+            if writeln!(out, "{line}").is_err() {
+                return Ok(());
+            }
+            since = seq;
+        }
+        // With nothing to write, a reader that has gone would never be
+        // noticed by its closed pipe.
+        if out.flush().is_err() || !follow || std::os::unix::process::parent_id() != reader {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
