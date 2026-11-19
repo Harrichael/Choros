@@ -287,24 +287,6 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(None);
         };
         let git = self.git(repo);
-        // rerere replayed every hunk; it only needs checking.
-        if files.is_empty() && git.resolution_problems()?.is_none() {
-            let replayed = git.resolved_sides()?;
-            git.conclude()?;
-            self.record_resolution(repo, &files)?;
-            // Git keeps no word of who first made the fix it replayed; the
-            // queue's own record of those three versions may.
-            let made = git.head()?;
-            let mut store = Store::open(&self.q.dir())?;
-            let mut replayed_by = Vec::new();
-            for sides in &replayed {
-                let by = store.resolution(repo, sides)?.map_or(By::Rerere, |known| known.by);
-                replayed_by.push(Mended { path: sides.path.clone(), result: None, by, remembered: true });
-            }
-            let replayed: Vec<(&Sides, &Mended)> = replayed.iter().zip(&replayed_by).collect();
-            store.settle(repo, &made, &replayed)?;
-            return Ok(None);
-        }
         self.conflict_tried = false;
         let sides = git.conflict_sides()?;
         if let Some(mended) = self.mend(repo, &sides)? {

@@ -295,10 +295,6 @@ impl Git {
         }
         let unmerged = self.unmerged()?;
         if unmerged.is_empty() {
-            // rerere.autoUpdate may have resolved and staged every path.
-            if self.in_progress()?.is_some() {
-                return Ok(Step::Conflict(Vec::new()));
-            }
             return Err(eyre!(
                 "git {} failed in {}:\n{}",
                 args.join(" "),
@@ -313,12 +309,6 @@ impl Git {
     /// side has of it.
     pub fn conflict_sides(&self) -> Result<Vec<crate::mend::Sides>> {
         self.sides(&["ls-files", "--unmerged", "-z"])
-    }
-
-    /// As `conflict_sides`, for the files of the step in progress whose
-    /// conflict is already staged as resolved: rerere's doing.
-    pub fn resolved_sides(&self) -> Result<Vec<crate::mend::Sides>> {
-        self.sides(&["ls-files", "--resolve-undo", "-z"])
     }
 
     fn sides(&self, list: &[&str]) -> Result<Vec<crate::mend::Sides>> {

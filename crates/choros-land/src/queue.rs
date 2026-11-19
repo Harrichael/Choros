@@ -128,9 +128,7 @@ impl Queue {
             core_git::clone_with_reference(&reg, &core_git::remote_get_url(&reg, "origin")?, &sync)?;
         }
         let git = Git::owned(&sync);
-        for (k, v) in [("rerere.enabled", "true"), ("rerere.autoUpdate", "true")] {
-            git.run(&["config", k, v])?;
-        }
+        no_rerere(&git)?;
         ensure_notes(&git)?;
         st.repos.insert(
             repo.to_string(),
@@ -338,12 +336,31 @@ impl Queue {
         git.run(&["reset", "--quiet", "--hard"])?;
         // Excluded files (the notes) survive: clean without -x keeps them.
         git.run(&["clean", "--quiet", "-fd"])?;
+        no_rerere(&git)?;
         ensure_notes(&git)
     }
 
     pub fn fetch(&self, repo: &str) -> Result<()> {
         self.git(repo).fetch("origin", &[])
     }
+}
+
+/// git's rerere keys a remembered answer on the clashing lines alone, so it
+/// replays one set's answer onto another set whose clash merely looks the same,
+/// and drops that set's work unseen. The queue's own record of past answers
+/// (`mend`) keys on whole files instead. Sync clones made when this was on
+/// are turned off here, and what they remembered goes.
+fn no_rerere(git: &Git) -> Result<()> {
+    let enabled = git.run(&["config", "--get", "rerere.enabled"]).unwrap_or_default();
+    if enabled.trim() != "false" {
+        git.run(&["config", "rerere.enabled", "false"])?;
+        let _ = git.run(&["config", "--unset", "rerere.autoUpdate"]);
+    }
+    let cache = PathBuf::from(git.run(&["rev-parse", "--absolute-git-dir"])?).join("rr-cache");
+    if cache.exists() {
+        std::fs::remove_dir_all(&cache)?;
+    }
+    Ok(())
 }
 
 /// The resync agent's notes on this queue, for whichever session comes next.

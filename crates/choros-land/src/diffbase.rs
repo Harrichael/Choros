@@ -8,9 +8,9 @@
 //! until it is reopened: its code must not stay under the queue's work.
 //!
 //! A conflict between the listed PRs parks the whole queue. Resolving it
-//! (`choros queue resolve`) is recorded and replayed by rerere on every
-//! rebuild, but never ships: when the PRs merge, main's own resolution of
-//! them is what the sets are replayed onto.
+//! (`choros queue resolve`) is recorded and used again on each rebuild that
+//! meets the same files as they were, but never ships: when the PRs merge,
+//! main's own resolution of them is what the sets are replayed onto.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

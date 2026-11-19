@@ -350,9 +350,10 @@ status` show it.
 - **Parks.** A listed PR that won't merge onto main and those before it parks
   the whole queue, naming the pair and the files. Nothing else moves while the
   diffbase is parked. `choros queue resolve` resolves the conflict like any
-  other: it is recorded, and rerere replays it on every rebuild. That
-  resolution exists only to hold the queue together and never ships: when the
-  PRs merge, main's own resolution is what the sets are replayed onto.
+  other: it is recorded, and used again on each rebuild that meets the same
+  files as they were. That resolution exists only to hold the queue together
+  and never ships: when the PRs merge, main's own resolution is what the sets
+  are replayed onto.
 - **Changes take effect at once.** `queue base add` and `queue base rm` run a
   pass before they return, so the diffbase and merge head are rebuilt right
   away (and a conflict shows, at a terminal resolvable, at once). A hand edit
@@ -368,7 +369,7 @@ Rebuilt from scratch on every land, re-sync and graph edit, in the sync clone:
 2. Take the queue's queued, unparked sets that no other such set depends on
    (the leaves); each contains its own ancestors.
 3. One leaf: the merge head is that leaf's tip. Several: merge them in
-   ascending landing number with `git merge --no-ff`, `rerere` on.
+   ascending landing number with `git merge --no-ff`.
 4. Force-push `<queue>/merge-head` if `push.merge_head`.
 
 Merge commits made here belong to the merge head only. Their SHAs are kept in
@@ -486,8 +487,8 @@ multi-dependency base, the merge head, or merging main into a public set.
 daemon alike. Each conflicted file is tried from its three versions alone:
 
 1. the way this queue settled those same three versions before, whoever
-   first did (kept in `queue.db`, so it holds where git's rerere does not: a
-   delete against an edit, a clone made afresh);
+   first did (kept in `queue.db`, by whole file, so an answer is never used
+   on a clash that only looks the same);
 2. a `[[merge.rule]]` with `union`: both sides' lines are kept;
 3. [Mergiraf](https://mergiraf.org), when it is installed and
    `merge.structural` is on: a merge of the file's syntax tree, which
@@ -556,10 +557,11 @@ too.
 
 **Reusing resolutions.** Every resolving merge commit is recorded. The agent
 is handed `git show --remerge-diff <merge>` for any recorded resolution
-touching the same files — exactly how it was fixed before. The sync clone also
-runs `rerere`, which replays a resolution outright when the same hunks
-conflict again (typically: main merged into the second of two conflicting
-public forks after the first merges); it is a bonus, not the mechanism.
+touching the same files — exactly how it was fixed before. The sync clone does
+not run git's `rerere`, and turns it off where an older Choros turned it on:
+rerere keys an answer on the clashing lines alone, so it replays one set's
+answer onto another set whose clash only looks the same, and staged unseen,
+that dropped a set's work.
 
 **What each side is for.** Whoever resolves — the agent, or you driving it —
 is told about every queued set whose changes meet in the conflicted files: its
@@ -573,7 +575,7 @@ label = "ergon show {} --intent"    # {} is the label, passed as an argument
 
 A label the hook fails on, or prints nothing for, is left out.
 
-**Checks after any resolution** (agent or rerere): no unmerged paths, no
+**Checks after any resolution**: no unmerged paths, no
 conflict markers (`git diff --check`, ignoring its whitespace warnings: they
 cover all the sets bring, not just the resolution). A resolution that fails
 them stays parked.

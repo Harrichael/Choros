@@ -31,8 +31,8 @@ pub struct AutoResolve {
     /// What happened, a line each, for the daemon's log.
     pub notes: Vec<String>,
     /// Fixes that passed the check this pass, as trees by conflict. A merge
-    /// head rebuilt after a later clash meets an earlier one again, and
-    /// rerere can't replay every kind of fix (a delete against an edit).
+    /// head rebuilt after a later clash meets an earlier one again, and its
+    /// fix should not be sought twice.
     settled: BTreeMap<String, String>,
 }
 

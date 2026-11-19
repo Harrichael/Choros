@@ -201,28 +201,13 @@ fn a_resolver_is_told_what_each_side_is_for() {
 }
 
 /// When the first of two clashing forks merges, main must be merged into the
-/// second (public) one, and the same clash comes back. git's rerere replays
-/// the merge-head resolution, so the daemon settles it without asking.
+/// second (public) one, and the same clash comes back. Nothing settles it
+/// unseen: it parks, and whoever resolves is shown how the same files were
+/// resolved before.
 #[test]
-fn a_merge_head_resolution_replays_when_the_clash_returns() {
+fn a_returning_clash_is_resolved_again_with_the_earlier_answer_shown() {
     let w = World::new();
     let n2 = conflicting_forks_side_by_side(&w);
-    w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Merge);
-    let report = w.pass();
-
-    assert_eq!(report.updated_public, [n2]);
-    let st = w.state();
-    assert!(st.sets[&n2].park.is_none());
-    assert_eq!(w.file_at(&st.sets[&n2].tip, "README").as_deref(), Some("one and two\n"));
-}
-
-/// When rerere cannot replay it (here its cache is gone), the daemon parks,
-/// and whoever resolves is shown how the same files were resolved before.
-#[test]
-fn a_merge_head_resolution_is_shown_when_it_cannot_replay() {
-    let w = World::new();
-    let n2 = conflicting_forks_side_by_side(&w);
-    std::fs::remove_dir_all(w.queue().sync_dir(REPO).join(".git/rr-cache")).unwrap();
     w.forge.merge(w.state().sets[&1].pr.as_ref().unwrap().number, MergeMethod::Merge);
     assert_eq!(w.pass().parked, [n2]);
 
@@ -232,6 +217,31 @@ fn a_merge_head_resolution_is_shown_when_it_cannot_replay() {
     assert_eq!(h.seen[0].files, ["README"]);
     assert!(h.seen[0].recorded > 0, "the earlier resolution is handed over");
     assert!(w.state().sets[&n2].park.is_none());
+}
+
+/// git's rerere replays an answer onto any clash with the same lines, whatever
+/// set it came from, so a sync clone made when Choros turned it on has it
+/// turned off, and what it remembered dropped, at the next pass.
+#[test]
+fn a_sync_clone_forgets_rerere() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "mine\n");
+    w.land_on_head(&ws).unwrap();
+    let sync = w.queue().sync_dir(REPO);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(&sync).args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["config", "rerere.enabled", "true"]);
+    git(&["config", "rerere.autoUpdate", "true"]);
+    std::fs::create_dir_all(sync.join(".git/rr-cache/909af77d")).unwrap();
+
+    w.pass();
+
+    assert_eq!(git(&["config", "--get", "rerere.enabled"]), "false");
+    assert_eq!(git(&["config", "--get", "rerere.autoUpdate"]), "");
+    assert!(!sync.join(".git/rr-cache").exists());
 }
 
 /// A public set is only added to. Main moving on is no reason to touch it;
