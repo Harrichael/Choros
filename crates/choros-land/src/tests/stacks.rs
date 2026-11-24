@@ -703,3 +703,46 @@ fn a_push_onto_githubs_rebase_is_a_change_to_the_set() {
     assert_eq!(rebased(false), (1, ChangeBy::Landed, false));
     assert_eq!(rebased(true), (2, ChangeBy::Pushed, true));
 }
+
+/// A queued set without a PR says why, in the queue's own words, so no one
+/// has to work the rule out from what the queue did: held by the cap, on two
+/// open sets (a PR has one base), needing a newer main than the set below
+/// has, or simply behind a set that has no PR yet.
+#[test]
+fn a_set_without_a_pr_says_why() {
+    use crate::opening::Waiting;
+    let waiting = |w: &World, n: u32| {
+        let status = crate::status::queue_status(&w.trunk, QUEUE).unwrap();
+        status.sets.into_iter().find(|s| s.n == n).unwrap().waiting
+    };
+
+    let w = World::new();
+    w.stack(2);
+    w.line(4);
+    assert_eq!(waiting(&w, 2), None, "it has its PR");
+    assert_eq!(waiting(&w, 3), Some(Waiting::Cap { max_open: 2 }));
+    assert_eq!(waiting(&w, 4), Some(Waiting::BelowHasNoPr { on: 3 }));
+
+    let v = World::new();
+    v.stack(5);
+    for name in ["a", "b"] {
+        let ws = v.workspace(name);
+        v.commit(&ws, &format!("{name}.txt"), "x\n");
+        v.land_with(&ws, Some(vec![]), None).unwrap();
+    }
+    let c = v.workspace("c");
+    v.commit(&c, "c.txt", "c\n");
+    v.land_with(&c, Some(vec![Dep::Set(1), Dep::Set(2)]), None).unwrap();
+    v.pass();
+    assert_eq!(waiting(&v, 3), Some(Waiting::SitsOnMany { on: vec![1, 2] }));
+
+    let u = World::new();
+    u.stack(5);
+    let ws = u.line(1);
+    u.push_to_main("m.txt", "m\n");
+    u.sync(&ws);
+    u.commit(&ws, "m.txt", "changed\n");
+    u.land_on_head(&ws).unwrap();
+    u.pass();
+    assert_eq!(waiting(&u, 2), Some(Waiting::NotOnBelowTip { on: 1 }));
+}

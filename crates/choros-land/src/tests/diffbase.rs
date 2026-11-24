@@ -99,6 +99,29 @@ fn work_built_on_a_pr_in_review_goes_to_main_after_it() {
     assert!(diffbase_of(&st, REPO).is_none(), "back on main");
 }
 
+/// While a listed PR is open no PR opens, front or stacked, and a set
+/// behind one with a PR says it waits for the diffbase, not for a pass.
+#[test]
+fn a_set_held_by_the_diffbase_says_so() {
+    let w = World::new();
+    w.stack(5);
+    let ws = w.workspace("ws");
+    w.commit(&ws, "one.txt", "1\n");
+    w.land_on_head(&ws).unwrap();
+    assert!(w.state().sets[&1].pr.is_some());
+    let lib = w.outside_pr("lib", "lib.txt", "lib\n");
+    diffbase::add(&w.env(), &w.queue(), &format!("{REPO}#{lib}")).unwrap();
+    w.sync(&ws);
+    w.commit(&ws, "two.txt", "2\n");
+    w.land_on_head(&ws).unwrap();
+    w.pass();
+
+    let status = crate::status::queue_status(&w.trunk, QUEUE).unwrap();
+    let two = status.sets.iter().find(|s| s.n == 2).unwrap();
+    assert!(two.pr.is_none());
+    assert_eq!(two.waiting, Some(crate::opening::Waiting::Diffbase));
+}
+
 /// Two listed PRs that edit the same line park the whole queue, naming the
 /// pair. Resolved once, the resolution is reused when a PR gets new commits;
 /// it never ships, so nothing opens while the PRs are unmerged.

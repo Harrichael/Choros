@@ -50,8 +50,12 @@ folder has been archived and no set is open (to
 <trunk>/.choros-config/queues/<queue>/
     queue.toml      # settings (hand-editable)
     queue.db        # graph + bookkeeping (engine-owned SQLite; a queue that kept these in state.json is moved over the next time it is locked)
-    lock            # flock target
+    lock            # flock target; holds who has it (pid, command, since) while they do
 ```
+
+A command kept waiting for the lock names its holder and for how long, and
+`choros status` shows a held lock, and a queue no pass has reached for ten
+minutes, under the queue's name.
 
 `queue.toml`:
 
@@ -387,10 +391,16 @@ its `base` had.
 trunks in `~/.config/choros/trunks.toml` (written by `choros init`; the older
 `roots.toml` is still read). Every 2
 minutes, or when `choros queue sync` pokes it (with no daemon running,
-`choros queue sync` runs the same pass in-process), for each queue it
-**try-locks** (skips a queue whose lock is held) and runs one
-**level-triggered** pass: it computes what every set should look like from the
-graph, origin and GitHub, and fixes any difference. A crash mid-pass heals on
+`choros queue sync` runs the same pass in-process), for each queue, on a
+thread of its own, it **try-locks** (skips a queue whose lock is held) and
+runs one pass. Commands wait for the lock while the
+daemon only tries it, so a queue busy with one command after another would
+never get a pass of the daemon's own: after three passes in a row find it
+locked, the daemon waits for the lock instead, and says so in its log.
+Its own thread keeps that wait from holding up any other queue.
+
+Each pass is **level-triggered**: it computes what every set should look
+like from the graph, origin and GitHub, and fixes any difference. A crash mid-pass heals on
 the next pass. Every fetch, push, `ls-remote` and `gh` call is stopped after
 5 minutes (a clone after 30) and fails as any error would (a fetch ends the
 pass; a push fails only its set): a connection that dies mid-call would
@@ -648,6 +658,14 @@ and stacked together. So with a cap of 5, seven front sets means seven PRs
 and no stacks; two front sets leave room for three stacked. Free slots go
 the same way: the candidate with the longest line first. Candidates are
 worked out again after each PR opens, so a whole line can stack in one pass.
+
+**Why one hasn't opened.** A set stacks only when it sits on exactly one
+open set (a PR has one base branch), that set's PR is in a stack or on main
+with no other stacked PR on it, the set is built on that set's tip (not on a
+newer main the branch below lacks), and the cap allows. `choros status`
+says, under a set, which of these holds it back, and `choros landing show`
+says so for any queued set without a PR; `--json` gives it as `waiting`.
+The pass and the explanation read the same rules (`opening.rs`).
 
 **Opening one.** The pass opens a stacked PR like a front one (title, body,
 `pr.draft`), with base `<queue>/landing-P` for the set P it sits on, then

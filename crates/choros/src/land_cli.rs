@@ -409,8 +409,28 @@ fn set_notes(s: &status::SetLine) -> Vec<String> {
         let url = s.pr.as_ref().map(|p| format!(": {}", p.url)).unwrap_or_default();
         notes.push(format!("the set below moved: press Rebase stack on GitHub{url}"));
     }
+    if let Some(w) = s.waiting.as_ref().filter(|w| !w.shown_by_the_graph()) {
+        notes.push(w.to_string());
+    }
     notes
 }
+
+/// Who holds the queue now, and how long since a pass, once that's long
+/// enough to hold things up.
+fn queue_notes(q: &status::QueueStatus) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(h) = &q.lock {
+        notes.push(format!("locked by {h}"));
+    }
+    let since = q.last_pass.map(|t| choros_land::state::now_secs().saturating_sub(t));
+    if since.is_some_and(|s| s >= STALE_PASS_SECS) {
+        notes.push(format!("no pass for {}", choros_land::queue::how_long(since.unwrap())));
+    }
+    notes
+}
+
+/// Several daemon ticks: a queue passed over this long is being held up.
+const STALE_PASS_SECS: u64 = 10 * 60;
 
 /// A queue, its open sets drawn as a graph of what lands after what, and
 /// what needs doing about them, for `status` and `queue NAME`. With
@@ -418,6 +438,9 @@ fn set_notes(s: &status::SetLine) -> Vec<String> {
 fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
     let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
     println!("{} ({repos}) @ {}", q.name, q.trunk.display());
+    for note in queue_notes(q) {
+        println!("  {note}");
+    }
     // A merged set no longer holds anything back; JSON keeps it.
     let open: BTreeMap<u32, &status::SetLine> =
         q.sets.iter().filter(|s| s.state != "merged").map(|s| (s.n, s)).collect();
@@ -944,6 +967,13 @@ fn print_set(trunk: &Path, queue: &str, n: u32) -> Result<()> {
         println!("  {:<10}{value}", format!("{name}:"));
     }
     for note in set_notes(s) {
+        println!("  {note}");
+    }
+    // `landing show` draws no graph, so it gives every reason.
+    if let Some(w) = s.waiting.as_ref().filter(|w| w.shown_by_the_graph()) {
+        println!("  {w}");
+    }
+    for note in queue_notes(&status) {
         println!("  {note}");
     }
     Ok(())

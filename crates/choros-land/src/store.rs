@@ -201,6 +201,7 @@ impl Store {
             match key.as_str() {
                 "next_n" => st.next_n = value.parse().wrap_err("next_n in queue.db")?,
                 "diffbase" => st.diffbase = parse::<DiffbaseState>(&value, "the diffbase")?,
+                "last_pass" => st.last_pass = value.parse().ok(),
                 _ => {}
             }
         }
@@ -225,6 +226,7 @@ impl Store {
         for (key, value) in [
             ("next_n", st.next_n.to_string()),
             ("diffbase", serde_json::to_string(&st.diffbase)?),
+            ("last_pass", st.last_pass.map(|t| t.to_string()).unwrap_or_default()),
         ] {
             tx.execute(
                 &format!("INSERT INTO meta (key, value) VALUES (?1, ?2) {put} value = ?2 WHERE value <> ?2"),

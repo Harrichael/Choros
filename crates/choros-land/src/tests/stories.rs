@@ -853,3 +853,25 @@ fn a_set_whose_footing_is_dropped_is_replayed_from_its_change() {
     assert_eq!(w.file_at(&set.tip, "b.txt").as_deref(), Some("b\n"));
     assert_eq!(w.file_at(&set.tip, "a.txt"), None);
 }
+
+/// Whoever holds a queue's lock is named while they hold it, so a command
+/// kept waiting, or `choros status`, can say who and for how long; once
+/// they let go, no one is. A pass leaves the time it ran.
+#[test]
+fn the_lock_names_its_holder_and_a_pass_its_time() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    let q = w.queue();
+
+    let lock = q.lock().unwrap();
+    let holder = q.holder().expect("the lock is held");
+    assert_eq!(holder.process.pid, std::process::id());
+    assert!(crate::status::queue_status(&w.trunk, QUEUE).unwrap().lock.is_some());
+    drop(lock);
+    assert!(q.holder().is_none());
+
+    w.pass();
+    assert!(crate::status::queue_status(&w.trunk, QUEUE).unwrap().last_pass.is_some());
+}

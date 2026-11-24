@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use choros_core::choros::{ARCHIVE_REL, CONFIG_DIR, LANDING_DIR, QUEUES_REL};
 use choros_core::{agent, git as core_git, registry};
+use choros_core::process::Proc;
 use color_eyre::eyre::{Result, eyre};
+use serde::{Deserialize, Serialize};
 
 use crate::git::Git;
 use crate::state::{self, LandingSet, QueueConfig, QueueState, RepoState, Scope, SetStatus};
@@ -19,7 +21,67 @@ pub struct Queue {
 }
 
 /// Held for the duration of one short step; dropping it unlocks.
-pub struct QueueLock(#[allow(dead_code)] File);
+pub struct QueueLock(File);
+
+impl QueueLock {
+    /// Write who holds it into the lock file, for whoever is kept waiting.
+    fn held(file: File) -> QueueLock {
+        if let Some(me) = Holder::me()
+            && let Ok(body) = serde_json::to_vec(&me)
+        {
+            use std::os::unix::fs::FileExt;
+            let _ = file.set_len(0).and_then(|()| file.write_all_at(&body, 0));
+        }
+        QueueLock(file)
+    }
+}
+
+impl Drop for QueueLock {
+    fn drop(&mut self) {
+        let _ = self.0.set_len(0);
+    }
+}
+
+/// Who holds a queue's lock, and since when. A holder that died leaves its
+/// record behind, but the lock goes with it, so a record is believed only
+/// while its process lives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Holder {
+    pub process: Proc,
+    pub command: String,
+    pub since: u64,
+}
+
+impl Holder {
+    fn me() -> Option<Holder> {
+        let mut args = std::env::args();
+        let program = args.next().unwrap_or_default();
+        let program = program.rsplit('/').next().unwrap_or_default().to_string();
+        let command: String = std::iter::once(program).chain(args).collect::<Vec<_>>().join(" ");
+        let command = match command.char_indices().nth(100) {
+            Some((i, _)) => format!("{}…", &command[..i]),
+            None => command,
+        };
+        Some(Holder { process: Proc::of(std::process::id())?, command, since: state::now_secs() })
+    }
+}
+
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = state::now_secs().saturating_sub(self.since);
+        write!(f, "`{}` (pid {}) for {}", self.command, self.process.pid, how_long(held))
+    }
+}
+
+/// `2h 14m`, `5m`, `40s`.
+pub fn how_long(secs: u64) -> String {
+    match (secs / 3600, secs / 60 % 60) {
+        (0, 0) => format!("{secs}s"),
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
 
 const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "_check", "merge-head", crate::workspace::NO_QUEUE];
 
@@ -166,12 +228,28 @@ impl Queue {
         Ok(())
     }
 
+    /// The queue's lock, waiting for it if need be, and saying who for.
     pub fn lock(&self) -> Result<QueueLock> {
+        if let Some(lock) = self.try_lock()? {
+            return Ok(lock);
+        }
+        let by = match self.holder() {
+            Some(h) => format!("held by {h}"),
+            None => "someone is landing or resolving there".to_string(),
+        };
+        eprintln!("waiting for queue {} ({by})…", self.name);
         let file = self.lock_file()?;
         file.lock()?;
         self.adopt_old_layout()?;
         store::adopt(&self.dir(), &self.config)?;
-        Ok(QueueLock(file))
+        Ok(QueueLock::held(file))
+    }
+
+    /// Who holds the queue's lock now, if anyone living does.
+    pub fn holder(&self) -> Option<Holder> {
+        let body = std::fs::read(self.dir().join("lock")).ok()?;
+        let holder: Holder = serde_json::from_slice(&body).ok()?;
+        holder.process.alive().then_some(holder)
     }
 
     pub fn try_lock(&self) -> Result<Option<QueueLock>> {
@@ -180,7 +258,7 @@ impl Queue {
             Ok(()) => {
                 self.adopt_old_layout()?;
                 store::adopt(&self.dir(), &self.config)?;
-                Ok(Some(QueueLock(file)))
+                Ok(Some(QueueLock::held(file)))
             }
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(e)) => Err(e.into()),

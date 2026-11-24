@@ -88,7 +88,9 @@ $ choros status --json
         }
       ],
       "diffbase": [],
-      "diffbase_park": null
+      "diffbase_park": null,
+      "lock": null,
+...
     }
   ],
   "instant": []

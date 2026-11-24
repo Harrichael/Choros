@@ -22,7 +22,9 @@ use crate::admin;
 use crate::engine::{Env, PassReport, Work};
 use crate::forge::{Forge, PrState};
 use crate::queue::Queue;
-use crate::state::{BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, SeenPr, parse_pr_list};
+use crate::state::{
+    BuiltDiffbase, DiffbaseConflict, DiffbasePark, PrSpec, QueueConfig, QueueState, SeenPr, parse_pr_list,
+};
 
 impl Work<'_, '_> {
     /// Look up each listed PR on GitHub, fetching the heads of open ones. A
@@ -222,14 +224,16 @@ impl Work<'_, '_> {
     /// A listed PR is still open (or hasn't been seen yet), so the queue's
     /// work isn't ready for main. A closed one is left out, not waited for.
     pub fn diffbase_waiting(&self) -> Result<bool> {
-        Ok(self.q.config.diffbase()?.iter().any(|p| {
-            self.st
-                .diffbase
-                .prs
-                .get(&p.to_string())
-                .is_none_or(|s| s.state == PrState::Open)
-        }))
+        waiting(&self.q.config, &self.st)
     }
+}
+
+/// As [`Work::diffbase_waiting`], from the queue's record alone.
+pub fn waiting(config: &QueueConfig, st: &QueueState) -> Result<bool> {
+    Ok(config
+        .diffbase()?
+        .iter()
+        .any(|p| st.diffbase.prs.get(&p.to_string()).is_none_or(|s| s.state == PrState::Open)))
 }
 
 /// Add `prs` (one or a list, as [`parse_pr_list`] reads it) to the queue's

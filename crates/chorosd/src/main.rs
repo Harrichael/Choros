@@ -6,7 +6,9 @@
 //! `choros_land::auto_resolve`), and parks when it can't be settled; it never
 //! asks anything.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use choros_core::choros::CONFIG_DIR;
@@ -19,38 +21,73 @@ use choros_land::queue::{self, Queue};
 use color_eyre::eyre::Result;
 use time::OffsetDateTime;
 
+/// Passes in a row that may find a queue locked before the daemon waits
+/// for it. Commands wait for the lock and the daemon only tries it, so a
+/// queue that is never free between commands would otherwise never get a
+/// pass of the daemon's own.
+const WAIT_AFTER_SKIPS: u32 = 3;
+
+/// Each queue's thread, by trunk and name.
+type Watching = HashMap<(PathBuf, String), JoinHandle<()>>;
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     let once = std::env::args().any(|a| a == "--once");
-    let interval = std::env::var("CHOROSD_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120);
+    let interval = Duration::from_secs(
+        std::env::var("CHOROSD_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120),
+    );
+    let mut watching = Watching::new();
     loop {
-        if let Err(e) = tick() {
+        let watching = if once { None } else { Some(&mut watching) };
+        if let Err(e) = tick(watching, interval) {
             log(&format!("pass failed: {e:#}"));
         }
         if once {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_secs(interval));
+        std::thread::sleep(interval);
     }
 }
 
-fn tick() -> Result<()> {
+/// Look over every trunk: start a thread for each queue that has none
+/// (or, `--once`, pass each queue here), then log instant merges and
+/// archive closed sessions' workspaces.
+fn tick(watching: Option<&mut Watching>, interval: Duration) -> Result<()> {
     let Some(config) = trunks::config_home() else {
         log("neither XDG_CONFIG_HOME nor HOME is set; nothing to watch");
         return Ok(());
     };
+    let mut watching = watching;
     for trunk in trunks::list(&config)? {
         if !trunk.exists() {
             continue;
         }
         for name in queue::list(&trunk)? {
-            // One queue failing (a network blip, a bad state file) must not
-            // stop the others.
-            if let Err(e) = pass(&trunk, &name) {
-                log(&format!("{name} @ {}: {e:#}", trunk.display()));
+            match watching.as_deref_mut() {
+                // Each queue on its own thread, so one waiting for its lock
+                // holds up no other.
+                Some(w) => {
+                    let key = (trunk.clone(), name.clone());
+                    if w.get(&key).is_some_and(|t| !t.is_finished()) {
+                        continue;
+                    }
+                    let (trunk, name) = key.clone();
+                    // Named, so a panic's message says which queue.
+                    let thread = std::thread::Builder::new()
+                        .name(name.clone())
+                        .spawn(move || watch(&trunk, &name, interval))?;
+                    w.insert(key, thread);
+                }
+                // One queue failing (a network blip, a bad state file) must
+                // not stop the others.
+                None => {
+                    if let Err(e) = pass(&trunk, &name, false) {
+                        log(&format!("{name} @ {}: {e:#}", trunk.display()));
+                    }
+                }
             }
         }
         if let Err(e) = log_instant_merges(&trunk) {
@@ -88,8 +125,45 @@ fn log_instant_merges(trunk: &Path) -> Result<()> {
     Ok(())
 }
 
-fn pass(trunk: &Path, name: &str) -> Result<()> {
-    let q = Queue::open(trunk, name)?;
+/// Pass one queue every `interval` for as long as it exists.
+fn watch(trunk: &Path, name: &str, interval: Duration) {
+    let mut skipped = 0;
+    loop {
+        if !queue::list(trunk).is_ok_and(|names| names.iter().any(|n| n == name)) {
+            return;
+        }
+        let wait = skipped >= WAIT_AFTER_SKIPS;
+        if wait {
+            let by = Queue::open(trunk, name).ok().and_then(|q| q.holder());
+            let by = by.map(|h| format!(", held by {h}")).unwrap_or_default();
+            log(&format!("{name}: locked for {skipped} passes in a row{by}; waiting for it"));
+        }
+        match pass(trunk, name, wait) {
+            Ok(true) => skipped = 0,
+            Ok(false) => skipped += 1,
+            Err(e) => log(&format!("{name} @ {}: {e:#}", trunk.display())),
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// One pass of the queue; `false` when it was locked and `wait` was not.
+fn pass(trunk: &Path, name: &str, wait: bool) -> Result<bool> {
+    // queue.toml is read when the queue is opened, and whoever held the
+    // lock may have changed it (a diffbase added, say). So after a wait the
+    // queue is opened afresh, and only a lock taken with no wait is used.
+    let (q, lock) = loop {
+        let q = Queue::open(trunk, name)?;
+        if let Some(lock) = q.try_lock()? {
+            break (q, lock);
+        }
+        // Someone is landing or resolving; they will finish the job, and
+        // the next tick will see their result.
+        if !wait {
+            return Ok(false);
+        }
+        drop(q.lock()?);
+    };
     let gh = Gh::new(q.gh_config_dir());
     let claude = Claude::default();
     let env = Env {
@@ -99,11 +173,7 @@ fn pass(trunk: &Path, name: &str) -> Result<()> {
     };
     let mut auto = AutoResolve::new(trunk.to_path_buf(), name.to_string());
     let handler: Option<&mut dyn ConflictHandler> = q.config.agent.resolver.auto_resolve.then_some(&mut auto as _);
-    // Someone is landing or resolving; they will finish the job, and the
-    // next tick will see their result.
-    let Some(mut work) = Work::begin(&q, env.agent, handler, false)? else {
-        return Ok(());
-    };
+    let mut work = Work::locked(&q, env.agent, handler, lock)?;
     let report = work.pass(env.forge);
     work.save()?;
     let retired = queue::retire_if_orphaned(&q, &work.st)?;
@@ -115,7 +185,7 @@ fn pass(trunk: &Path, name: &str) -> Result<()> {
     if retired {
         log(&format!("{name}: its workspace or branch-space is archived and nothing is open; archived it too"));
     }
-    Ok(())
+    Ok(true)
 }
 
 fn describe(name: &str, r: &PassReport) {

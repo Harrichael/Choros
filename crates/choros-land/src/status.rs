@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::git::Git;
 use crate::graph;
+use crate::opening::Waiting;
 use crate::queue::{self, Queue};
 use crate::forge::{PrReview, PrState};
 use crate::state::{DiffbasePark, Park, PrRef, Scope, SessionFork, SetStatus};
@@ -29,6 +30,10 @@ pub struct QueueStatus {
     /// Each PR in the diffbase, with what's known of it.
     pub diffbase: Vec<DiffbaseLine>,
     pub diffbase_park: Option<DiffbasePark>,
+    /// Who holds the queue's lock now, if anyone.
+    pub lock: Option<queue::Holder>,
+    /// When a pass last ran, in seconds since the epoch.
+    pub last_pass: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +79,9 @@ pub struct SetLine {
     /// A stacked PR the set below moved under, waiting for GitHub's Rebase
     /// stack.
     pub behind_in_stack: bool,
+    /// Why a queued set has no PR, when that wants saying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
 }
 
 /// The queues a command run at `cwd` is about. Inside a workspace: the ones
@@ -167,6 +175,8 @@ pub fn report(cwd: &Path, config_home: Option<&Path>, all: bool) -> Result<Vec<Q
 pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
     let q = Queue::open(trunk, name)?;
     let st = q.read_state()?;
+    let diffbase_waiting = crate::diffbase::waiting(&q.config, &st)?;
+    let cross = |queue: &str, n: u32| queue::merged_in(trunk, queue, n);
     let mut sets = Vec::new();
     for (n, set) in &st.sets {
         if matches!(set.status, SetStatus::Dropped) {
@@ -174,6 +184,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
         }
         let landing = q.landing_dir(*n).join(set.repo());
         sets.push(SetLine {
+            waiting: crate::opening::waiting(&st, &q.config, name, *n, &cross, diffbase_waiting),
             pr_title: set.is_open().then(|| q.pr_title(set).ok()).flatten(),
             landing_dirty: set.is_open()
                 && landing.exists()
@@ -216,6 +227,8 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
         needs_sync,
         diffbase,
         diffbase_park: st.diffbase.park.clone(),
+        lock: q.holder(),
+        last_pass: st.last_pass,
     })
 }
 
@@ -263,6 +276,7 @@ pub(crate) fn set_line(queue: &str, st: &crate::state::QueueState, n: u32) -> Se
         landing_dirty: false,
         unlinked: graph::stacked(st, n) && set.stack.is_none(),
         behind_in_stack: set.park.is_none() && graph::behind_in_stack(st, n).is_some(),
+        waiting: None,
     }
 }
 

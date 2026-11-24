@@ -334,6 +334,9 @@ pub struct QueueState {
     pub repos: BTreeMap<String, RepoState>,
     #[serde(default)]
     pub diffbase: DiffbaseState,
+    /// When a pass last ran, in seconds since the epoch.
+    #[serde(default)]
+    pub last_pass: Option<u64>,
     /// From a one-repo queue's state.json; `read_state_json` moves them
     /// into `repos`.
     #[serde(default, skip_serializing)]

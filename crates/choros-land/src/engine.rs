@@ -149,19 +149,18 @@ impl<'q, 'h> Work<'q, 'h> {
         wait: bool,
     ) -> Result<Option<Self>> {
         let lock = if wait {
-            match q.try_lock()? {
-                Some(l) => l,
-                None => {
-                    eprintln!("waiting for queue {} (someone is landing or resolving there)…", q.name);
-                    q.lock()?
-                }
-            }
+            q.lock()?
         } else {
             match q.try_lock()? {
                 Some(l) => l,
                 None => return Ok(None),
             }
         };
+        Self::locked(q, agent, handler, lock).map(Some)
+    }
+
+    /// As `begin`, with the queue's lock already held.
+    pub fn locked(q: &'q Queue, agent: &'q dyn Agent, handler: Handler<'h>, lock: QueueLock) -> Result<Self> {
         let st = q.read_state()?;
         for repo in st.repos.keys() {
             q.recover(repo)?;
@@ -181,7 +180,7 @@ impl<'q, 'h> Work<'q, 'h> {
         for set in work.st.sets.values_mut().filter(|s| s.is_open() && s.change.is_none()) {
             set.changed(ChangeBy::Found, Vec::new());
         }
-        Ok(Some(work))
+        Ok(work)
     }
 
     /// A push journalled but never confirmed: keep its tip if origin has it,
@@ -1242,25 +1241,13 @@ impl<'q, 'h> Work<'q, 'h> {
     /// on and the length of its line: the stack under it, itself, and the
     /// longest chain of sets built on it.
     fn stack_candidates(&self) -> Vec<(u32, u32, usize)> {
-        let open_prs = |repo: &str| {
-            self.st
-                .sets
-                .values()
-                .filter(|s| s.is_open() && s.pr.is_some() && s.repo() == repo)
-                .count()
-        };
         let mut out = Vec::new();
         for n in graph::live(&self.st) {
-            let set = &self.st.sets[&n];
-            if set.pr.is_some() || set.tip == set.base_sha {
+            if self.st.sets[&n].pr.is_some() {
                 continue;
             }
             let Some(p) = self.stack_spot(n) else { continue };
-            let under = &self.st.sets[&p];
-            if set.base.deps != [(p, under.tip.clone())]
-                || set.base_sha != under.tip
-                || open_prs(set.repo()) >= self.q.config.stack.max_open as usize
-            {
+            if crate::opening::stack_ready(&self.st, &self.q.config, n, p).is_err() {
                 continue;
             }
             let below = graph::ancestors(&self.st, n)
@@ -1272,32 +1259,8 @@ impl<'q, 'h> Work<'q, 'h> {
         out
     }
 
-    /// The set `n` would stack on, cap and base aside: the one set it sits
-    /// on, with a PR in a stack (or on main) and no other stacked child.
     fn stack_spot(&self, n: u32) -> Option<u32> {
-        let set = &self.st.sets[&n];
-        // Waiting on a set in another repo or queue: its PR opens at the
-        // front, if at all, so there is nothing to stack on.
-        let elsewhere = set.deps.iter().any(|d| match d {
-            Dep::Set(m) => self
-                .st
-                .sets
-                .get(m)
-                .is_some_and(|s| s.status != SetStatus::Merged && s.repo() != set.repo()),
-            Dep::Cross { queue, n } => !self.cross_merged()(queue, *n),
-        });
-        let [p] = graph::sits_on(&self.st, n)[..] else { return None };
-        let under = &self.st.sets[&p];
-        // A closed child is still in GitHub's stack until it is dropped.
-        let has_child = self.st.sets.values().any(|s| {
-            s.n != n
-                && matches!(s.status, SetStatus::Queued | SetStatus::Closed)
-                && s.pr_base.as_deref() == Some(under.branch(&self.q.name).as_str())
-        });
-        // Under an unlinked stacked PR, linking would start a second
-        // stack and strand that PR's own link.
-        let linkable = graph::public(&self.st, p) || under.stack.is_some();
-        (!elsewhere && under.pr.is_some() && linkable && !has_child).then_some(p)
+        crate::opening::stack_spot(&self.st, &self.q.name, n, &self.cross_merged()).ok()
     }
 
     /// How many open sets, each sitting on the one before, build on `n`
@@ -1475,6 +1438,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// The daemon's pass, minus the lock and fetch `begin` already did.
     pub fn pass(&mut self, forge: &dyn Forge) -> Result<PassReport> {
         let mut report = PassReport::default();
+        self.st.last_pass = Some(crate::state::now_secs());
         let was_behind: BTreeSet<u32> =
             self.st.sets.keys().copied().filter(|n| graph::behind_in_stack(&self.st, *n).is_some()).collect();
         self.observe_prs(forge, &mut report)?;

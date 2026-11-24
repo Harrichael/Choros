@@ -32,6 +32,7 @@ appq/landing-2  queued  A second look at a
   branch:   appq/landing-2
   after:    landing-1
   folder:   $ROOT/trunk/.choros-config/queues/appq/landing/landing-2/app
+  no PR: waits for landing-1 to merge, as stacking is off
 $ choros landing show 9
 choros: appq has no landing-9
 [exit 1]
