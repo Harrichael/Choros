@@ -433,17 +433,29 @@ pub struct FakeAgent {
     pub fix: Mutex<Option<String>>,
     /// The model each resolve was asked to run on.
     pub models: Mutex<Vec<String>>,
+    /// Whether anyone held the queue's lock as each resolve ran.
+    pub locked: Mutex<Vec<bool>>,
+    /// A file it also writes, outside the conflict, with its content.
+    pub also: Mutex<Option<(String, String)>>,
 }
 
 impl Agent for FakeAgent {
     fn resolve(&self, brief: &ConflictBrief) -> Result<AgentSlot> {
         self.models.lock().unwrap().push(brief.model.to_string());
+        // It runs in `<queue>/_resolve/<repo>`; a held lock names its holder.
+        let lock = brief.dir.parent().and_then(Path::parent).map(|q| q.join("lock"));
+        let held = lock.and_then(|l| std::fs::metadata(l).ok()).is_some_and(|m| m.len() > 0);
+        self.locked.lock().unwrap().push(held);
         let Some(fix) = self.fix.lock().unwrap().clone() else {
             return Err(eyre!("the agent gave up"));
         };
         for f in brief.files {
             std::fs::write(brief.dir.join(f), &fix)?;
             git(brief.dir, &["add", f]);
+        }
+        if let Some((file, content)) = self.also.lock().unwrap().clone() {
+            std::fs::write(brief.dir.join(&file), content)?;
+            git(brief.dir, &["add", &file]);
         }
         Ok(brief.session.clone())
     }
@@ -713,18 +725,28 @@ impl World {
         r
     }
 
-    /// One of the daemon's passes: conflicts go to the agent, within the
-    /// queue's limits. What it noted.
+    /// One of the daemon's passes, as chorosd runs it: conflicts go to the
+    /// agent, within the queue's limits, and the jobs the pass asks for run
+    /// with the queue let go, then another pass, for as long as they find
+    /// something. What it noted.
     pub fn daemon_pass(&self) -> Vec<String> {
         let mut auto = crate::auto_resolve::AutoResolve::new(self.trunk.clone(), QUEUE.into());
-        let q = self.queue();
-        let handler: Option<&mut dyn ConflictHandler> = q.config.agent.resolver.auto_resolve.then_some(&mut auto as _);
-        let mut work = crate::engine::Work::begin(&q, &self.agent, handler, true).unwrap().unwrap();
-        work.pass(&self.forge).unwrap();
-        work.save().unwrap();
-        drop(work);
-        self.check();
-        auto.notes
+        let mut notes = Vec::new();
+        for _ in 0..crate::pending::ROUNDS {
+            let q = self.queue();
+            let on = q.config.agent.resolver.auto_resolve;
+            let handler: Option<&mut dyn ConflictHandler> = on.then_some(&mut auto as _);
+            let mut work = crate::engine::Work::begin(&q, &self.agent, handler, true).unwrap().unwrap();
+            work.pass(&self.forge).unwrap();
+            work.save().unwrap();
+            drop(work);
+            self.check();
+            if crate::pending::run(&q, &self.agent, on.then_some(&mut auto), &mut notes).unwrap() == 0 {
+                break;
+            }
+        }
+        notes.extend(auto.notes);
+        notes
     }
 
     pub fn resolve(&self, handler: &mut Scripted) -> PassReport {

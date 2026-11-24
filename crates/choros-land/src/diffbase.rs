@@ -167,7 +167,8 @@ impl Work<'_, '_> {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        if parked_here.as_deref() == Some(key.as_str()) && !self.retries_parked() {
+        let awaiting = self.st.diffbase.park.as_ref().and_then(|p| p.conflict.as_ref()).is_some_and(|c| c.awaiting);
+        if parked_here.as_deref() == Some(key.as_str()) && !self.retries_parked() && !awaiting {
             return Ok(());
         }
         let tips: Vec<String> = heads.iter().map(|(_, h)| h.clone()).collect();
@@ -188,6 +189,7 @@ impl Work<'_, '_> {
                         onto: heads[..i].iter().map(|(p, _)| p.clone()).collect(),
                         files,
                         on: key,
+                        awaiting: self.awaiting,
                     }),
                 });
             }

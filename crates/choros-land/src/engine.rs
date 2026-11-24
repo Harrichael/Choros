@@ -11,7 +11,8 @@ use color_eyre::eyre::{Result, eyre};
 
 use crate::agent::{Agent, AgentSlot};
 use crate::forge::{Forge, PrRequest, PrState, RepoSettings};
-use crate::git::{Git, Step};
+use crate::git::{Git, InProgress, Step};
+use crate::pending::{Job, Redo, Task, by_agent, by_rules};
 use crate::graph;
 use crate::mend::{self, By, Mended, Sides};
 use crate::queue::{Queue, QueueLock};
@@ -53,6 +54,9 @@ pub type Handler<'h> = Option<&'h mut (dyn ConflictHandler + 'static)>;
 pub struct Conflict<'a> {
     pub queue: &'a str,
     pub repo: &'a str,
+    /// What it brings together (see `Git::conflict_key`), the same every
+    /// time it is met.
+    pub key: &'a str,
     pub dir: &'a Path,
     pub operation: String,
     pub files: Vec<String>,
@@ -91,6 +95,9 @@ pub enum Handled {
     Declined,
     /// It didn't look at it this time; the park waits for a later go.
     Deferred,
+    /// It will, once the queue is let go: the agent is queued to run then
+    /// (see `pending`), and the park waits on it.
+    Later,
 }
 
 /// What one pass did, for the daemon's log and for tests.
@@ -121,6 +128,37 @@ pub struct PassReport {
     pub errors: Vec<String>,
 }
 
+impl PassReport {
+    /// This pass and a `later` one as one: what either did or met. A set
+    /// parked by one and settled by the other is for the caller to sort
+    /// out, from the queue as it now stands.
+    pub fn then(mut self, later: PassReport) -> PassReport {
+        for (did, more) in [
+            (&mut self.parked, later.parked),
+            (&mut self.push_failed, later.push_failed),
+            (&mut self.merged, later.merged),
+            (&mut self.closed, later.closed),
+            (&mut self.resynced, later.resynced),
+            (&mut self.updated_public, later.updated_public),
+            (&mut self.opened, later.opened),
+            (&mut self.stacked, later.stacked),
+            (&mut self.adopted, later.adopted),
+            (&mut self.folded, later.folded),
+            (&mut self.already_on_main, later.already_on_main),
+        ] {
+            for n in more {
+                if !did.contains(&n) {
+                    did.push(n);
+                }
+            }
+        }
+        self.behind_in_stack = later.behind_in_stack;
+        self.diffbase_parked = later.diffbase_parked;
+        self.errors.extend(later.errors);
+        self
+    }
+}
+
 /// One locked session of work on a queue. Git work happens in the sync clone
 /// of whichever repo the set or merge head at hand is in.
 pub struct Work<'q, 'h> {
@@ -136,6 +174,12 @@ pub struct Work<'q, 'h> {
     emptied: BTreeSet<u32>,
     /// Commits this session already holds a ref to; see `keep`.
     kept: RefCell<BTreeSet<String>>,
+    /// Slow work asked for since the last save, to join the queue's
+    /// pending jobs when it saves; see `pending`.
+    queued: RefCell<Vec<Job>>,
+    /// Whether the conflict the last build or replay stopped on waits on
+    /// such a job: what a park made from it records.
+    pub(crate) awaiting: bool,
     _lock: QueueLock,
 }
 
@@ -174,6 +218,8 @@ impl<'q, 'h> Work<'q, 'h> {
             conflict_tried: false,
             emptied: BTreeSet::new(),
             kept: RefCell::default(),
+            queued: RefCell::default(),
+            awaiting: false,
             _lock: lock,
         };
         work.settle_pending_pushes()?;
@@ -206,8 +252,23 @@ impl<'q, 'h> Work<'q, 'h> {
         Ok(())
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// The jobs asked for since the last save, before they reach the
+    /// queue's record: for a land, which runs them itself and tries again.
+    pub fn take_queued(&self) -> Vec<Job> {
+        self.queued.take()
+    }
+
+    pub fn has_queued(&self) -> bool {
+        !self.queued.borrow().is_empty()
+    }
+
+    pub fn save(&mut self) -> Result<()> {
         self.keep();
+        for job in self.queued.take() {
+            if !self.st.pending.contains(&job) {
+                self.st.pending.push(job);
+            }
+        }
         self.q.write_state(&self.st)
     }
 
@@ -287,9 +348,34 @@ impl<'q, 'h> Work<'q, 'h> {
         };
         let git = self.git(repo);
         self.conflict_tried = false;
+        self.awaiting = false;
         let sides = git.conflict_sides()?;
-        if let Some(mended) = self.mend(repo, &sides)? {
+        let conflict = git.conflict_key()?;
+        // The agent's fix of this very conflict, made and checked with the
+        // queue let go, is taken whole: it is the tree the check passed on.
+        if let Some(check) = crate::repos::read(&self.q.trunk, repo)?.check
+            && let Some((tree, Ok(()))) = self.kept_fix(repo, &conflict, &by_agent(&check))?
+        {
+            git.run(&["read-tree", "--reset", "-u", &tree])?;
+            let mut mended = Vec::new();
+            for s in &sides {
+                let result = git.rev_parse_any(&format!(":0:{}", s.path))?;
+                mended.push(Mended { path: s.path.clone(), result, by: By::Agent, remembered: false });
+            }
             return self.conclude(repo, &sides, mended).map(|()| None);
+        }
+        let before = self.queued.borrow().len();
+        if let Some(mended) = self.mend(repo, &sides, &conflict)? {
+            return self.conclude(repo, &sides, mended).map(|()| None);
+        }
+        // A fix made without judgment waits for its check, not for the agent.
+        if self.queued.borrow().len() > before {
+            for job in &mut self.queued.borrow_mut()[before..] {
+                job.what = operation.to_string();
+            }
+            self.awaiting = true;
+            git.abort_in_progress()?;
+            return Ok(Some(files));
         }
         let Some(handler) = self.handler.as_deref_mut() else {
             git.abort_in_progress()?;
@@ -302,6 +388,7 @@ impl<'q, 'h> Work<'q, 'h> {
         let handled = handler.resolve(&Conflict {
             queue: &self.q.name,
             repo,
+            key: &conflict,
             dir: git.dir(),
             operation: operation.to_string(),
             files: files.clone(),
@@ -330,6 +417,22 @@ impl<'q, 'h> Work<'q, 'h> {
             }
             return self.conclude(repo, &sides, mended).map(|()| None);
         }
+        if handled == Handled::Later {
+            let step = match git.in_progress()? {
+                Some(InProgress::Merge) => Redo::Merge,
+                _ => Redo::CherryPick,
+            };
+            let other = ["MERGE_HEAD", "CHERRY_PICK_HEAD"]
+                .iter()
+                .find_map(|r| git.rev_parse(r).ok().flatten())
+                .unwrap_or_default();
+            self.queued.borrow_mut().push(Job {
+                repo: repo.to_string(),
+                what: operation.to_string(),
+                task: Task::Agent { conflict: conflict.clone(), step, head: git.head()?, other },
+            });
+            self.awaiting = true;
+        }
         self.conflict_tried = handled == Handled::Declined;
         git.abort_in_progress()?;
         Ok(Some(files))
@@ -344,7 +447,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// that this queue has trusted before, is trusted again. Anything else
     /// must pass the repo's check here: a new answer, and one that took
     /// judgment or the rest of the tree, which was right for another tree.
-    fn mend(&self, repo: &str, sides: &[Sides]) -> Result<Option<Vec<Mended>>> {
+    fn mend(&self, repo: &str, sides: &[Sides], conflict: &str) -> Result<Option<Vec<Mended>>> {
         let git = self.git(repo);
         let store = Store::open(&self.q.dir())?;
         let config = &self.q.config.merge;
@@ -373,55 +476,108 @@ impl<'q, 'h> Work<'q, 'h> {
             return Ok(None);
         }
         let mode = |path: &str| sides.iter().find(|s| s.path == path).map_or("100644", Sides::mode);
+        let failed = |paths: &[&str]| {
+            let check = check.as_deref().unwrap_or_default();
+            eprintln!("{}: `{check}` failed on {} as settled without judgment", self.q.name, paths.join(", "));
+        };
+        // What the rules made of this very conflict before, and how its
+        // check went, once it has run (with the queue let go).
+        let by = check.as_deref().map(|c| by_rules(config, c));
+        let before = match &by {
+            Some(by) if !trusted => self.kept_fix(repo, conflict, by)?,
+            _ => None,
+        };
         if made_again.is_empty() {
-            let settled: Vec<(&str, &str, Option<&str>)> =
-                mended.iter().map(|m| (m.path.as_str(), mode(&m.path), m.result.as_deref())).collect();
-            if !trusted && !self.passes(repo, &git.tree_settled(&settled)?, check.as_deref().unwrap(), &mended)? {
-                return Ok(None);
+            if !trusted {
+                let settled: Vec<(&str, &str, Option<&str>)> =
+                    mended.iter().map(|m| (m.path.as_str(), mode(&m.path), m.result.as_deref())).collect();
+                let tree = git.tree_settled(&settled)?;
+                match before {
+                    Some((kept, Ok(()))) => take_tree(&git, &kept, &mut mended)?,
+                    // Another answer (the queue's remembered ones changed)
+                    // gets a check of its own.
+                    Some((kept, Err(()))) if kept == tree => {
+                        failed(&mended.iter().map(|m| m.path.as_str()).collect::<Vec<_>>());
+                        return Ok(None);
+                    }
+                    _ => {
+                        self.queue_check(repo, conflict, by.unwrap(), &tree, check.as_deref().unwrap())?;
+                        return Ok(None);
+                    }
+                }
             }
             for m in &mended {
                 git.stage_blob(&m.path, mode(&m.path), m.result.as_deref())?;
             }
             return Ok(Some(mended));
         }
+        // Commands can take minutes and need not make the same bytes twice:
+        // a conflict met before is taken as it went then, without them.
+        match before {
+            Some((kept, Ok(()))) => {
+                for (s, command) in &made_again {
+                    let by = By::Regenerate((*command).clone());
+                    mended.push(Mended { path: s.path.clone(), result: None, by, remembered: true });
+                }
+                take_tree(&git, &kept, &mut mended)?;
+                for m in &mended {
+                    git.stage_blob(&m.path, mode(&m.path), m.result.as_deref())?;
+                }
+                return Ok(Some(mended));
+            }
+            Some((_, Err(()))) => {
+                failed(&sides.iter().map(|s| s.path.as_str()).collect::<Vec<_>>());
+                return Ok(None);
+            }
+            None => {}
+        }
         // A command needs the tree as it will be, so everything else is
-        // staged first, and put back if what comes of it can't be trusted.
+        // staged first; all is put back once the check is queued.
         for m in &mended {
             git.stage_blob(&m.path, mode(&m.path), m.result.as_deref())?;
         }
         let made: Result<Vec<Mended>> = made_again.iter().map(|(s, command)| mend::regenerate(&git, &s.path, command)).collect();
         // Whatever else the commands touched is not part of the fix.
         git.discard_unstaged()?;
-        let made = made.and_then(|made| {
-            mended.extend(made);
-            self.passes(repo, &git.run(&["write-tree"])?, check.as_deref().unwrap(), &mended)
+        let queued = made.and_then(|_| {
+            let tree = git.run(&["write-tree"])?;
+            self.queue_check(repo, conflict, by.unwrap(), &tree, check.as_deref().unwrap())
         });
-        match made {
-            Ok(true) => Ok(Some(mended)),
-            other => {
-                if let Err(e) = other {
-                    eprintln!("{}: {e:#}", self.q.name);
-                }
-                git.unresolve(&sides.iter().map(|s| s.path.clone()).collect::<Vec<_>>())?;
-                Ok(None)
-            }
+        if let Err(e) = queued {
+            eprintln!("{}: {e:#}", self.q.name);
         }
+        git.unresolve(&sides.iter().map(|s| s.path.clone()).collect::<Vec<_>>())?;
+        Ok(None)
     }
 
-    /// Whether `check` passes on `tree` as the step in progress would
-    /// commit it.
-    fn passes(&self, repo: &str, tree: &str, check: &str, mended: &[Mended]) -> Result<bool> {
-        let paths: Vec<&str> = mended.iter().map(|m| m.path.as_str()).collect();
-        eprintln!("{}: running `{check}` on {} as settled without judgment…", self.q.name, paths.join(", "));
+    /// What `conflict` came to before, settled by `by`, and whether its
+    /// check passed: a tree git has since cleaned up is no answer.
+    fn kept_fix(&self, repo: &str, conflict: &str, by: &str) -> Result<Option<(String, std::result::Result<(), ()>)>> {
+        let kept = Store::open(&self.q.dir())?.fix(repo, conflict, by)?;
+        Ok(kept
+            .filter(|(tree, _)| self.git(repo).has_object(tree))
+            .map(|(tree, verdict)| (tree, verdict.map_err(|_| ()))))
+    }
+
+    /// Queue `check` on `tree`, `conflict` settled by the merge rules, to
+    /// run with the queue let go (see `pending`).
+    fn queue_check(&self, repo: &str, conflict: &str, by: String, tree: &str, check: &str) -> Result<()> {
         // The check needs a commit to stand on.
         let fix = self
             .git(repo)
             .run(&["commit-tree", tree, "-p", "HEAD", "-m", "choros: a fix made without judgment, for the check"])?;
-        let passed = self.q.check(repo, &fix, check)?.is_ok();
-        if !passed {
-            eprintln!("{}: it failed; the conflict goes on as it was", self.q.name);
-        }
-        Ok(passed)
+        self.queued.borrow_mut().push(Job {
+            repo: repo.to_string(),
+            what: String::new(),
+            task: Task::Check {
+                conflict: conflict.to_string(),
+                by,
+                tree: tree.to_string(),
+                commit: fix,
+                check: check.to_string(),
+            },
+        });
+        Ok(())
     }
 
     /// Finish the step whose conflict is settled, and record what settled
@@ -632,8 +788,8 @@ impl<'q, 'h> Work<'q, 'h> {
     }
 
     fn park(&mut self, n: u32, op: ParkOp, files: Vec<String>, on: String) -> Result<bool> {
-        let tried = self.conflict_tried;
-        self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on, tried });
+        let (tried, awaiting) = (self.conflict_tried, self.awaiting);
+        self.st.sets.get_mut(&n).unwrap().park = Some(Park { op, files, on, tried, awaiting });
         Ok(false)
     }
 
@@ -803,6 +959,7 @@ impl<'q, 'h> Work<'q, 'h> {
                         files: Vec::new(),
                         on: r,
                         tried: false,
+                        awaiting: false,
                     });
                 }
                 Some(r) => {
@@ -827,6 +984,7 @@ impl<'q, 'h> Work<'q, 'h> {
                             files: Vec::new(),
                             on: r,
                             tried: false,
+                            awaiting: false,
                         });
                     }
                 }
@@ -1062,6 +1220,7 @@ impl<'q, 'h> Work<'q, 'h> {
                         files,
                         on: full.clone(),
                         tried: self.conflict_tried,
+                        awaiting: self.awaiting,
                     });
                     // So the same set is the one parked when the pair
                     // meets again, whatever has landed on the other since.
@@ -1439,6 +1598,8 @@ impl<'q, 'h> Work<'q, 'h> {
     pub fn pass(&mut self, forge: &dyn Forge) -> Result<PassReport> {
         let mut report = PassReport::default();
         self.st.last_pass = Some(crate::state::now_secs());
+        // Whatever is still wanted is asked for again as the pass meets it.
+        self.st.pending.clear();
         let was_behind: BTreeSet<u32> =
             self.st.sets.keys().copied().filter(|n| graph::behind_in_stack(&self.st, *n).is_some()).collect();
         self.observe_prs(forge, &mut report)?;
@@ -1653,7 +1814,7 @@ impl<'q, 'h> Work<'q, 'h> {
     /// Whether to try `park`'s operation again though its inputs are the
     /// same: when asked to, or when no one has had a go at it yet.
     fn retries(&self, park: &Park) -> bool {
-        self.retries_parked() || (self.handler.is_some() && !park.tried)
+        self.retries_parked() || (self.handler.is_some() && !park.tried) || park.awaiting
     }
 
     pub fn unpark_conflicts(&mut self) {
@@ -1705,6 +1866,14 @@ fn agent_slot(st: &RepoState, rotate_after: u32) -> AgentSlot {
     }
 }
 
+/// Make each mended file what it is in `tree`.
+fn take_tree(git: &Git, tree: &str, mended: &mut [Mended]) -> Result<()> {
+    for m in mended {
+        m.result = git.rev_parse_any(&format!("{tree}:{}", m.path))?;
+    }
+    Ok(())
+}
+
 /// Only a session that was actually started is worth resuming next time.
 fn record_session(st: &mut RepoState, slot: &AgentSlot) {
     if !slot.fresh {
@@ -1726,7 +1895,7 @@ fn record_session(st: &mut RepoState, slot: &AgentSlot) {
 }
 
 /// Earlier resolutions that touched any of `files`, newest first.
-fn recorded_for(git: &Git, st: &RepoState, files: &[String]) -> Vec<String> {
+pub(crate) fn recorded_for(git: &Git, st: &RepoState, files: &[String]) -> Vec<String> {
     let wanted: BTreeSet<&String> = files.iter().collect();
     st.resolutions
         .iter()

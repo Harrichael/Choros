@@ -278,6 +278,29 @@ impl Git {
         self.run(&["rev-parse", &format!("{rev}^{{tree}}")])
     }
 
+    /// The merge or cherry-pick in progress, by what it brings together:
+    /// the trees of its two sides and of their base. Commit shas won't do,
+    /// as a pass makes the commits it builds on afresh, with new dates;
+    /// the same trees meet the same way every time.
+    pub fn conflict_key(&self) -> Result<String> {
+        const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let other = |r: &str| self.rev_parse(r).ok().flatten();
+        let (kind, other, bases) = if let Some(o) = other("CHERRY_PICK_HEAD") {
+            let parent = self.rev_parse(&format!("{o}^")).ok().flatten();
+            ("pick", o, parent.into_iter().collect::<Vec<_>>())
+        } else if let Some(o) = other("MERGE_HEAD") {
+            let bases = self.run(&["merge-base", "--all", "HEAD", &o]).unwrap_or_default();
+            ("merge", o, bases.lines().map(str::to_string).collect())
+        } else {
+            return Err(eyre!("no merge or cherry-pick in progress in {}", self.dir.display()));
+        };
+        let mut bases = bases.iter().map(|b| self.tree(b)).collect::<Result<Vec<_>>>()?;
+        if bases.is_empty() {
+            bases.push(EMPTY_TREE.to_string());
+        }
+        Ok(format!("{kind}:{}:{}:{}", self.tree("HEAD")?, self.tree(&other)?, bases.join(",")))
+    }
+
     /// Whether `rev` changes nothing: its tree is its parent's.
     pub fn is_empty_commit(&self, rev: &str) -> Result<bool> {
         let tree = |r: String| self.run(&["rev-parse", &format!("{r}^{{tree}}")]);

@@ -510,7 +510,8 @@ not symlinks, not submodules.
 
 It is all or nothing. If every file has an answer and the result can be
 trusted, the step goes on; otherwise the conflict goes, as git left it, to
-the agent or to you. Trusted means the repo's check passes on the result.
+the agent or to you. Trusted means the repo's check passes on the result
+(run with the queue let go: see *Slow work* below; the set waits meanwhile).
 The one thing taken without it is an answer this queue took before from a
 `union` rule or from Mergiraf: those follow from the three versions alone,
 and passed the check when first given. An answer the agent or a person
@@ -524,12 +525,38 @@ log N` lists it for the conflicts settled where landing-N now sits.
 `agent.auto_resolve` is off. It trusts a fix only once the repo's check passes
 on it; otherwise it parks, and keeps the fix and the check's output in
 `<trunk>/.choros-config/queues/<queue>/auto-resolve-<repo>.log`. Limits: one
-try per conflict, meaning the same operation on the same commits (a conflict
-parked with no one to ask, or past the day's runs, gets that try on a later
-pass; one already tried waits for its inputs to change);
-`agent.daily_runs` runs a day; `agent.timeout_minutes` a run. The agent and
-its check run under the queue's lock, so lands into the queue wait meanwhile.
-What it did goes to the daemon's log.
+try per conflict, meaning the same operation on the same content (see *Slow
+work* below; a conflict parked with no one to ask, or past the day's runs,
+gets that try on a later pass; one already tried waits for its inputs to
+change, or for `choros queue resolve`, which also forgets failed checks);
+`agent.daily_runs` runs a day; `agent.timeout_minutes` a run. What it did
+goes to the daemon's log.
+
+**Slow work runs with the queue let go.** A pass holds the queue's lock, and
+a repo's check or the resync agent can take most of an hour, which every
+land, sync and pass of the queue would otherwise wait out. So a pass never
+runs either. When a fix made without judgment needs its check, or the
+daemon's agent may have its go, the pass parks the set as *waiting* (not
+parked: no one needs to act), notes the job in `queue.db`, and goes on.
+Whoever ran the pass then runs the job unlocked: the check in the `_check`
+worktree, the agent in `<queue>/_resolve/<repo>`, a worktree of the sync
+clone where the conflict is met again from the same two commits. What comes
+of it is kept under the conflict's content (the trees of its two sides and
+their base: a pass makes its commits afresh, with new dates, but the trees
+stay the same): the whole tree that was checked, whether the check passed,
+and who made it (the agent, or the merge rules as they stand, each with the
+repo's check). The next pass, run straight after, meets the same conflict
+and takes that very tree, so a `regenerate` command that never makes the
+same bytes twice, or an agent that touched more than the conflicted files,
+still settles. An answer whose inputs moved on is never met again, so
+nothing has to confirm the queue stood still. The agent's one try is
+counted by the same content. `choros queue
+sync` runs the checks this way itself, and passes again; the agent's go is
+the daemon's. A land runs the checks its own steps ask for, unlocked, and
+tries the step again. Each go of the daemon's agent starts a fresh session,
+as sessions are kept per folder; it is shown how the same files were
+settled before. `choros queue resolve`, run by hand, still drives its agent
+or you in the sync clone with the lock held.
 
 What the daemon leaves parked, `choros status` shows, and `choros queue
 resolve <queue>` asks about, every time:

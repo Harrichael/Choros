@@ -83,7 +83,7 @@ pub fn how_long(secs: u64) -> String {
     }
 }
 
-const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "_check", "merge-head", crate::workspace::NO_QUEUE];
+const RESERVED: &[&str] = &[LANDING_DIR, "_sync", "_check", "_resolve", "merge-head", crate::workspace::NO_QUEUE];
 
 pub fn queues_dir(trunk: &Path) -> PathBuf {
     trunk.join(QUEUES_REL)
@@ -338,9 +338,47 @@ impl Queue {
     /// over between runs, and under a lock of its own rather than the
     /// queue's: a slow check holds up only other checks of the repo.
     pub fn check(&self, repo: &str, tip: &str, check: &str) -> Result<std::result::Result<(), String>> {
+        Ok(self.check_unless(repo, tip, check, || Ok(false))?.expect("never done"))
+    }
+
+    /// As `check`, unless `done` says, once the check's lock is held, that
+    /// someone already has: `None` then.
+    pub fn check_unless(
+        &self,
+        repo: &str,
+        tip: &str,
+        check: &str,
+        done: impl FnOnce() -> Result<bool>,
+    ) -> Result<Option<std::result::Result<(), String>>> {
         let lock = self.check_lock(repo)?;
         lock.lock()?;
-        let dir = self.dir().join("_check").join(repo);
+        if done()? {
+            return Ok(None);
+        }
+        let dir = self.worktree(repo, "_check", tip)?;
+        let wt = Git::owned(&dir);
+        let out = std::process::Command::new("sh")
+            .args(["-c", check])
+            .current_dir(&dir)
+            .output()
+            .map_err(|e| eyre!("running `{check}`: {e}"))?;
+        wt.reset_hard(tip)?;
+        if out.status.success() {
+            return Ok(Some(Ok(())));
+        }
+        Ok(Some(Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))))
+    }
+
+    /// A worktree of `repo`'s sync clone under `<queue>/<name>/`, kept at
+    /// one path, checked out (detached) at `at`, keeping what it ignores
+    /// (build output). Work in it leaves the sync clone, and so the
+    /// queue's lock, alone.
+    pub fn worktree(&self, repo: &str, name: &str, at: &str) -> Result<PathBuf> {
+        let dir = self.dir().join(name).join(repo);
         let wt = Git::owned(&dir);
         // A sync clone made again, or a trunk moved, leaves the worktree
         // pointing nowhere; it holds only build output, so start over.
@@ -354,23 +392,11 @@ impl Queue {
         if !dir.exists() {
             let sync = self.git(repo);
             sync.run(&["worktree", "prune"])?;
-            sync.run(&["worktree", "add", "--quiet", "--detach", dir.to_str().unwrap(), tip])?;
+            sync.run(&["worktree", "add", "--quiet", "--detach", dir.to_str().unwrap(), at])?;
         }
-        wt.run(&["checkout", "--quiet", "--force", "--detach", tip])?;
-        let out = std::process::Command::new("sh")
-            .args(["-c", check])
-            .current_dir(&dir)
-            .output()
-            .map_err(|e| eyre!("running `{check}`: {e}"))?;
-        wt.reset_hard(tip)?;
-        if out.status.success() {
-            return Ok(Ok(()));
-        }
-        Ok(Err(format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )))
+        wt.abort_in_progress()?;
+        wt.run(&["checkout", "--quiet", "--force", "--detach", at])?;
+        Ok(dir)
     }
 
     /// The title `set`'s PR opens with: the one given at land, else its
@@ -505,10 +531,12 @@ pub fn retire_if_orphaned(q: &Queue, st: &QueueState) -> Result<bool> {
     if dst.join("_queue").exists() || dst.join("_sync").exists() {
         return Err(eyre!("{} already holds an archived queue named {name}", dst.display()));
     }
-    // Only build output, and a worktree of the sync clone that moving it
-    // would orphan.
-    if q.dir().join("_check").exists() {
-        std::fs::remove_dir_all(q.dir().join("_check"))?;
+    // Only build output and the agent's scratch, in worktrees of the sync
+    // clone that moving it would orphan.
+    for scratch in ["_check", "_resolve"] {
+        if q.dir().join(scratch).exists() {
+            std::fs::remove_dir_all(q.dir().join(scratch))?;
+        }
     }
     if q.dir().join("_sync").exists() {
         std::fs::rename(q.dir().join("_sync"), dst.join("_sync"))?;

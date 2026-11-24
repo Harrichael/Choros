@@ -34,6 +34,8 @@ pub struct QueueStatus {
     pub lock: Option<queue::Holder>,
     /// When a pass last ran, in seconds since the epoch.
     pub last_pass: Option<u64>,
+    /// Slow work waiting to run with the queue let go.
+    pub pending: Vec<crate::pending::Job>,
 }
 
 #[derive(Serialize)]
@@ -229,6 +231,7 @@ pub fn queue_status(trunk: &Path, name: &str) -> Result<QueueStatus> {
         diffbase_park: st.diffbase.park.clone(),
         lock: q.holder(),
         last_pass: st.last_pass,
+        pending: st.pending.clone(),
     })
 }
 
@@ -296,11 +299,12 @@ pub fn prompt_token(cwd: &Path) -> String {
         let Ok(st) = Queue::open(&trunk, &name).and_then(|q| q.read_state()) else {
             continue;
         };
-        if st.diffbase.park.is_some()
-            || st
-                .sets
-                .values()
-                .any(|s| (s.is_open() && s.park.is_some()) || s.status == SetStatus::Closed)
+        // A park awaiting a pending job needs no one.
+        let awaiting = |c: &Option<crate::state::DiffbaseConflict>| c.as_ref().is_some_and(|c| c.awaiting);
+        if st.diffbase.park.as_ref().is_some_and(|p| !awaiting(&p.conflict))
+            || st.sets.values().any(|s| {
+                (s.is_open() && s.park.as_ref().is_some_and(|p| !p.awaiting)) || s.status == SetStatus::Closed
+            })
         {
             return "!resolve".into();
         }

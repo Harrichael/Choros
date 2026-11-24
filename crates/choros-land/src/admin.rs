@@ -13,10 +13,34 @@ use crate::workspace::{self, Returned};
 
 /// One pass now, in the foreground. With a handler, parked conflicts are
 /// retried and handed to it.
-pub fn sync(env: &Env, q: &Queue, handler: Handler<'_>) -> Result<PassReport> {
-    let retry = handler.is_some();
+///
+/// The checks the pass asks for then run with the queue let go (see
+/// `pending`), and another pass settles what they vouched for, for as long
+/// as there are new ones. The report is of them all.
+pub fn sync(env: &Env, q: &Queue, mut handler: Handler<'_>) -> Result<PassReport> {
+    let mut report = sync_once(env, q, handler.as_deref_mut(), true)?;
+    for _ in 0..crate::pending::ROUNDS {
+        let mut notes = Vec::new();
+        let ran = crate::pending::run(q, env.agent, None, &mut notes)?;
+        for note in notes {
+            eprintln!("{}: {note}", q.name);
+        }
+        if ran == 0 {
+            break;
+        }
+        report = report.then(sync_once(env, q, handler.as_deref_mut(), false)?);
+    }
+    let st = q.read_state()?;
+    report.parked.retain(|n| st.sets.get(n).is_some_and(|s| s.park.is_some()));
+    Ok(report)
+}
+
+fn sync_once(env: &Env, q: &Queue, handler: Handler<'_>, unpark: bool) -> Result<PassReport> {
+    let retry = handler.is_some() && unpark;
     let mut work = Work::begin(q, env.agent, handler, true)?.unwrap();
     if retry {
+        // Asked to try again, failed checks get another go too.
+        crate::store::Store::open(&q.dir())?.forget_failed_fixes()?;
         work.unpark_conflicts();
         let diverged: Vec<u32> = work
             .st

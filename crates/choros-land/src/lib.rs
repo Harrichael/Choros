@@ -17,6 +17,7 @@ pub mod instant;
 pub mod land;
 pub mod mend;
 pub mod opening;
+pub mod pending;
 pub mod queue;
 pub mod repos;
 pub mod state;

@@ -337,6 +337,9 @@ pub struct QueueState {
     /// When a pass last ran, in seconds since the epoch.
     #[serde(default)]
     pub last_pass: Option<u64>,
+    /// Slow work the last passes asked for, to be done with the lock let go.
+    #[serde(default)]
+    pub pending: Vec<crate::pending::Job>,
     /// From a one-repo queue's state.json; `read_state_json` moves them
     /// into `repos`.
     #[serde(default, skip_serializing)]
@@ -412,6 +415,9 @@ pub struct DiffbaseConflict {
     pub files: Vec<String>,
     /// The inputs that conflicted; when they change, the build is retried.
     pub on: String,
+    /// As a set's park: it waits on a pending job, so it is retried.
+    #[serde(default)]
+    pub awaiting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -596,6 +602,10 @@ pub struct Park {
     /// one could (a land, say) still gets the daemon's try.
     #[serde(default)]
     pub tried: bool,
+    /// It waits on a pending job (see `pending`), so the next pass tries
+    /// it again, whatever its inputs.
+    #[serde(default)]
+    pub awaiting: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

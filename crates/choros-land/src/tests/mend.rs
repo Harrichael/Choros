@@ -74,6 +74,34 @@ fn a_union_rule_settles_a_clash_without_the_agent() {
     assert_eq!(settled_by(&w, "README"), ["union"]);
 }
 
+/// The check a fix made without judgment needs runs with the queue let go.
+/// The pass parks the set as awaiting it, notes the job, and goes on; the
+/// check runs; the next pass meets the same fix and settles with its
+/// verdict. Here the check fails while anyone holds the queue's lock.
+#[test]
+fn a_mechanical_fix_is_checked_with_the_queue_let_go() {
+    let w = World::new();
+    let n = clash(&w, "README", "one\n", "two\n");
+    rule(&w, MergeRule { files: "README".into(), union: true, regenerate: None });
+    w.repos_toml("[app]\ncheck = \"test ! -s ../../lock\"\n");
+
+    let q = w.queue();
+    let mut auto = crate::auto_resolve::AutoResolve::new(w.trunk.clone(), QUEUE.into());
+    let mut work = crate::engine::Work::begin(&q, &w.agent, Some(&mut auto), true).unwrap().unwrap();
+    work.pass(&w.forge).unwrap();
+    work.save().unwrap();
+    drop(work);
+    let st = w.state();
+    assert!(st.sets[&n].park.as_ref().is_some_and(|p| p.awaiting), "it waits on its check");
+    assert!(matches!(st.pending[..], [crate::pending::Job { task: crate::pending::Task::Check { .. }, .. }]));
+
+    w.daemon_pass();
+
+    assert!(w.state().sets[&n].park.is_none());
+    assert_eq!(settled_by(&w, "README"), ["union"]);
+    assert!(w.state().pending.is_empty());
+}
+
 /// A fix no one judged stands only if the check passes on it. When it
 /// fails, the conflict goes on to the agent as it was.
 #[test]
@@ -258,6 +286,30 @@ fn regenerate_rules_make_files_again_from_both_sides() {
     );
     assert_eq!(w.file_at(&merge_head(&w), "stray.txt"), None);
     assert_eq!(settled_by(&w, "sum.txt"), ["regenerate"]);
+}
+
+/// A command that never makes the same bytes twice still settles: what
+/// lands is the very tree its check passed on, not a new run's.
+#[test]
+fn a_regenerated_file_that_differs_each_run_settles_as_checked() {
+    let w = World::new();
+    w.push_to_main("stamp.txt", "start\n");
+    rule(
+        &w,
+        MergeRule {
+            files: "stamp.txt".into(),
+            union: false,
+            regenerate: Some("od -An -N8 -tx8 /dev/urandom > stamp.txt".into()),
+        },
+    );
+    let (one, two) = (w.workspace("one"), w.workspace("two"));
+    w.commit(&one, "stamp.txt", "one\n");
+    w.land_with(&one, Some(vec![]), None).unwrap();
+    w.clash_beside(&two, writes("stamp.txt", "two\n"));
+
+    assert!(w.state().sets.values().all(|s| s.park.is_none()));
+    assert!(w.state().pending.is_empty());
+    assert_eq!(settled_by(&w, "stamp.txt"), ["regenerate"]);
 }
 
 /// A command that fails settles nothing: the conflict is as git left it,

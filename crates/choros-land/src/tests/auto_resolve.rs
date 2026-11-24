@@ -41,6 +41,41 @@ fn the_daemon_settles_a_clash_with_the_agent() {
     );
 }
 
+/// The agent, and the check on its fix, run with the queue let go, so no
+/// land or pass waits on them: here the check fails while anyone holds the
+/// queue's lock, and the agent notes whether anyone did.
+#[test]
+fn the_agent_and_its_check_run_with_the_queue_let_go() {
+    let w = World::new();
+    let n = clash(&w);
+    w.repos_toml("[app]\ncheck = \"test ! -s ../../lock\"\n");
+    *w.agent.fix.lock().unwrap() = Some("one and two\n".into());
+
+    w.daemon_pass();
+
+    assert!(w.state().sets[&n].park.is_none());
+    assert_eq!(*w.agent.locked.lock().unwrap(), [false]);
+}
+
+/// The fix the check passed on is the one that lands, whole: here the agent
+/// also writes a file outside the conflict, which the check needs.
+#[test]
+fn the_agents_whole_fix_is_what_lands() {
+    let w = World::new();
+    let n = clash(&w);
+    w.repos_toml("[app]\ncheck = \"test -e WIRED\"\n");
+    *w.agent.fix.lock().unwrap() = Some("one and two\n".into());
+    *w.agent.also.lock().unwrap() = Some(("WIRED".into(), "yes\n".into()));
+
+    w.daemon_pass();
+
+    let st = w.state();
+    assert!(st.sets[&n].park.is_none());
+    let mh = st.repos[REPO].merge_head.as_ref().unwrap();
+    assert_eq!(w.file_at(&mh.sha, "README").as_deref(), Some("one and two\n"));
+    assert_eq!(w.file_at(&mh.sha, "WIRED").as_deref(), Some("yes\n"));
+}
+
 /// A fix the check fails stays parked, with the fix and the check's output
 /// kept to look at; and the conflict had its one try, so the next pass
 /// leaves it be.

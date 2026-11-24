@@ -390,6 +390,12 @@ fn set_notes(s: &status::SetLine) -> Vec<String> {
             on = p.on,
             tip = s.tip,
         ));
+    } else if let Some(p) = s.park.as_ref().filter(|p| p.awaiting) {
+        notes.push(format!(
+            "waiting ({:?}) {}: a check or the resync agent runs on it with the queue let go",
+            p.op,
+            p.files.join(", ")
+        ));
     } else if let Some(p) = &s.park {
         notes.push(format!("! parked ({:?}) {}", p.op, p.files.join(", ")));
     } else if s.blocked {
@@ -421,6 +427,9 @@ fn queue_notes(q: &status::QueueStatus) -> Vec<String> {
     let mut notes = Vec::new();
     if let Some(h) = &q.lock {
         notes.push(format!("locked by {h}"));
+    }
+    for job in &q.pending {
+        notes.push(format!("pending, with the queue let go: {} for {}", job.waits_for(), job.what));
     }
     let since = q.last_pass.map(|t| choros_land::state::now_secs().saturating_sub(t));
     if since.is_some_and(|s| s >= STALE_PASS_SECS) {

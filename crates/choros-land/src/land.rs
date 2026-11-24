@@ -449,7 +449,14 @@ fn return_onto(env: &Env, q: &Queue, repo: &str, mh: &str, returned: &[workspace
     }
     let names: Vec<String> = returned.iter().map(|r| crate::state::branch(&r.queue, r.n)).collect();
     let what = format!("the commits of dropped {}", names.join(", "));
-    let tip = work.replay(repo, mh, &commits, &what)?.map_err(|files| {
+    let replayed = work.replay(repo, mh, &commits, &what)?;
+    // A fix made without judgment waits on its check; once it has run, the
+    // replay settles with it (or the check said no, and nothing waits).
+    if replayed.is_err() && work.awaiting {
+        run_checks(env, q, work)?;
+        return return_onto(env, q, repo, mh, returned);
+    }
+    let tip = replayed.map_err(|files| {
         eyre!(
             "{what} no longer apply onto {}'s merge head (conflicts in {}); they are kept in {} \
              under refs/choros/returned/",
@@ -598,6 +605,25 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// Rounds of checks a land runs for fixes made without judgment, before it
+/// takes what it has. Each round runs only checks not run before, but a
+/// queue that moves while they run (unlocked) can keep making new ones.
+const CHECK_ROUNDS: usize = 20;
+
+/// Run the checks `work`'s last step asked for, with the queue let go and
+/// nothing of the step saved, so the land can try it again with them known.
+fn run_checks(env: &Env, q: &Queue, work: Work<'_, '_>) -> Result<()> {
+    let jobs = work.take_queued();
+    let st = work.st.clone();
+    drop(work);
+    let mut notes = Vec::new();
+    crate::pending::run_jobs(q, &st, &jobs, env.agent, None, &mut notes)?;
+    for note in notes {
+        eprintln!("{}: {note}", q.name);
+    }
+    Ok(())
+}
+
 fn tree(git: &Git, commit: &str) -> Result<String> {
     git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
 }
@@ -690,6 +716,7 @@ fn land_fork(
     // go behind after all, with the files they clash in.
     let mut behind: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     let mut rounds = 0;
+    let mut check_rounds = 0;
     'round: loop {
         let mut work = Work::begin(q, env.agent, handler.as_deref_mut(), true)?.unwrap();
         work.ensure_repo(repo)?;
@@ -735,10 +762,23 @@ fn land_fork(
             };
             let tips: Vec<String> = spec.deps.iter().map(|(_, t)| t.clone()).collect();
             let what = crate::state::branch(&q.name, n);
-            let base = work
-                .build(repo, &main, &tips, &format!("the base of {what}"))?
+            let built = work.build(repo, &main, &tips, &format!("the base of {what}"))?;
+            // A fix made without judgment waits on its check: run it with
+            // the queue let go, and go round again to settle with it.
+            if built.is_err() && work.awaiting && check_rounds < CHECK_ROUNDS {
+                check_rounds += 1;
+                run_checks(env, q, work)?;
+                continue 'round;
+            }
+            let base = built
                 .map_err(|(_, files)| eyre!("the dependencies picked for {what} conflict with each other in: {}", files.join(", ")))?;
-            let tip = match work.replay(repo, &base, &own, &what)? {
+            let replayed = work.replay(repo, &base, &own, &what)?;
+            if replayed.is_err() && work.awaiting && check_rounds < CHECK_ROUNDS {
+                check_rounds += 1;
+                run_checks(env, q, work)?;
+                continue 'round;
+            }
+            let tip = match replayed {
                 Ok(t) => t,
                 // No one here to resolve in the sync clone (a land from inside a
                 // session): move the workspace onto the base instead, so the
@@ -915,6 +955,7 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
     check_landable(&git, &through)?;
     let head = git.head()?;
     let trials = RefCell::default();
+    let mut check_rounds = 0;
     loop {
         // No handler: a conflict here says what the commits need; it isn't
         // there to be resolved.
@@ -946,11 +987,28 @@ fn land_least(env: &Env, q: &Queue, ws: &Path, repo: &str, req: &LandRequest, ch
         };
         let mut touched = BTreeMap::new();
 
-        let first = match place(&mut work, &c, start.clone(), Lines::default(), &mut touched)? {
+        // A try that met a fix made without judgment counted it as failing
+        // until its check has run: run those with the queue let go, forget
+        // what the tries found, and go round again.
+        let placed = place(&mut work, &c, start.clone(), Lines::default(), &mut touched)?;
+        if work.has_queued() && check_rounds < CHECK_ROUNDS {
+            check_rounds += 1;
+            run_checks(env, q, work)?;
+            trials.borrow_mut().clear();
+            continue;
+        }
+        let first = match placed {
             Ok(p) => p,
             Err(why) => return Ok(Least::Fallback(why)),
         };
-        let chosen = match search(&mut work, &c, checker, &first, &mut touched)? {
+        let searched = search(&mut work, &c, checker, &first, &mut touched)?;
+        if work.has_queued() && check_rounds < CHECK_ROUNDS {
+            check_rounds += 1;
+            run_checks(env, q, work)?;
+            trials.borrow_mut().clear();
+            continue;
+        }
+        let chosen = match searched {
             Search::Found(p) => p,
             Search::Run(tip) => {
                 drop(work);

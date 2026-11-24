@@ -147,8 +147,50 @@ fn watch(trunk: &Path, name: &str, interval: Duration) {
     }
 }
 
-/// One pass of the queue; `false` when it was locked and `wait` was not.
+/// One pass of the queue, then the jobs it asked for, with the queue let
+/// go (see `choros_land::pending`), and another pass to settle what they
+/// found, for as long as they find something. `false` when the queue was
+/// locked and `wait` was not.
 fn pass(trunk: &Path, name: &str, wait: bool) -> Result<bool> {
+    // A pass that saved and then failed (GitHub unreachable, say) still
+    // asked for its jobs, and they don't need GitHub.
+    let passed = one_pass(trunk, name, wait);
+    if matches!(passed, Ok(false)) {
+        return Ok(false);
+    }
+    if let Err(e) = jobs(trunk, name) {
+        log(&format!("{name} @ {}: {e:#}", trunk.display()));
+    }
+    passed
+}
+
+/// The jobs the last pass asked for, then a pass to take up what they
+/// found, for as long as they find something.
+fn jobs(trunk: &Path, name: &str) -> Result<()> {
+    for _ in 0..choros_land::pending::ROUNDS {
+        // The pass may have retired the queue.
+        if !queue::list(trunk)?.iter().any(|n| n == name) {
+            break;
+        }
+        let q = Queue::open(trunk, name)?;
+        let claude = Claude::default();
+        let mut auto = AutoResolve::new(trunk.to_path_buf(), name.to_string());
+        let mut notes = Vec::new();
+        let agent = q.config.agent.resolver.auto_resolve.then_some(&mut auto);
+        let ran = choros_land::pending::run(&q, &claude, agent, &mut notes);
+        for note in notes.iter().chain(&auto.notes) {
+            log(&format!("{name}: {note}"));
+        }
+        // Whoever holds the queue now will pass it, or the next tick will.
+        if ran? == 0 || !one_pass(trunk, name, false)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// One pass of the queue; `false` when it was locked and `wait` was not.
+fn one_pass(trunk: &Path, name: &str, wait: bool) -> Result<bool> {
     // queue.toml is read when the queue is opened, and whoever held the
     // lock may have changed it (a diffbase added, say). So after a wait the
     // queue is opened afresh, and only a lock taken with no wait is used.

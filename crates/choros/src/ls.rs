@@ -158,7 +158,9 @@ fn landings_by_space(space: &Path) -> Vec<(std::path::PathBuf, String)> {
                 continue;
             }
             let ws = set.source.workspace.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-            let state = if set.park.is_some() {
+            let state = if set.park.as_ref().is_some_and(|p| p.awaiting) {
+                "waiting"
+            } else if set.park.is_some() {
                 "parked"
             } else if set.pr_base.is_some() {
                 "stacked"

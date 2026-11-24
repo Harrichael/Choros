@@ -59,6 +59,14 @@ const LAYOUT: &[&str] = &[
          repo TEXT NOT NULL, made TEXT NOT NULL, path TEXT NOT NULL,
          by TEXT NOT NULL, tool TEXT NOT NULL, remembered INTEGER NOT NULL, at INTEGER NOT NULL,
          PRIMARY KEY (repo, made, path)) STRICT;",
+    // A conflict (by `Git::conflict_key`) settled away from the queue's
+    // lock, by `by` (the agent, or the merge rules as they stood), and
+    // whether the check passed on the `tree` that came of it: read by any
+    // pass that meets the same conflict, which then takes that very tree.
+    "CREATE TABLE fixes (
+         repo TEXT NOT NULL, conflict TEXT NOT NULL, by_what TEXT NOT NULL,
+         passed INTEGER NOT NULL, tree TEXT NOT NULL, output TEXT NOT NULL, at INTEGER NOT NULL,
+         PRIMARY KEY (repo, conflict, by_what)) STRICT;",
 ];
 
 pub struct Store {
@@ -202,6 +210,7 @@ impl Store {
                 "next_n" => st.next_n = value.parse().wrap_err("next_n in queue.db")?,
                 "diffbase" => st.diffbase = parse::<DiffbaseState>(&value, "the diffbase")?,
                 "last_pass" => st.last_pass = value.parse().ok(),
+                "pending" => st.pending = parse(&value, "the pending jobs")?,
                 _ => {}
             }
         }
@@ -227,6 +236,7 @@ impl Store {
             ("next_n", st.next_n.to_string()),
             ("diffbase", serde_json::to_string(&st.diffbase)?),
             ("last_pass", st.last_pass.map(|t| t.to_string()).unwrap_or_default()),
+            ("pending", serde_json::to_string(&st.pending)?),
         ] {
             tx.execute(
                 &format!("INSERT INTO meta (key, value) VALUES (?1, ?2) {put} value = ?2 WHERE value <> ?2"),
@@ -397,23 +407,52 @@ impl Store {
             if m.remembered || matches!(m.by, By::Regenerate(_)) {
                 continue;
             }
-            tx.execute(
-                "INSERT OR REPLACE INTO resolutions (repo, path, base, ours, theirs, result, by, tool, at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    repo,
-                    m.path,
-                    blob(&sides.base),
-                    blob(&sides.ours),
-                    blob(&sides.theirs),
-                    m.result.as_deref().unwrap_or_default(),
-                    m.by.name(),
-                    m.by.tool(),
-                    at
-                ],
-            )?;
+            keep_resolution(&tx, repo, sides, m, at)?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// How `conflict` was settled by `by`, if it has been: the tree that
+    /// came of it, and `Err` with the check's output when it failed there.
+    pub fn fix(&self, repo: &str, conflict: &str, by: &str) -> Result<Option<(String, std::result::Result<(), String>)>> {
+        if layout_steps(&self.conn)? < LAYOUT.len() {
+            return Ok(None);
+        }
+        let mut found = self.conn.prepare(
+            "SELECT tree, passed, output FROM fixes WHERE repo = ?1 AND conflict = ?2 AND by_what = ?3",
+        )?;
+        let mut rows = found.query(params![repo, conflict, by])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let (tree, passed, output): (String, bool, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        Ok(Some((tree, if passed { Ok(()) } else { Err(output) })))
+    }
+
+    /// Forget every failed check of a fix, so each is checked again: a
+    /// check can fail for a reason that has passed (a network blip).
+    pub fn forget_failed_fixes(&mut self) -> Result<()> {
+        if layout_steps(&self.conn)? == LAYOUT.len() {
+            self.conn.execute("DELETE FROM fixes WHERE passed = 0", [])?;
+        }
+        Ok(())
+    }
+
+    pub fn keep_fix(
+        &mut self,
+        repo: &str,
+        conflict: &str,
+        by: &str,
+        tree: &str,
+        verdict: &std::result::Result<(), String>,
+    ) -> Result<()> {
+        let output = verdict.as_ref().err().map_or("", String::as_str);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fixes (repo, conflict, by_what, passed, tree, output, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![repo, conflict, by, verdict.is_ok(), tree, output, now_secs() as i64],
+        )?;
         Ok(())
     }
 
@@ -444,6 +483,25 @@ impl Store {
         })
         .collect()
     }
+}
+
+fn keep_resolution(tx: &rusqlite::Transaction, repo: &str, sides: &Sides, m: &Mended, at: i64) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO resolutions (repo, path, base, ours, theirs, result, by, tool, at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            repo,
+            m.path,
+            blob(&sides.base),
+            blob(&sides.ours),
+            blob(&sides.theirs),
+            m.result.as_deref().unwrap_or_default(),
+            m.by.name(),
+            m.by.tool(),
+            at
+        ],
+    )?;
+    Ok(())
 }
 
 fn blob(side: &Option<Side>) -> &str {
