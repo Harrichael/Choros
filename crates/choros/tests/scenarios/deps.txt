@@ -49,3 +49,23 @@ app → appq/landing-3, queued
     landing: $ROOT/trunk/.choros-config/queues/appq/landing/landing-3
     on appq/landing-1: its commits change what it wrote (a.txt)
     ahead of appq/landing-2; `true` passed without them
+
+# The queue drawn as far as its PRs, then one layer past them.
+$ choros queue appq --front
+appq (app) @ $ROOT/trunk
+* landing-2  front   write c (app)  #2
+| * landing-1  front   write a (app)  #1
+|/
+* main
+  (1 open set further back not shown)
+  ⇣ $ROOT/trunk/two (app) needs `choros repo sync`
+  ⇣ 2 other workspaces behind the merge head; each needs `choros repo sync` before it lands
+$ choros queue appq --front 1
+appq (app) @ $ROOT/trunk
+* landing-3  queued  replace a with b (app)
+| * landing-2  front   write c (app)  #2
+* | landing-1  front   write a (app)  #1
+|/
+* main
+  ⇣ $ROOT/trunk/two (app) needs `choros repo sync`
+  ⇣ 2 other workspaces behind the merge head; each needs `choros repo sync` before it lands

@@ -54,7 +54,7 @@ choros landing log N [--queue Q]
                                 each change made to landing-N, by a land or on its branch
                                 and who wrote it, and how often the queue has moved it
 $ choros queue drop
-usage: choros queue NAME [--landing] | queue -i [NAME] | queue ls [--all] | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue restore NAME N | queue doctor NAME | queue base NAME | queue base add|rm NAME REPO#N[,N…]…
+usage: choros queue NAME [--landing] [--front [N]] | queue -i [NAME] | queue ls [--all] | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue restore NAME N | queue doctor NAME | queue base NAME | queue base add|rm NAME REPO#N[,N…]…
 [exit 2]
 
 # From anywhere but a workspace that is behind, those that are behind are

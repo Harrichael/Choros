@@ -307,7 +307,7 @@ pub fn run_status(args: Vec<String>) -> Result<()> {
         return Ok(());
     }
     for q in report {
-        print_queue_status(&q, landings_only);
+        print_queue_status(&q, landings_only, None);
     }
     Ok(())
 }
@@ -443,20 +443,37 @@ const STALE_PASS_SECS: u64 = 10 * 60;
 
 /// A queue, its open sets drawn as a graph of what lands after what, and
 /// what needs doing about them, for `status` and `queue NAME`. With
-/// `landings_only`, just the sets.
-fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
+/// `landings_only`, just the sets. With `front`, only the sets with a PR
+/// and that many layers of sets after them.
+fn print_queue_status(q: &status::QueueStatus, landings_only: bool, front: Option<usize>) {
     let repos = if q.repos.is_empty() { "nothing landed yet".to_string() } else { q.repos.join(", ") };
     println!("{} ({repos}) @ {}", q.name, q.trunk.display());
     for note in queue_notes(q) {
         println!("  {note}");
     }
     // A merged set no longer holds anything back; JSON keeps it.
-    let open: BTreeMap<u32, &status::SetLine> =
+    let mut open: BTreeMap<u32, &status::SetLine> =
         q.sets.iter().filter(|s| s.state != "merged").map(|s| (s.n, s)).collect();
     let after: BTreeMap<u32, Vec<u32>> = open
         .iter()
         .map(|(n, s)| (*n, s.deps.iter().filter_map(|d| d.strip_prefix("landing-")?.parse().ok()).collect()))
         .collect();
+    let mut hidden = 0;
+    if let Some(layers) = front {
+        let mut shown: BTreeSet<u32> = open.values().filter(|s| s.pr.is_some()).map(|s| s.n).collect();
+        for _ in 0..layers {
+            let next: Vec<u32> = after
+                .iter()
+                .filter(|(n, deps)| !shown.contains(n) && deps.iter().any(|d| shown.contains(d)))
+                .map(|(n, _)| *n)
+                .collect();
+            shown.extend(next);
+        }
+        hidden = open.len() - shown.len();
+        open.retain(|n, _| shown.contains(n));
+    }
+    // The graph draws only the lanes between shown sets.
+    let after: BTreeMap<u32, Vec<u32>> = after.into_iter().filter(|(n, _)| open.contains_key(n)).collect();
     let width = open.keys().map(|n| format!("landing-{n}").len()).max().unwrap_or(0);
     let state_width = open.values().map(|s| s.state.len()).max().unwrap_or(0).max("queued".len());
     let columns = columns();
@@ -487,9 +504,12 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
             println!("{}", fit(&format!("{under}  {note}")));
         }
     }
-    let merged = q.sets.len() - open.len();
+    let merged = q.sets.len() - open.len() - hidden;
     if merged > 0 {
         println!("  ({merged} merged)");
+    }
+    if hidden > 0 {
+        println!("  ({} further back not shown)", count(hidden, "open set"));
     }
     if landings_only {
         return;
@@ -510,6 +530,27 @@ fn print_queue_status(q: &status::QueueStatus, landings_only: bool) {
     }
 }
 
+/// `choros queue NAME`'s arguments, flags in any order.
+struct Show<'a> {
+    name: &'a str,
+    landings_only: bool,
+    front: Option<usize>,
+}
+
+fn show_args<'a>(args: &[&'a str]) -> Option<Show<'a>> {
+    let mut show = Show { name: "", landings_only: false, front: None };
+    let mut args = args.iter().copied().peekable();
+    while let Some(a) = args.next() {
+        match a {
+            "--landing" => show.landings_only = true,
+            "--front" => show.front = Some(args.next_if(|n| n.parse::<usize>().is_ok()).map_or(0, |n| n.parse().unwrap())),
+            name if !name.starts_with('-') && show.name.is_empty() => show.name = name,
+            _ => return None,
+        }
+    }
+    (!show.name.is_empty() && !QUEUE_VERBS.contains(&show.name)).then_some(show)
+}
+
 /// Not queue names: one of these with its arguments missing is a mistyped
 /// command.
 const QUEUE_VERBS: [&str; 9] = ["new", "ls", "bind", "base", "sync", "resolve", "drop", "restore", "doctor"];
@@ -519,6 +560,10 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
     let tools = Tools::for_trunk(&trunk);
     let env = tools.env();
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(show) = show_args(&a) {
+        print_queue_status(&status::queue_status(&trunk, show.name)?, show.landings_only, show.front);
+        return Ok(());
+    }
     match a.as_slice() {
         ["-i" | "--interactive"] => crate::queue_tui::run(&trunk, None, &visible_here(&trunk)?, &env),
         ["-i" | "--interactive", name] | [name, "-i" | "--interactive"] => {
@@ -638,12 +683,8 @@ pub fn run_queue(args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        [name] | [name, "--landing"] | ["--landing", name] if !name.starts_with('-') && !QUEUE_VERBS.contains(name) => {
-            print_queue_status(&status::queue_status(&trunk, name)?, a.contains(&"--landing"));
-            Ok(())
-        }
         _ => usage(
-            "choros queue NAME [--landing] | queue -i [NAME] | queue ls [--all] \
+            "choros queue NAME [--landing] [--front [N]] | queue -i [NAME] | queue ls [--all] \
              | queue new [-i] NAME [--workspace PATH | --branch PATH] | queue sync [NAME] | queue resolve NAME | queue drop NAME N | queue restore NAME N | queue doctor NAME \
              | queue base NAME | queue base add|rm NAME REPO#N[,N…]…",
         ),

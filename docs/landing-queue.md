@@ -887,7 +887,9 @@ on a parked or closed set, a set it is known to clash with, a dirty landing
 folder) or name a set in another queue it waits for. Merged sets are
 counted, not drawn. Then come the diffbase and the workspaces that need a
 sync; `--landing` leaves those out, as does `choros queue NAME --landing`,
-which shows one queue.
+which shows one queue. `choros queue NAME --front` draws only the sets with
+a PR, draft or not; `--front N` adds N layers of the sets after them, so
+`--front 1` shows what opens next too. How many are left out is counted.
 
 `choros status --json` is the same report for tools, merged sets included:
 `{"queues": [{trunk, name, repos, sets, needs_sync, diffbase,

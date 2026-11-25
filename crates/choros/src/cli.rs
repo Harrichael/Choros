@@ -129,7 +129,8 @@ QUEUES (anywhere in a trunk; narrowed to where you are)
                                     landing queues and their sets; --prompt prints one token
                                     (⇣sync / !resolve) for shell prompts; --json gives the
                                     whole report as JSON, merged sets included
-    choros queue NAME               a queue's landing-sets, as `choros status` shows them
+    choros queue NAME [--front [N]] a queue's landing-sets, as `choros status` shows them;
+                                    --front only those with a PR, and N layers after them
     choros queue -i [NAME]          TUI: a queue's landing-sets; edit dependencies, drop, sync
     choros queue ls [--all]         each queue: its scope, repos, open sets, diffbase
     choros queue new [-i] NAME [--workspace PATH | --branch PATH]
