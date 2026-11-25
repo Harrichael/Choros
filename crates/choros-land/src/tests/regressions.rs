@@ -574,3 +574,30 @@ fn a_fork_on_one_of_a_clashing_pair_does_not_go_behind_the_other() {
 
     assert_eq!(w.state().sets[&3].deps, [Dep::Set(parked)]);
 }
+
+/// A clash settled the way the new base already has it leaves the replayed
+/// commit with nothing of its own. git won't conclude such a pick, and the
+/// set stayed parked however it was resolved; the commit is dropped as any
+/// other that changes nothing, and the rest of the set goes on.
+#[test]
+fn a_commit_a_resolution_empties_is_dropped_from_the_replay() {
+    let w = World::new();
+    let ws = w.workspace("ws");
+    w.commit(&ws, "a.txt", "a\n");
+    w.land_on_head(&ws).unwrap();
+    w.commit(&ws, "f.txt", "mine\n");
+    w.commit(&ws, "g.txt", "g\n");
+    w.land_on_head(&ws).unwrap();
+
+    w.push_onto(1, writes("f.txt", "the fix\n"));
+    assert_eq!(w.pass().parked, [2]);
+    let mut h = Scripted::default();
+    h.content.insert("f.txt".into(), "the fix\n".into());
+    w.resolve(&mut h);
+
+    let st = w.state();
+    assert!(st.sets[&2].park.is_none(), "{:?}", st.sets[&2].park);
+    assert_eq!(w.own_commits(2), 1);
+    assert_eq!(w.file_at(&st.sets[&2].tip, "f.txt").as_deref(), Some("the fix\n"));
+    assert_eq!(w.file_at(&st.sets[&2].tip, "g.txt").as_deref(), Some("g\n"));
+}

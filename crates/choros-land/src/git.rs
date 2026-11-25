@@ -494,7 +494,10 @@ impl Git {
     pub fn conclude(&self) -> Result<()> {
         match self.in_progress()? {
             Some(InProgress::CherryPick) => {
-                self.run(&["cherry-pick", "--continue"])?;
+                // `cherry-pick --continue` refuses a pick the resolution left
+                // empty, whatever the pick was started with; as in
+                // `cherry_pick`, the caller decides what empty means.
+                self.run(&["commit", "--allow-empty", "--no-edit"])?;
             }
             Some(InProgress::Merge) => {
                 self.run(&["commit", "--no-edit"])?;
