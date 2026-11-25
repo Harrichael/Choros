@@ -196,6 +196,7 @@ fn one_pass(trunk: &Path, name: &str, wait: bool) -> Result<bool> {
     // queue is opened afresh, and only a lock taken with no wait is used.
     let (q, lock) = loop {
         let q = Queue::open(trunk, name)?;
+        Work::prefetch(&q)?;
         if let Some(lock) = q.try_lock()? {
             break (q, lock);
         }

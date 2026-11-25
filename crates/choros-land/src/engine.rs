@@ -192,9 +192,7 @@ impl<'q, 'h> Work<'q, 'h> {
         handler: Handler<'h>,
         wait: bool,
     ) -> Result<Option<Self>> {
-        for repo in q.read_state()?.repos.keys() {
-            q.prefetch(repo)?;
-        }
+        Self::prefetch(q)?;
         let lock = if wait {
             q.lock()?
         } else {
@@ -204,6 +202,15 @@ impl<'q, 'h> Work<'q, 'h> {
             }
         };
         Self::locked(q, agent, handler, lock).map(Some)
+    }
+
+    /// Fetch each repo with the queue's lock let go, for `locked` to take.
+    /// Whoever takes the lock themselves must call this before.
+    pub fn prefetch(q: &Queue) -> Result<()> {
+        for repo in q.read_state()?.repos.keys() {
+            q.prefetch(repo)?;
+        }
+        Ok(())
     }
 
     /// As `begin`, with the queue's lock already held.
