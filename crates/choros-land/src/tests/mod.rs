@@ -7,6 +7,7 @@ mod auto_resolve;
 mod branches;
 mod deps;
 mod diffbase;
+mod fetch;
 mod invariants;
 mod mend;
 mod regressions;

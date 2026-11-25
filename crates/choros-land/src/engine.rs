@@ -184,7 +184,7 @@ pub struct Work<'q, 'h> {
 }
 
 impl<'q, 'h> Work<'q, 'h> {
-    /// Lock, recover the sync clones, fetch. `None` when `wait` is false and
+    /// Fetch, lock, recover the sync clones. `None` when `wait` is false and
     /// someone else holds the queue.
     pub fn begin(
         q: &'q Queue,
@@ -192,6 +192,9 @@ impl<'q, 'h> Work<'q, 'h> {
         handler: Handler<'h>,
         wait: bool,
     ) -> Result<Option<Self>> {
+        for repo in q.read_state()?.repos.keys() {
+            q.prefetch(repo)?;
+        }
         let lock = if wait {
             q.lock()?
         } else {
@@ -208,7 +211,8 @@ impl<'q, 'h> Work<'q, 'h> {
         let st = q.read_state()?;
         for repo in st.repos.keys() {
             q.recover(repo)?;
-            q.fetch(repo)?;
+            let pending = st.sets.values().any(|s| s.pending.is_some() && s.repo() == repo);
+            q.take_fetched(repo, pending)?;
         }
         let mut work = Work {
             q,

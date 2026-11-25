@@ -1,8 +1,11 @@
 //! A queue on disk: where its files live, its lock, its sync clone, and the
 //! worktree its checks run in.
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use choros_core::choros::{ARCHIVE_REL, CONFIG_DIR, LANDING_DIR, QUEUES_REL};
 use choros_core::{agent, git as core_git, registry};
@@ -18,6 +21,8 @@ pub struct Queue {
     pub trunk: PathBuf,
     pub name: String,
     pub config: QueueConfig,
+    /// When this command last fetched each repo; see `prefetch`.
+    fetched: RefCell<BTreeMap<String, Instant>>,
 }
 
 /// Held for the duration of one short step; dropping it unlocks.
@@ -113,6 +118,7 @@ impl Queue {
             trunk: trunk.to_path_buf(),
             name: name.to_string(),
             config: state::read_config(&dir.join("queue.toml"))?,
+            fetched: RefCell::default(),
         })
     }
 
@@ -161,6 +167,7 @@ impl Queue {
             trunk: trunk.to_path_buf(),
             name: name.to_string(),
             config,
+            fetched: RefCell::default(),
         };
         store::create(&dir)?;
         queue.write_state(&queue.read_state()?)?;
@@ -447,6 +454,153 @@ impl Queue {
     pub fn fetch(&self, repo: &str) -> Result<()> {
         self.git(repo).fetch("origin", &[])
     }
+
+    /// Fetch origin without the queue's lock, so the network wait holds no
+    /// one up. What it sees goes to `refs/choros/fetched/`, not to
+    /// `origin/*`: the queue's steps read `origin/*`, and must not see it
+    /// move under them. `take_fetched`, under the lock, moves it over.
+    ///
+    /// Each command fetches at its start; its later steps reuse that fetch
+    /// while it is recent. The queue's own changes reach `origin/*` through
+    /// its own pushes, so a fetch only learns what others did, and a pass
+    /// that hears of a merge fetches for itself. A fetch another process
+    /// began while this one waited for it is as fresh as one of our own.
+    pub fn prefetch(&self, repo: &str) -> Result<()> {
+        let git = self.git(repo);
+        if !git.dir().exists() {
+            return Ok(());
+        }
+        if self.fetched.borrow().get(repo).is_some_and(|at| at.elapsed() < FETCH_FRESH) {
+            return Ok(());
+        }
+        let asked = millis_now();
+        let lock = self.fetch_lock(repo)?;
+        lock.lock()?;
+        let record = self.dir().join(format!("fetched-{repo}.json"));
+        if read_fetched(&record).is_some_and(|f| f.began >= asked) {
+            self.fetched.borrow_mut().insert(repo.to_string(), Instant::now());
+            return Ok(());
+        }
+        let began = millis_now();
+        let before = git.refs_under(ORIGIN)?;
+        // Atomic: a fetch cut off halfway must not leave refs from two
+        // fetches. No FETCH_HEAD: a locked step may be fetching here too.
+        git.remote(&[
+            "fetch",
+            "--quiet",
+            "--prune",
+            "--atomic",
+            "--no-write-fetch-head",
+            "origin",
+            &format!("+refs/heads/*:{FETCHED}*"),
+        ])?;
+        let fetched = Fetched {
+            began,
+            taken: false,
+            before,
+        };
+        write_fetched(&record, &fetched)?;
+        self.fetched.borrow_mut().insert(repo.to_string(), Instant::now());
+        Ok(())
+    }
+
+    /// Move what the last `prefetch` saw into `origin/*`, ref by ref, unless
+    /// the queue itself moved that ref after the fetch began. Its own push
+    /// is newer than what the fetch saw, and taking the fetch's would undo
+    /// it. The caller holds the queue's lock.
+    ///
+    /// A fetch still running is left for a later step to take, unless the
+    /// caller `must_see_origin`: a push journalled but never confirmed is
+    /// settled by what origin holds, and a stale answer would put back a
+    /// tip origin already moved past. Then it fetches here, under the lock.
+    pub fn take_fetched(&self, repo: &str, must_see_origin: bool) -> Result<()> {
+        let git = self.git(repo);
+        let lock = self.fetch_lock(repo)?;
+        // A process another thread is starting holds a copy of the lock for
+        // a moment; a fetch holds it for seconds. Only the fetch is waited out.
+        let mut tries = 0;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if tries < 25 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryLockError::WouldBlock) if must_see_origin => return self.fetch(repo),
+                Err(TryLockError::WouldBlock) => return Ok(()),
+                Err(TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+        let record = self.dir().join(format!("fetched-{repo}.json"));
+        let Some(mut fetched) = read_fetched(&record).filter(|f| !f.taken) else {
+            return Ok(());
+        };
+        let staged = git.refs_under(FETCHED)?;
+        let now = git.refs_under(ORIGIN)?;
+        let branches: BTreeSet<&String> = staged.keys().chain(fetched.before.keys()).collect();
+        let mut lines = String::new();
+        for branch in branches {
+            let (was, is, seen) = (fetched.before.get(branch), now.get(branch), staged.get(branch));
+            if was != is || is == seen {
+                continue;
+            }
+            let name = format!("{ORIGIN}{branch}");
+            match (seen, is) {
+                (Some(seen), Some(is)) => lines.push_str(&format!("update {name} {seen} {is}\n")),
+                (Some(seen), None) => lines.push_str(&format!("create {name} {seen}\n")),
+                (None, Some(is)) => lines.push_str(&format!("delete {name} {is}\n")),
+                (None, None) => {}
+            }
+        }
+        // Refs git won't take as given must not stop every step that follows:
+        // a plain fetch gets origin/* right instead.
+        let taken = git.update_refs_stdin(&lines);
+        fetched.taken = true;
+        write_fetched(&record, &fetched)?;
+        if taken.is_err() {
+            self.fetch(repo)?;
+        }
+        Ok(())
+    }
+
+    fn fetch_lock(&self, repo: &str) -> Result<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir().join(format!("fetch-{repo}.lock")))?)
+    }
+}
+
+const ORIGIN: &str = "refs/remotes/origin/";
+const FETCHED: &str = "refs/choros/fetched/";
+
+/// How long a command's fetch stays good enough for its later steps.
+const FETCH_FRESH: Duration = Duration::from_secs(30);
+
+/// What `origin/*` was as a `prefetch` began, for `take_fetched` to tell
+/// the queue's own later pushes from what the fetch brought.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Fetched {
+    /// Milliseconds since the epoch.
+    began: u64,
+    taken: bool,
+    before: BTreeMap<String, String>,
+}
+
+fn read_fetched(record: &Path) -> Option<Fetched> {
+    serde_json::from_str(&std::fs::read_to_string(record).ok()?).ok()
+}
+
+fn write_fetched(record: &Path, fetched: &Fetched) -> Result<()> {
+    let tmp = record.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(fetched)?)?;
+    std::fs::rename(&tmp, record)?;
+    Ok(())
+}
+
+fn millis_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// git's rerere keys a remembered answer on the clashing lines alone, so it

@@ -51,6 +51,8 @@ folder has been archived and no set is open (to
     queue.toml      # settings (hand-editable)
     queue.db        # graph + bookkeeping (engine-owned SQLite; a queue that kept these in state.json is moved over the next time it is locked)
     lock            # flock target; holds who has it (pid, command, since) while they do
+    fetch-<repo>.lock    # one fetch of origin at a time, outside the queue lock
+    fetched-<repo>.json  # what origin/* was as the last such fetch began
 ```
 
 A command kept waiting for the lock names its holder and for how long, and
@@ -409,7 +411,8 @@ otherwise hang the pass, and every land behind its lock, for hours.
 0. **Recover.** If the sync clone has a rebase, cherry-pick or merge in
    progress, abort it and `reset --hard`. Complete or roll back the journalled
    operation in `queue.db`.
-1. **Observe.** Fetch. For each open PR: merged → mark merged, keep its final
+1. **Observe.** Take the fetch made before the lock (see *Fetching with
+   the queue let go*). For each open PR: merged → mark merged, keep its final
    tip; closed unmerged → park the set *and its whole subtree* (out of the
    merge head) awaiting a decision; reopened → unpark.
 2. **External pushes.** If a set's remote tip has moved past its recorded tip
@@ -557,6 +560,20 @@ tries the step again. Each go of the daemon's agent starts a fresh session,
 as sessions are kept per folder; it is shown how the same files were
 settled before. `choros queue resolve`, run by hand, still drives its agent
 or you in the sync clone with the lock held.
+
+**Fetching with the queue let go.** A fetch of origin can take most of a
+minute, and a land takes the lock several times. So each step fetches
+before it takes the lock, into `refs/choros/fetched/`, and once it holds the
+lock moves that into `origin/*` ref by ref. The steps read only `origin/*`,
+so nothing moves under them. A ref the queue itself pushed after the fetch
+began is left alone: its push is newer than what the fetch saw. A command
+fetches at its start, so a `choros queue sync` typed after a push sees it,
+and its later steps reuse that fetch for 30 seconds; the queue's own
+pushes reach `origin/*` as they are made, so a fetch only learns what
+others did. A fetch another process began while this one waited for it
+counts as its own. A pass that hears of a merge still fetches under the
+lock, and so does a step that must confirm a push a crash left unconfirmed
+while someone else is fetching.
 
 What the daemon leaves parked, `choros status` shows, and `choros queue
 resolve <queue>` asks about, every time:

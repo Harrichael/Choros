@@ -1,6 +1,7 @@
 //! Git as the engine needs it: detached-HEAD replays and merges that report
 //! conflicts instead of failing, and pushes guarded by an explicit lease.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -163,8 +164,14 @@ impl Git {
 
     /// Point each ref at its commit, in one git process.
     pub fn update_refs(&self, refs: &[(String, &str)]) -> Result<()> {
+        let lines: String = refs.iter().map(|(name, sha)| format!("update {name} {sha}\n")).collect();
+        self.update_refs_stdin(&lines)
+    }
+
+    /// `git update-ref --stdin`: every line applies, or none does.
+    pub fn update_refs_stdin(&self, lines: &str) -> Result<()> {
         use std::io::Write;
-        if refs.is_empty() {
+        if lines.is_empty() {
             return Ok(());
         }
         let args = ["update-ref", "--stdin"];
@@ -175,10 +182,26 @@ impl Git {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
-        let lines: String = refs.iter().map(|(name, sha)| format!("update {name} {sha}\n")).collect();
         child.stdin.take().unwrap().write_all(lines.as_bytes())?;
         let out = child.wait_with_output()?;
         self.finish(&args, out).map(|_| ())
+    }
+
+    /// Every ref under `prefix` (which ends in `/`), by the rest of its
+    /// name. A symbolic ref (`origin/HEAD`) is left out.
+    pub fn refs_under(&self, prefix: &str) -> Result<BTreeMap<String, String>> {
+        let out = self.run(&["for-each-ref", "--format=%(objectname) %(symref) %(refname)", prefix])?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let mut parts = l.splitn(3, ' ');
+                let (sha, symref, name) = (parts.next()?, parts.next()?, parts.next()?);
+                if !symref.is_empty() {
+                    return None;
+                }
+                Some((name.strip_prefix(prefix)?.to_string(), sha.to_string()))
+            })
+            .collect())
     }
 
     pub fn has_merges(&self, base: &str, tip: &str) -> Result<bool> {
