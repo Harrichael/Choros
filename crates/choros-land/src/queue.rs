@@ -403,6 +403,9 @@ impl Queue {
         }
         wt.abort_in_progress()?;
         wt.run(&["checkout", "--quiet", "--force", "--detach", at])?;
+        // Output that another tree ignored, and `at`'s doesn't, would be
+        // stray files here.
+        wt.run(&["clean", "--quiet", "-fd"])?;
         Ok(dir)
     }
 

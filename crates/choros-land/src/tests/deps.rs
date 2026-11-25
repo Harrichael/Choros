@@ -464,3 +464,23 @@ fn a_land_that_needs_the_set_it_would_go_ahead_of_goes_behind_it() {
     assert_eq!(st.sets[&4].deps, [Dep::Set(2)]);
     assert_eq!(st.sets[&2].deps, [Dep::Set(1)]);
 }
+
+/// The check's checkout is kept between runs for its build output. Output a
+/// tree ignores is left for the next check, but a tree that doesn't ignore
+/// it gets none of it: here a check that refuses stray files passes on a
+/// land on main, after an earlier land, whose tree ignores `out/`, left
+/// some there.
+#[test]
+fn a_check_sees_no_output_its_tree_does_not_ignore() {
+    let w = World::new();
+    w.repos_toml(
+        "[app]\ncheck = 'test -z \"$(git ls-files --others --exclude-standard)\" && mkdir -p out && touch out/x'\n",
+    );
+    let one = w.workspace("one");
+    w.commit(&one, ".gitignore", "out/\n");
+    w.land_plain(&one).unwrap();
+    let two = w.workspace("two");
+    w.commit(&two, "b.txt", "b\n");
+
+    w.land_req(&w.request(&two, Deps::Picked(vec![])), None).unwrap();
+}
