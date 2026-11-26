@@ -27,14 +27,31 @@ pub fn output_limited(cmd: Command, limit: Duration) -> Result<Output> {
 }
 
 /// `cmd`'s output, or `None` when it ran past `limit` and was killed.
-pub fn output_within(mut cmd: Command, limit: std::time::Duration) -> Result<Option<std::process::Output>> {
-    use std::io::Read;
+pub fn output_within(cmd: Command, limit: std::time::Duration) -> Result<Option<std::process::Output>> {
+    output_within_fed(cmd, None, limit)
+}
+
+/// As `output_within`, with `input` on its stdin: an argument has a size
+/// limit (E2BIG), and a prompt can outgrow it.
+pub fn output_within_fed(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    limit: std::time::Duration,
+) -> Result<Option<std::process::Output>> {
+    use std::io::{Read, Write};
     use std::process::Stdio;
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    // Written as it runs, as the output is drained, so neither side waits
+    // on the other's full pipe.
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     // Drained as it runs, so a chatty child never blocks on a full pipe.
     let drain = |r: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -91,6 +108,18 @@ fn stop(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Input far past an argument's size limit reaches the child whole.
+    #[test]
+    fn a_large_input_reaches_the_child_whole() {
+        let input = vec![b'x'; 4 << 20];
+        let mut wc = Command::new("wc");
+        wc.arg("-c");
+        let out = output_within_fed(wc, Some(input), Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), (4 << 20).to_string());
+    }
 
     /// A run past its limit is stopped; one within it is read whole.
     #[test]

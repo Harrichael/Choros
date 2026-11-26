@@ -1276,7 +1276,7 @@ impl ConflictHandler for Interactive {
 fn drive(brief: &ConflictBrief) -> Result<AgentSlot> {
     let mut cmd = agent::claude_on(Path::new("claude"), brief, brief.session);
     cmd.args(["--model", brief.model]).args(agent::TOOL_ARGS);
-    cmd.arg(agent::driven_conflict_prompt(brief));
+    cmd.arg(agent::driven_prompt_arg(brief)?);
     cmd.status()?;
     Ok(brief.session.clone())
 }

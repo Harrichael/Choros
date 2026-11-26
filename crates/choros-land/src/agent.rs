@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use choros_core::process::output_within;
+use choros_core::process::output_within_fed;
 use color_eyre::eyre::{Result, eyre};
 
 pub struct ConflictBrief<'a> {
@@ -93,8 +93,9 @@ impl Claude {
         let mut cmd = claude_on(&self.bin, brief, session);
         cmd.args(["-p", "--output-format", "json", "--model", brief.model]);
         cmd.args(TOOL_ARGS);
-        cmd.arg(conflict_prompt(brief));
-        output_within(cmd, brief.timeout)?.ok_or_else(|| {
+        // On stdin: the conflict's paths and earlier answers can outgrow
+        // an argument.
+        output_within_fed(cmd, Some(conflict_prompt(brief).into_bytes()), brief.timeout)?.ok_or_else(|| {
             eyre!("the resync agent ran past {} minutes and was stopped", brief.timeout.as_secs() / 60)
         })
     }
@@ -167,6 +168,26 @@ pub fn conflict_prompt(brief: &ConflictBrief) -> String {
 }
 
 /// For someone resolving by hand in the resync agent's session.
+/// The prompt to open Claude Code with for `brief`, as an argument, since
+/// its stdin is the user's terminal. A brief too long for one (E2BIG) is
+/// written into the clone's git folder, where `git add` can't reach it, and
+/// the prompt points there.
+pub fn driven_prompt_arg(brief: &ConflictBrief) -> Result<String> {
+    const ARG_ROOM: usize = 64 * 1024;
+    let prompt = driven_conflict_prompt(brief);
+    if prompt.len() <= ARG_ROOM {
+        return Ok(prompt);
+    }
+    let git_dir = crate::git::Git::owned(brief.dir).run(&["rev-parse", "--absolute-git-dir"])?;
+    let file = Path::new(&git_dir).join("choros-brief.md");
+    std::fs::write(&file, prompt)?;
+    Ok(format!(
+        "A conflict is in progress here while {}. Its brief is too long to give here: read all of {} first.",
+        brief.operation,
+        file.display()
+    ))
+}
+
 pub fn driven_conflict_prompt(brief: &ConflictBrief) -> String {
     let mut p = format!(
         "A conflict is in progress here while {}.\n\
@@ -268,15 +289,49 @@ mod tests {
         assert!(claude.resolve(&brief(&broken)).is_err());
     }
 
+    /// A brief too long for an argument reaches the user's session whole,
+    /// by a file `git add` can't take into the repo.
+    #[test]
+    fn a_brief_too_long_for_an_argument_goes_by_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = Command::new("git").args(["init", "--quiet"]).current_dir(dir.path()).status().unwrap();
+        assert!(ok.success());
+        let files: Vec<String> = (0..20_000).map(|i| format!("src/pkg/file-{i}.ts")).collect();
+        let session = AgentSlot { id: "s".into(), fresh: false };
+        let brief = ConflictBrief {
+            dir: dir.path(),
+            operation: "building appq/merge-head",
+            files: &files,
+            recorded: &[],
+            sides: &[],
+            session: &session,
+            model: "opus",
+            timeout: Duration::from_secs(10),
+            user_claude_md: true,
+        };
+
+        let arg = driven_prompt_arg(&brief).unwrap();
+
+        let file = dir.path().join(".git/choros-brief.md");
+        assert!(arg.contains(&file.canonicalize().unwrap().display().to_string()), "{arg}");
+        assert!(arg.len() < 1024);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), driven_conflict_prompt(&brief));
+    }
+
     /// With `agent.user_claude_md = false` the agent runs without your own
     /// CLAUDE.md, whose rules are for your sessions, not its job; and its
-    /// prompt says to use git.
+    /// prompt, on stdin, says to use git.
     #[test]
     fn the_agent_can_be_kept_from_your_claude_md() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("claude");
         let args = dir.path().join("args");
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", args.display())).unwrap();
+        let prompt = dir.path().join("prompt");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat > {}\n", args.display(), prompt.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let session = AgentSlot { id: "s".into(), fresh: true };
         let brief = ConflictBrief {
@@ -294,6 +349,7 @@ mod tests {
         Claude { bin }.resolve(&brief).unwrap();
         let args = std::fs::read_to_string(&args).unwrap();
         assert!(args.lines().any(|a| a == "--setting-sources=project,local"), "{args}");
-        assert!(args.contains("You may and should use git"), "{args}");
+        let prompt = std::fs::read_to_string(&prompt).unwrap();
+        assert!(prompt.contains("You may and should use git"), "{prompt}");
     }
 }
